@@ -69,13 +69,46 @@ jobs:
             exit 1
           fi
 
-      # --specpath/--workpath 指到 build/ 下，仓库根只留 dist/，路径干净
+      # 不赌 PyInstaller 的 tkinter 钩子：hostedtoolcache 的 Python 与 python.org 安装包
+      # 的 tcl/tk 目录布局不同，钩子可能一个文件都不收，exe 会在启动阶段（还没进我们的
+      # 代码）就抛 FileNotFoundError: Tcl data directory ... _tcl_data not found；
+      # --windowed 下这异常看不见也等不到退出。这里显式把 tcl/tk 数据加进包，并在找不到
+      # 目录时直接失败并打印布局，别让它拖到自检步骤才暴露。
       - name: 打包成单文件 exe
         shell: bash
         run: |
+          PYROOT=$(python -c "import sys, os; print(os.path.dirname(sys.executable))")
+          echo "python root: $PYROOT"
+          # 硬判据：Tcl 数据目录里有 init.tcl，Tk 数据目录里有 tk.tcl。
+          # 不用 ls 通配 —— 那样会把 tclstub86.lib 之类的文件当成目录误收（本地实测踩过）。
+          EVAL=$(python - <<'PY'
+          import os, sys
+          root = os.path.dirname(sys.executable)
+          base = root.count(os.sep)
+          def find(fname):
+              for dp, dns, fns in os.walk(root):
+                  if dp.count(os.sep) - base > 3:
+                      continue
+                  if fname in fns:
+                      return dp
+              return ""
+          print(find("init.tcl"))
+          print(find("tk.tcl"))
+          PY
+          )
+          TCLDIR=$(echo "$EVAL" | sed -n 1p)
+          TKDIR=$(echo "$EVAL" | sed -n 2p)
+          if [ -z "$TCLDIR" ] || [ -z "$TKDIR" ]; then
+            echo "::error::在这份 Python 里找不到 init.tcl / tk.tcl（TCLDIR=$TCLDIR TKDIR=$TKDIR）"
+            find "$PYROOT" -maxdepth 3 -name "*.tcl" | head -20
+            exit 1
+          fi
+          echo "Tcl 数据目录 = $TCLDIR"
+          echo "Tk  数据目录 = $TKDIR"
           python -m PyInstaller --noconfirm --clean \
             --onefile --windowed --name "$APP_NAME" \
             --distpath dist --workpath build/work --specpath build \
+            --add-data "$TCLDIR;_tcl_data" --add-data "$TKDIR;_tk_data" \
             llama_gui.py
           ls -la dist
 
