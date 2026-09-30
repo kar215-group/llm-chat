@@ -40,6 +40,7 @@ jobs:
   build:
     name: 在 Windows 上打包
     runs-on: windows-latest
+    timeout-minutes: 10        # 万一哪一步挂住，最多烧 10 分钟就红，不会拖到六小时
     steps:
       - name: 取代码
         uses: actions/checkout@v4
@@ -76,13 +77,30 @@ jobs:
             llama_gui.py
           ls -la dist
 
-      # 这一步是"产物到底能不能跑"的判定：冻结模式下会检查配置路径落在 exe 同目录、
-      # 内置服务商是否种入。--windowed 的 exe 退出码照样能拿到，非 0 即失败。
-      - name: 自检打包产物
+      # 两道自检：源码级那道只跑 Python 代码，不可能挂住；exe 那道才真正验证"这份打包
+      # 产物能不能跑"。--windowed 的 exe 是 GUI 子系统程序，在 CI 的 Session 0 里用 bash
+      # 直接调用会卡在管道等待上（2026-09-30 实测：构建成功、这一步挂到被取消），
+      # 所以必须用 PowerShell 的 Start-Process -Wait 显式等它退出并取退出码。
+      - name: 自检 · 源码级（模拟冻结）
         shell: bash
         run: |
-          ./dist/$APP_NAME.exe --selfcheck
-          test -s dist/$APP_NAME.exe
+          python - <<PY
+          import sys
+          sys.frozen = True
+          sys.executable = r"dist/$APP_NAME.exe"
+          sys.path.insert(0, ".")
+          from llm_console.ui.app import selfcheck
+          sys.exit(selfcheck())
+          PY
+          test -s "dist/$APP_NAME.exe"
+
+      - name: 自检 · 真跑 exe
+        shell: powershell
+        run: |
+          $p = Start-Process -FilePath "dist\$env:APP_NAME.exe" -ArgumentList "--selfcheck" `
+               -Wait -PassThru
+          Write-Host "exe --selfcheck 退出码 = $($p.ExitCode)"
+          if ($p.ExitCode -ne 0) { Write-Error "打包产物自检失败"; exit 1 }
 
       - name: 组发布包（exe + README 一起打包成 zip）
         shell: bash
