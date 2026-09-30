@@ -140,8 +140,10 @@ python -m PyInstaller --noconfirm --clean --onefile --windowed --name llm-chat \
 - **不需要配任何 secret**：建 Release 用的是工作流自带的 `GITHUB_TOKEN`（`permissions: contents: write`）。
 - **tag 去掉 `v` 后必须等于 `llm_console/core/config.py` 里的 `APP_VERSION`**，不一致流水线直接失败，
   免得 Release 标着新版本、里面装的是旧 exe。发新版时先改 `APP_VERSION` 再打 tag。
-- 构建环境固定在 `Python 3.14 + PyInstaller 6.21.0`（与本地验证过的那次一致）；
-  换版本请重新跑一次 `--selfcheck` 确认。
+- 构建环境：`windows-latest` + **Python 3.12** + PyInstaller 6.21.0。
+  别改成 3.14 —— GitHub 镜像里那份 hostedtoolcache 的 3.14.7 **没装全 Tcl**（只有 `tk9.0`
+  的壳、没有 `init.tcl`），打出的 exe 启动即报 `Tcl data directory ... not found`。
+  构建步骤会先定位 `init.tcl` / `tk.tcl`，找不到就当场失败，不会把坏包推上 Release。
 
 ## 第三方与许可
 

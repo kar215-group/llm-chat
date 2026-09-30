@@ -34,8 +34,13 @@ concurrency:
 
 env:
   APP_NAME: llm-chat
-  # 与本机验证过的那次构建保持一致；换版本请重新跑一遍 --selfcheck
-  PY_VERSION: "3.14"
+  # ⚠ 别用 3.14：GitHub windows-latest 的 hostedtoolcache Python 3.14.7 **没装全 Tcl**
+  # （整个 x64/tcl 树里只有三个 pkgIndex.tcl，没有 init.tcl，只留了 tk9.0 的壳），
+  # 用它打出来的 exe 启动即 FileNotFoundError: Tcl data directory ... _tcl_data not found。
+  # 这与 --collect-all/--add-data 都无关：源文件在 runner 上根本不存在。
+  # 换版本前先跑一次本流水线的"打包成单文件 exe"步骤——它会先定位 init.tcl / tk.tcl，
+  # 找不到就直接失败并列出目录，不会把坏包推到 Release 上。
+  PY_VERSION: "3.12"
   PYINSTALLER_VERSION: "6.21.0"
 
 jobs:
