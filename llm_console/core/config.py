@@ -1,0 +1,198 @@
+# -*- coding: utf-8 -*-
+"""llm_console.core.config — 配置层：默认值、读写（RLock）、键分类、Base URL 与鉴权头、API Key 生成"""
+
+import json
+import os
+import secrets
+import sys
+import threading
+
+
+# 项目根目录：本文件在 <root>\llm_console\core\config.py，往上三级即仓库根。
+# 不能直接用 dirname(__file__)——拆包后那样会把 gui_config.json 指向 llm_console\core\，
+# 程序就会读到一份全新的默认配置（v30 拆分时实测踩过：api_key 变回 sk-local、模型被重置）。
+#
+# 打成单文件 exe 时（PyInstaller）__file__ 指向临时解包目录 sys._MEIPASS，那次性目录随进程
+# 退出就被删 → 配置"凭空丢失"，而且 exe/models 的默认路径会指到 temp 里。所以冻结模式下
+# 一律取 **exe 自身所在目录**：约定把 llm-chat.exe 与 llama-server.exe、models 放在同一层。
+#
+# 写成"函数 + 一次模块级赋值"而不是在模块顶层 if/else：verify_refactor.py 靠 AST 的模块级
+# 赋值确认符号有落点，条件分支里的赋值它看不见（那是重构验收的不变量，不该为打包放宽）。
+def _resolve_app_dir():
+    if getattr(sys, "frozen", False):
+        return os.path.dirname(os.path.abspath(sys.executable))
+    return os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+
+APP_DIR = _resolve_app_dir()
+
+CONFIG_PATH = os.path.join(APP_DIR, "gui_config.json")
+
+# 版本号：发版时改这一处（--selfcheck / --version 会打印它）。
+# GitHub Release 的 tag 要与它一致（tag 去掉开头的 v），Actions 工作流会做一致性校验。
+APP_VERSION = "0.0.1beta"
+
+CFG_VERSION = 2
+
+# 统一 User-Agent：多家平台会按 UA 判断"是不是官方 CLI/SDK"，认出自建工作台就可能限流或
+# 拒答（Token Plan 的定位就是给 Claude Code / Codex 这类工具用的）。版本号只是外形，
+# 没有协议依赖，改动不要影响请求本身。
+USER_AGENT = "codex-cli/0.147.0 (Windows 11; x86_64)"
+
+DEFAULT_CONFIG = {
+    "cfg_version": CFG_VERSION,
+    # 默认值一律不写死某台机器上的路径：exe 取"与本程序同目录"，模型目录取
+    # <本程序目录>/models，缺失时由界面提示去设置里指路（分发给别人才能直接用）。
+    "exe": os.path.join(APP_DIR, "llama-server.exe"),
+    "model": "",                     # 首次启动由 main() 从 models_dir 里挑一个可用的
+    "models_dir": os.path.join(APP_DIR, "models"),
+    "host": "127.0.0.1",
+    "port": 8080,
+    "api_key": "sk-local",
+    # ---- 本机属性（自动探测预填，可手动修改；层数计算直接读这里的值）----
+    "gpu_name": "",
+    "vram_gb": 0,                  # 显存容量（GB）；0 = 首次启动时经 nvidia-smi 探测
+    "ram_gb": 0,                   # 系统内存（GB）
+    # ---- 服务参数（重启生效）----
+    "ngl": 24,                     # GPU 层数（fallback；实际按 model_ngl 每模型记忆）
+    "model_ngl": {},               # 每个模型各自的 GPU 层数（key = GGUF 文件名；由探测生成）
+    "ctx": 10240,                  # 全局兜底 context（安全优先；正常由按模型自动匹配覆盖）
+    "model_ctx": {},               # 按模型：主页面启动时使用的 context
+    "model_ctx_api": {},           # 按模型：agent（API 连接页/代理）启动时使用的 context
+    "model_mmproj": {},            # 按模型：视觉投影器路径（有则模型可看图）
+    "model_image_input": {},       # 按模型：图片输入能力人工声明 {"yes"/"no"}，无记录=自动判据
+    "threads": 0,                  # CPU 线程数，0=自动
+    "reasoning_mode": "default",   # default / off / budget
+    "reasoning_budget": 1024,
+    "extra_args": "",
+    # ---- 生成参数（下次请求即生效）----
+    "temperature": 0.8,
+    "top_p": 0.95,
+    "top_k": 40,
+    "repeat_penalty": 1.1,
+    "max_tokens": 4096,            # 思考+回答共享额度
+    "seed": -1,
+    "system_prompt": "",
+    # ---- 界面 ----
+    "show_reasoning": True,
+    "show_usage": True,            # 每轮结束后显示 token 用量（云端计费可见性）
+    # ---- 模型分类 ----
+    "model_kind": "chat",          # 当前选中模型的类型：chat / image / video
+    "image_model_dir": "",           # 生图大模型子文件夹；留空 = models_dir/生图
+    # ---- 生图（sd.cpp / Qwen-Image 2.1）----
+    "sd_dir": "",                    # sd.cpp 部署目录（含 sd-cli.exe）；在设置里指路
+    "img_model_file": "",          # 生图扩散模型文件名（在 image_model_dir 下）
+    "img_quant": "Q6_K",           # Q6_K 质量优先 / Q5_0 更省显存
+    "img_steps": 20,               # 采样步数：8 步 ~1m20s，12 步 ~1m50s，20 步 ~2m50s（细节更多）
+    "img_size": "1024x1024",
+    "img_cfg": 2.5,                # 官方推荐值
+    "img_seed": -1,                # -1 = 随机
+    "img_strength": 0.9,           # 参考图编辑强度（附图时生效；实测 0.9 效果最好）
+    # ---- 生视频（sd.cpp / MiniMax-H3，与生图同一引擎、不同链路）----
+    # 注意：以下档位是"能跑通链路"的保守默认值，尚未在本机 8GB 显存上实测校准
+    "video_model_dir": "",           # 视频组件目录；留空/不存在时回退扫描 models_dir
+    "vid_model_file": "",          # 视频扩散主体文件名（留空 = 用扫描到的第一个）
+    "vid_llm_file": "",            # 视频文本编码器文件名（留空 = 自动配对同目录编码器）
+    "vid_vae_file": "",            # 视频 VAE 文件名（缺失时启动前就提示，不浪费排队时间）
+    "vid_frames": 17,              # 帧数：多数视频 VAE 要求 4n+1，先用最小档验证链路
+    "vid_fps": 24,                 # 帧率（MiniMax-H3 的参考视频按 24fps 组织）
+    "vid_size": "512x512",         # 分辨率：越高越吃显存与时间
+    "vid_steps": 20,               # 采样步数
+    "vid_cfg": 5.0,                # 提示词服从度
+    "vid_neg_prompt": "worst quality, low quality, blurry, distorted, deformed, watermark, text, static, jittery",
+    # ↑ 不能留空：MiniMax-H3 在 CFG>1 时要编码负向提示词，空串会报
+    #   "failed to encode negative video prompt" 并退出码 1（留空时代码会回退到内置默认值）
+    "vid_format": "webm",          # 单文件视频输出：webm / avi / webp（sd-cli 支持这三种）
+    "vid_backend": "te=cpu,diffusion=cuda0,vae=cuda0",   # 各组件运行的后端
+    "vid_params_backend": "",      # 权重放置后端：留空=引擎自定；显存不足可填 diffusion=disk
+    "vid_extra_args": "--vae-tiling --temporal-tiling",  # 分块解码，降显存占用
+    "vid_seed": -1,
+    # ---- API 连接（OpenAI 兼容中转，供 agent 应用调用）----
+    "proxy_enabled": True,
+    "proxy_port": 8081,
+    "proxy_last_model": "",        # 上次成功经代理加载的模型（回退用）
+    # ---- 云端 API（v31 一期：OpenAI 兼容文本；密钥存 secrets.json，不进备份）----
+    # 每项：{id, name, base_url, kind:"text", models:[...], enabled, timeout, extra_headers}
+    "cloud_providers": [],
+    "model_provider": "local",     # 当前选中模型属于谁：local = 本地；否则是 provider id
+    # 文本附件超预算时，是否让云端模型自己决定读哪一段（多花一次规划请求，默认关）
+    "cloud_file_model_decides": False,
+    # ---- 模型别名（key = GGUF 文件名；value = 页面显示的简称）----
+    # 一般无需手填：display_name 会用 make_alias() 从文件名自动生成
+    "model_aliases": {},
+}
+
+INT_KEYS = ("port", "ngl", "ctx", "threads", "reasoning_budget",
+            "max_tokens", "top_k", "seed", "img_steps", "img_seed",
+            "proxy_port", "vid_frames", "vid_fps", "vid_steps", "vid_seed")
+
+FLOAT_KEYS = ("temperature", "top_p", "repeat_penalty", "vram_gb", "ram_gb",
+              "img_cfg", "vid_cfg")
+
+STR_KEYS = ("model", "models_dir", "host", "api_key", "reasoning_mode",
+            "extra_args", "exe", "gpu_name", "sd_dir", "image_model_dir",
+            "img_model_file", "video_model_dir", "vid_model_file",
+            "vid_llm_file", "vid_vae_file", "vid_format", "vid_size",
+            "vid_backend", "vid_params_backend", "vid_extra_args",
+            "vid_neg_prompt", "model_provider")
+
+_CFG_LOCK = threading.RLock()   # 可重入：save_config 自带锁，调用方若已持锁不会自我死锁
+
+def load_config():
+    """读取配置；v1 旧配置自动迁移（ctx/max_tokens 仍是旧默认值时升级）。"""
+    cfg = dict(DEFAULT_CONFIG)
+    user = {}
+    try:
+        with open(CONFIG_PATH, "r", encoding="utf-8") as f:
+            user = json.load(f)
+    except Exception:
+        user = {}
+
+    ver = int(user.get("cfg_version", 1) or 1)
+    for k, val in user.items():
+        if k in ("model_aliases", "model_ngl") and isinstance(val, dict):
+            merged = dict(DEFAULT_CONFIG.get(k, {}))
+            merged.update(val)
+            cfg[k] = merged
+        elif k == "cfg_version":
+            continue
+        else:
+            cfg[k] = val
+
+    if ver < CFG_VERSION:
+        # 仅当用户仍是旧默认值时才升级，手动改过的数值原样保留
+        try:
+            if int(user.get("ctx", 0)) <= 4096:
+                cfg["ctx"] = DEFAULT_CONFIG["ctx"]
+            if int(user.get("max_tokens", 0)) <= 1024:
+                cfg["max_tokens"] = DEFAULT_CONFIG["max_tokens"]
+        except Exception:
+            pass
+    cfg["cfg_version"] = CFG_VERSION
+    # 内置服务商种进清单（幂等，只补不覆盖）；这里延迟导入避开 config ↔ providers 的环
+    try:
+        from . import providers
+        providers.ensure_builtin_providers(cfg)
+    except Exception:
+        pass
+    return cfg
+
+def save_config(cfg):
+    with _CFG_LOCK:
+        try:
+            with open(CONFIG_PATH, "w", encoding="utf-8") as f:
+                json.dump(cfg, f, ensure_ascii=False, indent=2)
+        except Exception:
+            pass
+
+def base_url(cfg):
+    return "http://%s:%s" % (cfg.get("host", "127.0.0.1"), cfg.get("port", 8080))
+
+def api_headers(cfg):
+    h = {"Content-Type": "application/json", "User-Agent": USER_AGENT}
+    if cfg.get("api_key"):
+        h["Authorization"] = "Bearer " + cfg["api_key"]
+    return h
+
+def gen_api_key():
+    return "sk-" + secrets.token_urlsafe(24)

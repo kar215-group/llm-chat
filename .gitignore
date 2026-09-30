@@ -1,0 +1,80 @@
+# ============================================================================
+# 白名单式忽略：默认连根目录下的**一切**都不入库，再逐项放行真正的项目内容。
+# 为什么反过来写：这个目录同时是 llama.cpp 引擎的部署目录，里面会长期堆着
+# 1GB+ 的 dll/exe、下载脚本来回的 zip、以及含密钥的配置文件。黑名单式一旦漏写
+# 一条就把权重或密钥推上去了；白名单式漏写的后果只是"少传了个文件"。
+# ============================================================================
+
+/*
+
+# ---- 项目内容（只有这些进仓库）----
+!/.gitignore
+!/.gitattributes
+!/.github/
+!/README.md
+!/llama_gui.py
+!/llm_console/
+!/tools/
+
+# ---- 打包产物（发布走 GitHub Releases，不进仓库历史）----
+/dist/
+/build/
+/out/
+*.spec
+
+# ---- 即使以后放开某个目录，下面这些也永远不进仓库 ----
+# Python 缓存
+__pycache__/
+*.py[cod]
+
+# 运行期配置与密钥：gui_config.json 里有本机路径，secrets.json 里是云端 API Key
+gui_config.json
+secrets.json
+*.env
+
+# 模型权重与媒体产物（都可从外部重新下载/生成）
+*.gguf
+*.safetensors
+*.ckpt
+*.pth
+*.pt
+*.onnx
+*.bin
+*.model
+*.zip
+*.7z
+*.tar
+*.tar.gz
+output/
+outputs/
+models/
+*.png
+*.jpg
+*.jpeg
+*.webp
+*.mp4
+*.webm
+*.log
+
+# 引擎二进制（llama.cpp / sd.cpp 的构建产物，按 README 自行下载或编译）
+*.dll
+*.exe
+*.so
+*.dylib
+
+# 编辑器与系统垃圾
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ---- 本机专用脚本与内部文档：显式点名，防止日后被误放行 ----
+/deploy_llamacpp.sh
+/start_server.bat
+/start_server.vbs
+/stop_server.bat
+/backup_project.py
+/AI-交接文档.md
+/性能审计与重构报告-v28.md
+/*_U级.md

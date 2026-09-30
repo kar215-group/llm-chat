@@ -1,0 +1,140 @@
+# =============================================================================
+# 自动打包 exe 并发布到 GitHub Releases
+#
+# 触发方式（两条，互不影响）：
+#   1) 手动：Actions → "打包 exe 并发布" → Run workflow
+#      → 只产出 artifact（可在本次 run 的 Artifacts 里下载 zip），不发 Release
+#   2) 打 tag：git tag v0.0.2beta && git push origin v0.0.2beta
+#      → 打包 + 自检 + 建 Release 并挂上 zip
+#      标签里带 - 或 alpha/beta/rc/preview/dev 字样的（v0.0.1beta、v1.1.0-rc1）自动标 prerelease
+#      若该 Release 已由人在网页上建好，只补传/覆盖 zip 附件，不会因"已存在"而报错
+#
+# 不需要在仓库 Settings 里配任何 secret：建 Release 用的是工作流自带的
+# GITHUB_TOKEN（靠上面的 permissions: contents: write 授权）。
+#
+# 版本一致性：tag 去掉开头的 v 之后必须等于 llm_console/core/config.py 里的
+# APP_VERSION，对不上直接失败——避免"Release 写着 v1.2.0、里面 exe 是 1.1.0"。
+# =============================================================================
+name: 打包 exe 并发布
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  APP_NAME: llm-chat
+  # 与本机验证过的那次构建保持一致；换版本请重新跑一遍 --selfcheck
+  PY_VERSION: "3.14"
+  PYINSTALLER_VERSION: "6.21.0"
+
+jobs:
+  build:
+    name: 在 Windows 上打包
+    runs-on: windows-latest
+    steps:
+      - name: 取代码
+        uses: actions/checkout@v4
+
+      - name: 装 Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PY_VERSION }}
+
+      - name: 装 PyInstaller
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install "pyinstaller==${{ env.PYINSTALLER_VERSION }}"
+
+      - name: 校验 tag 与 APP_VERSION 一致
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        run: |
+          TAG="${GITHUB_REF_NAME#v}"
+          SRC=$(grep -m1 '^APP_VERSION' llm_console/core/config.py | sed -E 's/.*"([^"]+)".*/\1/')
+          echo "tag=v$TAG  APP_VERSION=$SRC"
+          if [ "$TAG" != "$SRC" ]; then
+            echo "::error::版本号不一致：先改 config.py 的 APP_VERSION 再打 tag"
+            exit 1
+          fi
+
+      # --specpath/--workpath 指到 build/ 下，仓库根只留 dist/，路径干净
+      - name: 打包成单文件 exe
+        shell: bash
+        run: |
+          python -m PyInstaller --noconfirm --clean \
+            --onefile --windowed --name "$APP_NAME" \
+            --distpath dist --workpath build/work --specpath build \
+            llama_gui.py
+          ls -la dist
+
+      # 这一步是"产物到底能不能跑"的判定：冻结模式下会检查配置路径落在 exe 同目录、
+      # 内置服务商是否种入。--windowed 的 exe 退出码照样能拿到，非 0 即失败。
+      - name: 自检打包产物
+        shell: bash
+        run: |
+          ./dist/$APP_NAME.exe --selfcheck
+          test -s dist/$APP_NAME.exe
+
+      - name: 组发布包（exe + README 一起打包成 zip）
+        shell: bash
+        run: |
+          if [[ "$GITHUB_REF_NAME" == v* ]]; then VER="$GITHUB_REF_NAME"; else VER="v$(grep -m1 '^APP_VERSION' llm_console/core/config.py | sed -E 's/.*"([^"]+)".*/\1/')-dev"; fi
+          STAGE="llm-chat-$VER-windows-x64"
+          mkdir -p "out/$STAGE"
+          cp "dist/$APP_NAME.exe" "out/$STAGE/"
+          cp README.md "out/$STAGE/"
+          python -c "import shutil; shutil.make_archive('out/$STAGE', 'zip', 'out', '$STAGE')"
+          ls -la out
+
+      - name: 上传 artifact（任何触发都会留档）
+        uses: actions/upload-artifact@v4
+        with:
+          name: llm-chat-windows-x64-${{ github.sha }}
+          path: out/*.zip
+          retention-days: 30
+          if-no-files-found: error
+
+      - name: 建 Release 并挂 zip（仅 tag 触发）
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          cat > notes.md <<'MD'
+          ### 怎么装
+          1. 下载 zip，解压出 `llm-chat.exe`。
+          2. 推荐把它放到推理引擎旁边：`llm-chat.exe` + `llama-server.exe`（含其 dll）+ `models\*.gguf` 同一层目录。
+             放别处也行，第一次启动后在 设置 → 服务参数 里指路。
+          3. 双击运行。首次会在同目录生成 `gui_config.json`（配置）与 `secrets.json`（云端密钥）。
+
+          ### 注意
+          - 本 exe **未做代码签名**，Windows SmartScreen 第一次可能拦一下：点「更多信息」→「仍要运行」。
+          - 单文件 exe 启动时会往 `%TEMP%` 解一份运行库，属正常行为。
+          - 引擎与模型权重都不在安装包里，需自行下载，见 README。
+          MD
+          ARGS=()
+          # 预发布判定：带 - 或带 alpha/beta/rc/preview/dev 字样的都算（v0.0.1beta 这种没连字符也算）
+          case "$GITHUB_REF_NAME" in
+            *-*|*alpha*|*beta*|*rc[0-9]*|*preview*|*dev*) ARGS+=(--prerelease) ;;
+          esac
+          # Release 可能已经由人在网页上建好（草稿或预发布）：那就只补传附件，别报错
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            echo "Release $GITHUB_REF_NAME 已存在 → 只上传/覆盖 zip 附件"
+            gh release upload "$GITHUB_REF_NAME" out/*.zip --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" out/*.zip \
+              --title "LLM Chat $GITHUB_REF_NAME" \
+              --notes-file notes.md \
+              --verify-tag \
+              "${ARGS[@]}"
+          fi
+          echo "发布完成：$GITHUB_REF_NAME"

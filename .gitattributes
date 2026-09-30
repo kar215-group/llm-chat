@@ -1,0 +1,18 @@
+# 行尾统一：shell 脚本必须是 LF，否则在 git-bash / Linux 下会因为 "\r" 跑不起来
+*  text=auto
+*.sh   text eol=lf
+*.py   text
+*.md   text
+*.json text
+
+# 二进制（正常情况 .gitignore 已经把它们挡在外面，这里只是兜底）
+*.gguf        binary
+*.safetensors binary
+*.dll         binary
+*.exe         binary
+*.png         binary
+*.jpg         binary
+*.webp        binary
+*.mp4         binary
+*.webm        binary
+*.zip         binary
