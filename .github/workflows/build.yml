@@ -28,7 +28,9 @@ permissions:
 
 concurrency:
   group: build-${{ github.ref }}
-  cancel-in-progress: true
+  # 发布类流水线不能"后来者掐前一个"：2026-09-30 那次 run 显示 cancelled，
+  # 就是我在它还在跑的时候又推了一次同名标签，被这条策略自己取消了。
+  cancel-in-progress: false
 
 env:
   APP_NAME: llm-chat
@@ -94,13 +96,18 @@ jobs:
           PY
           test -s "dist/$APP_NAME.exe"
 
-      - name: 自检 · 真跑 exe
+      # ⚠ 这一步里**不能出现非 ASCII 字符**（连注释也不行）：Actions 把 run 脚本写成
+      # UTF-8 无 BOM 的临时 .ps1，而 Windows PowerShell 5.1 按系统 ANSI 码页读它，
+      # 中文会变成乱码并把字符串引号/大括号吃掉 → ParserError，脚本根本没跑到 exe
+      # （2026-09-30 那次失败就是这样）。要中文说明就写在 YAML 注释里（bash 步骤不受影响）。
+      - name: Selfcheck (run the packaged exe)
         shell: powershell
         run: |
-          $p = Start-Process -FilePath "dist\$env:APP_NAME.exe" -ArgumentList "--selfcheck" `
-               -Wait -PassThru
-          Write-Host "exe --selfcheck 退出码 = $($p.ExitCode)"
-          if ($p.ExitCode -ne 0) { Write-Error "打包产物自检失败"; exit 1 }
+          $exe = "dist\$env:APP_NAME.exe"
+          if (-not (Test-Path $exe)) { Write-Error "missing $exe"; exit 1 }
+          $p = Start-Process -FilePath $exe -ArgumentList "--selfcheck" -Wait -PassThru
+          Write-Host "selfcheck exit code = $($p.ExitCode)"
+          if ($p.ExitCode -ne 0) { Write-Error "packaged exe selfcheck failed"; exit 1 }
 
       - name: 组发布包（exe + README 一起打包成 zip）
         shell: bash
