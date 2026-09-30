@@ -80,9 +80,9 @@ jobs:
           ls -la dist
 
       # 两道自检：源码级那道只跑 Python 代码，不可能挂住；exe 那道才真正验证"这份打包
-      # 产物能不能跑"。--windowed 的 exe 是 GUI 子系统程序，在 CI 的 Session 0 里用 bash
-      # 直接调用会卡在管道等待上（2026-09-30 实测：构建成功、这一步挂到被取消），
-      # 所以必须用 PowerShell 的 Start-Process -Wait 显式等它退出并取退出码。
+      # 产物能不能跑"。--windowed 的 exe 是 GUI 子系统程序，在 runner（Session 0）里
+      # 拿不到它的退出码（bash 直接调、PowerShell -Wait 都实测等不到，见下面注释），
+      # 所以判定改成"重定向到文件 + 读文件里的结论"，超时就把进程杀掉再判。
       - name: 自检 · 源码级（模拟冻结）
         shell: bash
         run: |
@@ -100,14 +100,32 @@ jobs:
       # UTF-8 无 BOM 的临时 .ps1，而 Windows PowerShell 5.1 按系统 ANSI 码页读它，
       # 中文会变成乱码并把字符串引号/大括号吃掉 → ParserError，脚本根本没跑到 exe
       # （2026-09-30 那次失败就是这样）。要中文说明就写在 YAML 注释里（bash 步骤不受影响）。
+      #
+      # 判定不依赖进程退出：runner 上拿不到 --windowed exe 的退出码（实测 -Wait 会一直等，
+      # 烧满 timeout-minutes 被掐），但自检输出早就写进重定向文件了。本地 cmd / git-bash
+      # 里它 2 秒就退，所以这个差异只在 CI 出现 —— 用"文件里有 SELFCHECK OK"当判据，
+      # 60 秒没退出就杀掉进程再读文件。
       - name: Selfcheck (run the packaged exe)
         shell: powershell
         run: |
           $exe = "dist\$env:APP_NAME.exe"
           if (-not (Test-Path $exe)) { Write-Error "missing $exe"; exit 1 }
-          $p = Start-Process -FilePath $exe -ArgumentList "--selfcheck" -Wait -PassThru
-          Write-Host "selfcheck exit code = $($p.ExitCode)"
-          if ($p.ExitCode -ne 0) { Write-Error "packaged exe selfcheck failed"; exit 1 }
+          $out = Join-Path $env:RUNNER_TEMP "selfcheck.out"
+          Remove-Item $out -ErrorAction SilentlyContinue
+          $p = Start-Process -FilePath $exe -ArgumentList "--selfcheck" -PassThru -RedirectStandardOutput $out
+          if (-not $p.WaitForExit(60000)) {
+            Write-Host "process did not exit within 60s; killing it and judging by captured output"
+            try { $p.Kill() | Out-Null; $p.WaitForExit(5000) | Out-Null } catch {}
+          }
+          Start-Sleep -Milliseconds 500
+          $txt = ""
+          if (Test-Path $out) { $txt = Get-Content $out -Raw }
+          Write-Host "--- selfcheck output ---"
+          Write-Host $txt
+          Write-Host "------------------------"
+          if ($txt -match "SELFCHECK OK") { exit 0 }
+          Write-Error "packaged exe selfcheck did not report OK"
+          exit 1
 
       - name: 组发布包（exe + README 一起打包成 zip）
         shell: bash
