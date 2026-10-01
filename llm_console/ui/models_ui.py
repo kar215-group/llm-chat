@@ -174,23 +174,23 @@ class ModelsMixin:
         self._update_model_label()
         self._render_status(self._server_alive_flag, self._server_ready_flag)
         if kind == "image":
-            self._append("\n[服务] 已选择生图模型：%s。；"
-                         "生图无需启动服务，直接发提示词即可，聊天请切回语言模型。\n" % disp, "meta")
+            self._append("\n[服务] 已选择生图模型：%s。无需启动服务，直接发提示词即可；"
+                         "聊天请切回语言模型。\n" % disp, "meta")
         elif kind == "video":
             missing = resolve_video_files(self.cfg)["missing"]
-            self._append("\n[服务] 已选择生视频模型：%s%s。"
-                         "生视频同样无需启动服务，直接发提示词即可；附图会作为参考图（Ref2VA），"
-                         "聊天请切回语言模型。\n"
+            self._append("\n[服务] 已选择生视频模型：%s%s。无需启动服务，直接发提示词即可；"
+                         "附图会作为首帧，聊天请切回语言模型。\n"
                          % (disp,
-                            "（链路还缺：%s，补齐后直接发提示词就能用）" % "、".join(missing)
+                            "（链路还缺：%s，补齐后即可用）" % "、".join(missing)
                             if missing else "")
                          , "meta")
         elif self._server_alive_flag:
-            self._append("\n[服务] 已选择模型：%s（GPU 层数 %d）。"
-                         "当前服务仍在运行原模型，点「重启服务」即可加载新模型。\n"
+            self._append("\n[服务] 已选择模型：%s（GPU 层数 %d）。服务仍在跑原模型，"
+                         "点「重启服务」即可加载。\n"
                          % (disp, current_ngl(self.cfg)), "meta")
         else:
-            self._append("\n[服务] 已选择模型：%s（GPU 层数 %d），点「启动服务」加载，状态变为 ● 运行中 后即可对话。\n"
+            self._append("\n[服务] 已选择模型：%s（GPU 层数 %d）。点「启动服务」加载，"
+                         "状态变 ● 运行中 后即可对话。\n"
                          % (disp, current_ngl(self.cfg)), "meta")
 
     def pick_cloud_model(self, pid, model, kind=None):
@@ -219,21 +219,22 @@ class ModelsMixin:
         key_note = ("" if secrets.has_api_key(pid)
                     else "（**还没填 API Key**：设置 → 云端模型 → 服务商与密钥 → 密钥）")
         if kind == providers.KIND_TEXT:
-            note = "无需启动服务，直接发消息即可；本地服务若仍在运行不受影响。"
+            note = "无需启动服务，直接发消息即可；不影响正在运行的本地服务。"
         else:
             what = "生图" if kind == providers.KIND_IMAGE else "生视频"
             if not providers.supports_media(p, kind):
-                note = ("这一条走的是服务商**原生**%s接口，而「%s」没有可用的原生接口地址——"
-                        "发出去之前会先拦下并说清楚缺什么。要出图/出片也可以直接在本地那组里选。"
-                        % (what, p.get("name") or pid))
+                note = ("「%s」没有可用的原生%s接口地址，发送前会拦下并说明缺什么；"
+                        "也可以改选本地那组。" % (p.get("name") or pid, what))
             elif kind == providers.KIND_VIDEO:
-                note = ("云端%s已经接通：提交异步任务 → 轮询 → 立即下载到本地"
-                        "（云端产物地址只活 24 小时）。**先建单后交付、按秒计费**，"
-                        "发送前会弹一次费用确认；参考图/首帧目前只有本地那条链路支持。" % what)
+                # 三条风险事实必须留着：先建单（提交即产生任务）、按秒计费、
+                # 开始运行后取消不掉。少任何一条用户都会以为"点停止生成就不花钱了"。
+                note = ("提交异步任务 → 轮询 → 下载到本地。先建单、按秒计费，"
+                        "开始运行后就取消不掉（发送前会确认一次费用）；"
+                        "参考图 / 首帧只有本地那条链路支持。")
             else:
-                note = ("云端%s已经接通：同步请求，出图后立即下载到本地（云端产物地址只活 24 小时）。"
-                        "参考图（图生图）目前只有本地那条链路支持。档位与存放目录在 "
-                        "设置 → 云端模型 → 生图 / 生视频。" % what)
+                note = ("同步出图后立即下载到本地（云端地址只活 24 小时）；"
+                        "参考图（图生图）只有本地那条链路支持。"
+                        "档位与存放目录在 设置 → 云端模型 → 生图 / 生视频。")
         self._append("\n[云端] 已选择 %s · %s%s。%s\n"
                      % (providers.short_of(model), p.get("name") or pid, key_note, note),
                      "meta")

@@ -241,12 +241,14 @@ class ChatMixin:
 
     def send_message(self):
         if self._busy or self._svc_busy or self._img_busy or self._vid_busy:
+            # 用"中止"而不是"取消"：云端任务进入运行态后取消不掉，「停止生成」在那边
+            # 只是"不再等它"（_cloud_cancel_task 会把实情说出来），这里别先给错承诺。
             if self._img_busy:
-                self._append("\n[提示] 生图进行中：可先点「停止生成」取消当前任务，"
-                             "或等完成后继续。\n", "meta")
+                self._append("\n[提示] 生图进行中：点「停止生成」中止当前任务，或等它完成。\n",
+                             "meta")
             elif self._vid_busy:
-                self._append("\n[提示] 生视频进行中：可先点「停止生成」取消当前任务，"
-                             "或等完成后继续。\n", "meta")
+                self._append("\n[提示] 生视频进行中：点「停止生成」中止当前任务，或等它完成。\n",
+                             "meta")
             return
         text = self.input.get("1.0", "end").strip()
         if not text:

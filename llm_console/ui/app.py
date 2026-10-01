@@ -166,25 +166,26 @@ class App(ChatMixin, ImageGenMixin, VideoGenMixin, ServiceMixin, ModelsMixin, Se
         name = display_name(self.cfg, self.cfg["model"])
         if self.cfg.get("model_kind") == "image":
             self._append("本地对话台已就绪。\n"
-                         "当前模型：%s —— 生图无需启动服务，直接在下方输入提示词发送即可。\n"
-                         "点击顶部模型名可切换模型；回车发送，Shift+回车换行。\n"
-                         "生成中可随时点「停止生成」。\n"
+                         "当前模型：%s —— 生图无需启动服务，直接发提示词即可。\n"
+                         "点顶部模型名切换模型；回车发送，Shift+回车换行；"
+                         "生成中可点「停止生成」。\n"
                          "────────────────────\n" % name, "meta")
         elif self.cfg.get("model_kind") == "video":
+            # 附图是**首帧**（-i/--init-img）：本机主体是 fl2va 变体，不是 Ref2VA，
+            # 旧文案写"参考图"是 v30.2 之前的说法（坑 42）。
             self._append("本地对话台已就绪。\n"
-                         "当前模型：%s —— 生视频同样无需启动服务，直接输入提示词发送即可；"
-                         "附图会作为参考图。\n"
-                         "出片耗时取决于显卡（默认档位 512×512 / 20 步，通常要几分钟），"
-                         "生成中可随时点「停止生成」。\n"
-                         "点击顶部模型名可切换模型；回车发送，Shift+回车换行。\n"
+                         "当前模型：%s —— 生视频同样无需启动服务，直接发提示词即可；"
+                         "附图会作为首帧。\n"
+                         "出片耗时取决于显卡与档位（通常几分钟）；生成中可点「停止生成」。\n"
+                         "点顶部模型名切换模型；回车发送，Shift+回车换行。\n"
                          "────────────────────\n" % name, "meta")
         else:
             self._append("本地对话台已就绪。\n"
-                         "当前模型：%s（语言模型）——点「启动服务」加载，"
-                         "状态变为 ● 运行中 后即可对话。\n"
-                         "点击顶部模型名可切换模型；回车发送，Shift+回车换行。\n"
-                         "生成中可随时点「停止生成」，已生成内容会保留。\n"
-                         "新放入模型文件夹的模型会被自动识别，并按显存自动计算 GPU 层数。\n"
+                         "当前模型：%s（语言模型）—— 点「启动服务」加载，"
+                         "状态变 ● 运行中 后即可对话。\n"
+                         "点顶部模型名切换模型；回车发送，Shift+回车换行；"
+                         "「停止生成」会保留已生成的内容。\n"
+                         "新放进模型目录的 .gguf 会被自动识别，并按显存算好 GPU 层数。\n"
                          "────────────────────\n" % name, "meta")
 
     def _build_inputbar(self):
@@ -391,17 +392,33 @@ class App(ChatMixin, ImageGenMixin, VideoGenMixin, ServiceMixin, ModelsMixin, Se
 
     # ---- 状态线程 ----
     def _status_loop(self):
+        probe_broken = False
         while not self._closing:
-            # 先做毫秒级本地进程检查：进程不在则无需（也避免）等待 HTTP 超时
-            if not server_process_alive():
-                alive, ready = False, False
-            else:
-                alive, ready = server_state(self.cfg)
-                # 同步"服务实际加载的模型"（外部 vbs 启动等场景也能对上）
-                if ready and self._serving_model is None:
-                    name = _query_serving_model(self.cfg)
-                    if name:
-                        self._serving_model = name
+            try:
+                # 先做毫秒级本地进程检查：进程不在则无需（也避免）等待 HTTP 超时
+                if not server_process_alive():
+                    alive, ready = False, False
+                else:
+                    alive, ready = server_state(self.cfg)
+                    # 同步"服务实际加载的模型"（外部 vbs 启动等场景也能对上）
+                    if ready and self._serving_model is None:
+                        name = _query_serving_model(self.cfg)
+                        if name:
+                            self._serving_model = name
+            except Exception as e:
+                # 判活现在是**硬抛**语义（进程表快照失败时不静默退回 tasklist，见
+                # core/server._probe_snapshot）：这里必须接住并说出来，否则常驻线程直接
+                # 死掉、状态灯冻在最后一个值上 —— 那才是最坏的静默失败。
+                # 只报一次然后退避到 30s，免得每 3 秒刷一条同样的话。
+                if not probe_broken:
+                    probe_broken = True
+                    self._sq.put(("note",
+                                  "[服务] 状态探测不可用（%s: %s）——状态灯暂停更新；"
+                                  "「启动/停止服务」仍可直接用。"
+                                  % (type(e).__name__, e)))
+                time.sleep(30)
+                continue
+            probe_broken = False
             self._sq.put(("status", alive, ready))
             time.sleep(3)
 

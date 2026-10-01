@@ -4,7 +4,7 @@
 # 触发方式（两条，互不影响）：
 #   1) 手动：Actions → "打包 exe 并发布" → Run workflow
 #      → 只产出 artifact（可在本次 run 的 Artifacts 里下载 zip），不发 Release
-#   2) 打 tag：git tag v0.0.2beta && git push origin v0.0.2beta
+#   2) 打 tag：git tag vX.Y.Z && git push origin vX.Y.Z
 #      → 打包 + 自检 + 建 Release 并挂上 zip
 #      标签里带 - 或 alpha/beta/rc/preview/dev 字样的（v0.0.1beta、v1.1.0-rc1）自动标 prerelease
 #      若该 Release 已由人在网页上建好，只补传/覆盖 zip 附件，不会因"已存在"而报错

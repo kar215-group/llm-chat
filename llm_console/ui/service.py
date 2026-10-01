@@ -108,7 +108,7 @@ class ServiceMixin:
         if self._svc_busy or self._server_alive_flag:
             return
         self._begin_svc()
-        self._append("\n[服务] 正在启动 %s（GPU 层数 %d，模型加载约需 10 秒~3 分钟，取决于模型大小）…\n"
+        self._append("\n[服务] 正在启动 %s（GPU 层数 %d），加载约需十几秒到几分钟…\n"
                      % (display_name(self.cfg, self.cfg["model"]), current_ngl(self.cfg)), "meta")
         ctx = ctx_for(self.cfg, agent=agent)
         kv = estimate_kv_gb(self.cfg, ctx=ctx)

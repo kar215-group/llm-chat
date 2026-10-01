@@ -19,14 +19,14 @@ OpenAI 兼容 API 收进同一个窗口，只用 Python 标准库 + Tkinter 写�
 | 生图 | 本地走 sd.cpp 引擎，文生图 + 参考图编辑，产物落盘并显示在对话流里；云端走服务商原生接口（**只接文生**） |
 | 生视频 | 本地走 sd.cpp 的 MiniMax-H3 链路，文生视频 / 图生视频，输出 webm / avi / webp；云端走异步任务（提交 → 轮询 → 下载，**只接文生**） |
 | 云端对话 | 内置 DeepSeek、阿里云 Token Plan、阿里云百炼（按量）、MiniMax、智谱 GLM、Kimi、腾讯云混元（按量）、华为云 MaaS（按量），也可自填任意 OpenAI 兼容端点；密钥单独存放，不进配置文件 |
-| 模型菜单不长腿 | 云端模型名自动精简（`qwen-image-2.0-2026-03-03` → `qwen-image2.0-0303`），同一个服务商模型超过 15 个时按名字前缀**收成可展开的组**（默认收起，组名写着个数与已勾数） |
+| 云端模型清单 | 模型名自动精简（`qwen-image-2.0-2026-03-03` → `qwen-image2.0-0303`），精简后仍可区分；同一服务商模型超过 15 个时按名字前缀**收成可展开的组**（默认收起，组名标出个数与已勾选数） |
 | 本机 API | 可把"当前选中的模型"暴露成一个 OpenAI 兼容的本机端点，给 agent 或其他软件直接调用 |
 
 ## 环境要求
 
 - **Windows**（按 Windows 设计与实测；停止服务、显存探测等少量调用用了 `taskkill` / `nvidia-smi`，跨平台需自行适配）
-- **Python 3.8+**，且带 Tkinter（python.org 的 Windows 安装包默认自带；部分精简版 Python 需要单独装 `tkinter`）
-- 显存 / 内存 / 磁盘取决于你选的模型，与本项目无关
+- **Python 3.9+**，且带 Tkinter（python.org 的 Windows 安装包默认自带；部分精简版 Python 需要单独装 `tkinter`）
+- 显存 / 内存 / 磁盘需求取决于你选的模型与档位
 
 ## 快速开始
 
@@ -60,7 +60,7 @@ OpenAI 兼容 API 收进同一个窗口，只用 Python 标准库 + Tkinter 写�
 | 生图引擎 | [leejet/stable-diffusion.cpp](https://github.com/leejet/stable-diffusion.cpp) 的 Releases | `sd-cli`（Windows 为 `sd-cli.exe`）+ dll | 单独目录，**设置 → 生图** 指路 |
 | 生图权重 | Qwen-Image / SD1.5 / SDXL / Flux 等的 GGUF 或 safetensors | 模型文件 | 生图模型目录 |
 | 生视频 | MiniMax-H3 视频链路的**三件套**：扩散主体 GGUF、文本编码器、视频 VAE | 三个文件都要，**VAE 最容易漏** | 生视频模型目录，**设置 → 生视频** 指路 |
-| 云端对话 | DeepSeek / 阿里云百炼（Token Plan 或按量）控制台 | API Key | **设置 → 云端模型 → 服务商与密钥** 的密钥按钮（存进 `secrets.json`，不入库） |
+| 云端对话 | 各服务商控制台（DeepSeek、阿里云 Token Plan / 百炼、MiniMax、智谱、Kimi、腾讯云混元、华为云 MaaS） | API Key | **设置 → 云端模型 → 服务商与密钥** 的密钥按钮（存进 `secrets.json`，不入库） |
 | 云端生图 / 生视频 | 服务商**原生接口**（不是 OpenAI 兼容格式）：生图走同步端点，生视频走异步任务 | 同上，另外该模型要在服务商侧**已开通** | 档位与存放目录在 **设置 → 云端模型 → 生图 / 生视频** |
 
 ## 界面与常用操作
@@ -88,7 +88,7 @@ OpenAI 兼容 API 收进同一个窗口，只用 Python 标准库 + Tkinter 写�
 |---|---|---|
 | `gui_config.json` | 运行期配置（含你本机的路径） | **否**（`.gitignore` 已排除） |
 | `secrets.json` | 只存云端 API Key | **否**（同上，任何备份也应排除） |
-| 生成产物 | 本地引擎：图片落在 `<sd.cpp 目录>/output/`，视频落在 `<sd.cpp 目录>/video/`；云端：落在 `<程序目录>/cloud_out/images` 与 `cloud_out/videos`（都可在设置里改）。生视频与云端任务还会写一份**同名 `.log`**（引擎原始输出 / 完整请求与原始回包），失败时界面直接给出日志路径 | 否 |
+| 生成产物 | 本地：`<sd.cpp 目录>/output/`（图）与 `video/`（视频）；云端：`<程序目录>/cloud_out/images` 与 `videos`。都可在设置里改。生视频与云端任务另写一份**同名 `.log`**，失败时界面直接给出路径 | 否 |
 | `cloud_jobs.json` | 云端异步任务台账（task_id 与提交时间），断电或关窗后靠它「取回」 | **否**（换机器还原时产物地址早过期了，带着只会误导） |
 
 首次运行会自动生成默认配置；换机器时重装模型、重填路径即可，没有需要迁移的隐藏状态。
@@ -104,8 +104,8 @@ OpenAI 兼容 API 收进同一个窗口，只用 Python 标准库 + Tkinter 写�
   **官方没有这类接口的就不接**：Kimi 只有对话与看图输入，腾讯混元的生图 / 生视频挂在 TokenHub
   或另一套签名鉴权上，不是这里填的 API Key 直连的端点 —— 选中这类模型时会在发送前拦下并说明原因，
   改用本地那一组即可。
-- **阿里云以外的三家（MiniMax / 智谱 / 华为）接口已按各家官方文档接好并通过离线协议自检，
-  但还没在真机上跑过一次**（出图出片要花钱，需你点头）。
+- **阿里云以外的三家（MiniMax / 智谱 / 华为）接口按各家官方文档实现，并通过了离线协议自检，
+  但尚未做真机验证**（这三家的生图 / 生视频调用会产生实际费用）。第一次用建议先挑最小档位试一张。
 - **云端生视频是先建单后交付**：排队中(PENDING)能真取消，开始运行(RUNNING)就取消不掉、
   照常计费——所以点发送前会弹一次费用确认，「停止生成」在运行态只是"不再等它"。
 - **云端产物地址只活 24 小时**，因此拿到就立刻下载到本地；没来得及下载的会记在
@@ -159,17 +159,17 @@ python -m PyInstaller --noconfirm --clean --onefile --windowed --name llm-chat \
 | 怎么触发 | 结果 |
 |---|---|
 | **Actions → 打包 exe 并发布 → Run workflow** | 在 `windows-latest` 上打包并自检，产物 zip 作为 artifact 挂在这次 run 上（30 天有效），**不发 Release** |
-| **`git tag v0.0.2beta && git push origin v0.0.2beta`** | 打包 + 自检 + 自动建 Release 并挂上 `llm-chat-<tag>-windows-x64.zip`；标签带 `-` 或 alpha/beta/rc/preview/dev 字样的自动标预发布；Release 已存在（比如你先在网页建了草稿）时只补传 zip，不会报错 |
+| **推一个 `v*` 标签**（`git tag vX.Y.Z && git push origin vX.Y.Z`） | 打包 + 自检 + 自动建 Release 并挂上 `llm-chat-<tag>-windows-x64.zip`；标签带 `-` 或 alpha/beta/rc/preview/dev 字样的自动标预发布；Release 已存在（比如你先在网页建了草稿）时只补传 zip，不会报错 |
 
 要点：
 
 - **不需要配任何 secret**：建 Release 用的是工作流自带的 `GITHUB_TOKEN`（`permissions: contents: write`）。
 - **tag 去掉 `v` 后必须等于 `llm_console/core/config.py` 里的 `APP_VERSION`**，不一致流水线直接失败，
   免得 Release 标着新版本、里面装的是旧 exe。发新版时先改 `APP_VERSION` 再打 tag。
-- 构建环境：`windows-latest` + **Python 3.12** + PyInstaller 6.21.0。
-  别改成 3.14 —— GitHub 镜像里那份 hostedtoolcache 的 3.14.7 **没装全 Tcl**（只有 `tk9.0`
-  的壳、没有 `init.tcl`），打出的 exe 启动即报 `Tcl data directory ... not found`。
-  构建步骤会先定位 `init.tcl` / `tk.tcl`，找不到就当场失败，不会把坏包推上 Release。
+- 构建环境：`windows-latest` + **Python 3.12** + PyInstaller 6.21.0。**别改成 3.14**：
+  runner 镜像里那份 3.14 没装全 Tcl（只有 `tk9.0` 的壳、没有 `init.tcl`），打出的 exe
+  启动即报 `Tcl data directory ... not found`。构建步骤会先定位 `init.tcl` / `tk.tcl`，
+  找不到就当场失败，不会把坏包推上 Release。
 
 ## 第三方与许可
 
@@ -179,4 +179,4 @@ python -m PyInstaller --noconfirm --clean --onefile --windowed --name llm-chat \
 - **模型权重**：各自遵循其在发布平台上的条款，商用前请逐个确认。
 - **云端 API**：按各服务商计费策略产生费用，注意 token 成本。
 
-本仓库当前**未附加开源许可证**（私有用途）。需要对外开源时再补 `LICENSE`。
+本仓库**未附加开源许可证**：默认保留所有权利。要 fork、二次分发或商用之前，请先确认授权范围。
