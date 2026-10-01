@@ -30,7 +30,7 @@ CONFIG_PATH = os.path.join(APP_DIR, "gui_config.json")
 
 # 版本号：发版时改这一处（--selfcheck / --version 会打印它）。
 # GitHub Release 的 tag 要与它一致（tag 去掉开头的 v），Actions 工作流会做一致性校验。
-APP_VERSION = "0.0.3beta"
+APP_VERSION = "0.0.4beta"
 
 CFG_VERSION = 2
 
@@ -79,21 +79,37 @@ DEFAULT_CONFIG = {
     # ---- 模型分类 ----
     "model_kind": "chat",          # 当前选中模型的类型：chat / image / video
     "image_model_dir": "",           # 生图大模型子文件夹；留空 = models_dir/生图
-    # ---- 生图（sd.cpp / Qwen-Image 2.1）----
+    # ---- 生图（sd.cpp；参数形状由 core/sdprofile 按模型族决定）----
     "sd_dir": "",                    # sd.cpp 部署目录（含 sd-cli.exe）；在设置里指路
     "img_model_file": "",          # 生图扩散模型文件名（在 image_model_dir 下）
-    "img_quant": "Q6_K",           # Q6_K 质量优先 / Q5_0 更省显存
     "img_steps": 20,               # 采样步数：8 步 ~1m20s，12 步 ~1m50s，20 步 ~2m50s（细节更多）
     "img_size": "1024x1024",
     "img_cfg": 2.5,                # 官方推荐值
     "img_seed": -1,                # -1 = 随机
     "img_strength": 0.9,           # 参考图编辑强度（附图时生效；实测 0.9 效果最好）
-    # ---- 生视频（sd.cpp / MiniMax-H3，与生图同一引擎、不同链路）----
+    # 换别的模型族时要动的就是这一组：留空一律"自动识别 / 自动找"
+    "img_family": "",              # 模型族人工覆盖（qwen-image / flux / sdxl / generic …）
+    "img_vae_file": "",            # 配套文件：留空 = 在生图目录里自动发现
+    "img_llm_file": "",            #   LLM 文本编码器（Qwen-Image / FLUX.2 这类用）
+    "img_clip_l_file": "",         #   CLIP-L（Flux / SD3 用）
+    "img_clip_g_file": "",         #   CLIP-G（SDXL / Flux 用）
+    "img_t5_file": "",             #   T5-XXL（Flux / SD3 用）
+    "img_tokenizer_file": "",      #   tokenizer.json（PiD / Lens 要求）
+    "img_backend": "",             # 留空 = 用该族默认后端；显存吃紧可填 diffusion=disk
+    "img_params_backend": "",
+    "img_negative": "",            # 负向提示词：只有填了才传 -n（Qwen-Image 原来就不带）
+    "img_extra_args": "",          # 原样拼进命令行的人工出口
+    # ---- 生视频（sd.cpp，与生图同一引擎、不同链路）----
     # 注意：以下档位是"能跑通链路"的保守默认值，尚未在本机 8GB 显存上实测校准
     "video_model_dir": "",           # 视频组件目录；留空/不存在时回退扫描 models_dir
     "vid_model_file": "",          # 视频扩散主体文件名（留空 = 用扫描到的第一个）
     "vid_llm_file": "",            # 视频文本编码器文件名（留空 = 自动配对同目录编码器）
     "vid_vae_file": "",            # 视频 VAE 文件名（缺失时启动前就提示，不浪费排队时间）
+    "vid_family": "",              # 模型族人工覆盖（minimax-h3 / wan / ltx / generic …）
+    "vid_t5_file": "",             #   T5-XXL 文本编码器（Wan / LTX / HunyuanVideo 用）
+    "vid_tokenizer_file": "",      #   tokenizer.json
+    "vid_high_noise_file": "",     #   Wan2.2 MoE 的高噪段模型（--high-noise-diffusion-model）
+    "vid_audio_vae_file": "",      #   音频 VAE（H3 有声版 / LTX 需要，缺了只出无声视频）
     "vid_frames": 17,              # 帧数：多数视频 VAE 要求 4n+1，先用最小档验证链路
     "vid_fps": 24,                 # 帧率（MiniMax-H3 的参考视频按 24fps 组织）
     "vid_size": "512x512",         # 分辨率：越高越吃显存与时间
@@ -136,6 +152,13 @@ DEFAULT_CONFIG = {
     # ---- 模型别名（key = GGUF 文件名；value = 页面显示的简称）----
     # 一般无需手填：display_name 会用 make_alias() 从文件名自动生成
     "model_aliases": {},
+    # ---- 主菜单显示控制（管理入口：设置 → 模型文件管理 → 管理本地模型…）----
+    # 名单里的文件名**只是不进顶部菜单**：设置页清单、扫描补全、8081 代理照旧认得它们。
+    # 生图 / 生视频的配套文本编码器（能聊天的 .gguf 零件）常需要收在这里。
+    "model_hidden": [],
+    # ---- 对话记录（仅文本语言模型；本期只存不读，见 core/chatlog.py）----
+    "chat_log_save": True,           # 每轮结束 / 关窗 / 清空前自动写一份 JSON
+    "chat_log_dir": "",              # 留空 = <程序目录>/chat_logs（不写死盘符，项目要分发）
 }
 
 INT_KEYS = ("port", "ngl", "ctx", "threads", "reasoning_budget",
@@ -146,17 +169,23 @@ INT_KEYS = ("port", "ngl", "ctx", "threads", "reasoning_budget",
             "cloud_download_seconds", "cloud_keep_days")
 
 FLOAT_KEYS = ("temperature", "top_p", "repeat_penalty", "vram_gb", "ram_gb",
-              "img_cfg", "vid_cfg")
+              "img_cfg", "img_strength", "vid_cfg")
 
 STR_KEYS = ("model", "models_dir", "host", "api_key", "reasoning_mode",
             "extra_args", "exe", "gpu_name", "sd_dir", "image_model_dir",
-            "img_model_file", "video_model_dir", "vid_model_file",
+            "img_model_file", "img_size", "img_family",
+            "img_vae_file", "img_llm_file", "img_clip_l_file", "img_clip_g_file",
+            "img_t5_file", "img_tokenizer_file", "img_backend", "img_params_backend",
+            "img_negative", "img_extra_args",
+            "video_model_dir", "vid_model_file",
             "vid_llm_file", "vid_vae_file", "vid_format", "vid_size",
+            "vid_family", "vid_t5_file", "vid_tokenizer_file", "vid_high_noise_file",
+            "vid_audio_vae_file",
             "vid_backend", "vid_params_backend", "vid_extra_args",
             "vid_neg_prompt", "model_provider",
             "cloud_img_dir", "cloud_vid_dir", "cloud_img_size",
             "cloud_img_negative", "cloud_video_resolution", "cloud_video_ratio",
-            "cloud_video_negative")
+            "cloud_video_negative", "chat_log_dir")
 
 _CFG_LOCK = threading.RLock()   # 可重入：save_config 自带锁，调用方若已持锁不会自我死锁
 

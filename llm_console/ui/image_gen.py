@@ -9,7 +9,7 @@ import time
 import tkinter as tk
 from tkinter import ttk, scrolledtext, messagebox, filedialog
 
-from ..core import cloudjobs, config, providers
+from ..core import cloudjobs, config, providers, sdprofile
 from ..core.models import scan_models
 from ..core.media import build_img_cmd, resolve_img_files
 from ..connection import cloud_media
@@ -23,7 +23,7 @@ class ImageGenMixin:
         # 云端生图走服务商原生接口（二期），不启动本地 sd-cli：两套链路在入口就分开，
         # 免得拿云端模型名去喂本地引擎（那是 v32 拦下的那个错）。
         if providers.is_cloud(self.cfg):
-            return self._start_cloud_image(prompt)
+            return self._start_cloud_image(prompt, ref_img=ref_img)
         sd = self.cfg.get("sd_dir", "")
         cli = os.path.join(sd, "sd-cli.exe")
         if not os.path.isfile(cli):
@@ -37,21 +37,19 @@ class ImageGenMixin:
             img_file = os.path.basename(images[0]) if images else ""
         diffusion = os.path.join(self.cfg.get("image_model_dir", ""), img_file) if img_file else ""
         if not img_file or not os.path.isfile(diffusion):
-            self._append("\n[提示] 未找到生图模型：请把 Qwen-Image 的 .gguf 放入"
-                         "「llm modle\\生图」文件夹，或在模型菜单中重新选择。\n", "error")
+            self._append("\n[提示] 未找到生图模型：把扩散权重（.gguf / .safetensors / .ckpt）放进"
+                         "生图模型目录，或在模型菜单里重新选一个。\n"
+                         "  目录在 设置 → 生图 的「生图模型文件夹」里改。\n", "error")
             return
-        # VAE / 文本编码器自动发现 + Popen 前预检：缺件就地报错，别把不存在的
-        # 路径交给引擎再吃一次"退出码 1"（生图链路没有失败回显，黑盒更难查）
+        # 配套文件由模型族决定（Qwen-Image 要 LLM+VAE，Flux 要 clip_l+t5xxl+VAE，SDXL
+        # 单文件就够了），所以按 sdprofile 的 require 预检；缺件就地报错，别把不存在
+        # 的路径交给引擎再吃一次"退出码 1"（生图链路没有失败回显，黑盒更难查）。
         files = resolve_img_files(self.cfg, diffusion)
-        missing = []
-        if not files["llm"]:
-            missing.append("文本编码器（如 Qwen3VL 的 .gguf，引擎的 --llm）")
-        if not files["vae"]:
-            missing.append("图像 VAE（.safetensors，引擎的 --vae）")
+        missing = sdprofile.missing_slots(files["family"], files)
         if missing:
-            self._append("\n[提示] 未找到生图组件：%s——请放进生图模型目录"
-                         "（设置 → 生图 的「生图大模型文件夹」）。\n"
-                         % "、".join(missing), "error")
+            self._append("\n[提示] 这个生图模型（识别为 %s）缺配套文件：%s\n"
+                         "  放进生图模型目录，或在 设置 → 生图 的「配套文件」里指名。\n"
+                         % (sdprofile.label_of(files["family"]), "、".join(missing)), "error")
             return
         try:
             steps = max(1, int(self.cfg.get("img_steps", 12) or 12))
@@ -91,7 +89,7 @@ class ImageGenMixin:
         self._stop_flag = threading.Event()
         self._set_busy_ui(True)
         cmd = build_img_cmd(self.cfg, prompt, out, steps, size, diffusion, cfg_scale, -1,
-                            init_img=ref_img, vae=files["vae"], llm=files["llm"])
+                            init_img=ref_img, files=files)
         flags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
         try:
             self._img_proc = subprocess.Popen(
@@ -108,7 +106,7 @@ class ImageGenMixin:
                          daemon=True).start()
 
     # ---- 云端生图（二期：服务商原生接口，按 providers.media_api 分派）----
-    def _start_cloud_image(self, prompt):
+    def _start_cloud_image(self, prompt, ref_img=None):
         provider = providers.current_provider(self.cfg)
         sp = providers.split_cloud_id(self.cfg.get("model", ""))
         model = sp[1] if sp else ""
@@ -127,6 +125,18 @@ class ImageGenMixin:
             return
         out = os.path.join(outdir, time.strftime("img_%Y%m%d_%H%M%S") + ".png")
         self._append("\n【你】\n" + prompt + "\n", "user")
+        refs = []
+        if ref_img and os.path.isfile(ref_img):
+            # 参考图在发送前已由 chat.send_message 过一遍 capability + ref_images_error，
+            # 这里只负责把它显示回对话流并交给 worker（缩略图与本地生图同一套形态）。
+            # 措辞按 ref_image_mode 分：MiniMax 那条是"主体参考"，说成底图重绘就是骗人。
+            self._append_image(ref_img, max_w=320)
+            if providers.ref_image_mode(provider) == "subject":
+                self._append("[云端生图] 主体参考：%s（这一家按主体/角色一致性用这张图，"
+                             "不是在同图上重绘）\n" % os.path.basename(ref_img), "meta")
+            else:
+                self._append("[云端图生图] 参考图：%s\n" % os.path.basename(ref_img), "meta")
+            refs = [ref_img]
         gen, q, stop = self._cloud_begin("image")
         self._cloud_pid = str(provider["id"])
         self._img_out = out
@@ -136,10 +146,10 @@ class ImageGenMixin:
                                           provider.get("name") or ""))
         threading.Thread(target=self._cloud_image_worker,
                          args=(provider, model, prompt, out, gen, q, stop),
-                         daemon=True).start()
+                         kwargs={"refs": refs}, daemon=True).start()
 
     def _cloud_image_worker(self, provider, model, prompt, dest, gen, q, stop_flag,
-                            tid=""):
+                            tid="", refs=None):
         """子线程：只往队列里投事件，绝不碰控件（坑 11/54 的铁律）。"""
         def persist(status, raw=None):
             cloudjobs.update_job(tid, status=status)
@@ -157,7 +167,8 @@ class ImageGenMixin:
                 self.cfg, provider, model, prompt, dest, emit=q.put,
                 stop_flag=stop_flag,
                 negative=str(self.cfg.get("cloud_img_negative", "") or ""),
-                size=str(self.cfg.get("cloud_img_size", "") or ""), seed=seed)
+                size=str(self.cfg.get("cloud_img_size", "") or ""), seed=seed,
+                ref_images=list(refs or []))
         paths = list(res.get("paths") or [])
         # 真实落地路径可能与服务端给的扩展名一致而与我们的默认值不同（.png vs .jpg），
         # 所以把主图路径回写：_handle_img_exit 是拿 os.path.isfile(_img_out) 判成功的。

@@ -5,6 +5,7 @@ import difflib
 import os
 import re
 
+from . import sdprofile
 from .gguf import VIDEO_DIFFUSION_MARKERS, VIDEO_ENCODER_MARKERS, gguf_is_chat_capable, gguf_structure
 
 
@@ -44,14 +45,33 @@ def display_name(cfg, path):
 
 IMAGE_SUBDIR = "生图"             # models_dir 下存放生图大模型的子文件夹名
 
-# 生图流水线的配套组件（文本/视觉编码器）命名特征——它们也是 .gguf，
-# 但不是可选择的扩散模型，需从"生图模型"列表中排除
-IMAGE_COMPONENT_PATTERNS = ("mmproj", "qwen3vl")
+# 生图目录里"不是模型本体"的文件名特征。原来这里写死了 `qwen3vl`（本机那个文本编码器
+# 的名字），换一家模型就会把它当成扩散模型列进菜单。现在交给 sdprofile 的通用配套件
+# 名单（vae / clip / t5 / lora / tokenizer / motion / …），判定不再围着某一个文件名转。
+IMAGE_COMPONENT_PATTERNS = sdprofile.COMPANION_PATTERNS
+
 
 def is_image_diffusion(filename):
-    b = filename.lower()
-    return (b.endswith(".gguf")
-            and not any(p in b for p in IMAGE_COMPONENT_PATTERNS))
+    """只看文件名判断"像不像生图扩散模型"（弱判据，供 find_vl_pairs 这类场合用）。
+
+    真正的判定在 `is_diffusion_file()` —— 它会去读 GGUF 头部：**带元数据（kv>0）的是
+    语言模型**（聊天模型或 Qwen3VL 这类文本编码器），kv=0 的裸权重才是扩散主体。
+    """
+    b = str(filename or "")
+    return (b.lower().endswith(sdprofile.DIFFUSION_EXTS)
+            and sdprofile.is_model_file(b))
+
+
+def is_diffusion_file(path):
+    """该文件能不能当"生图扩散模型"用：扩展名对、不是配套件、且不是带元数据的语言模型。"""
+    name = os.path.basename(path)
+    if not is_image_diffusion(name):
+        return False
+    if not sdprofile.looks_like_companion(name) and gguf_is_chat_capable(path) \
+            and str(name).lower().endswith(".gguf"):
+        return False                    # kv>0 的 GGUF 是语言模型 / 文本编码器
+    return video_component_role(path) != "video"
+
 
 def _is_mmproj(name):
     """mmproj-*.gguf 是视觉投影器组件，不是独立模型，不进入模型列表。"""
@@ -63,20 +83,17 @@ VIDEO_SUBDIR = "生视频"            # models_dir 下存放视频模型的子�
 def video_component_role(path):
     """视频链路组件类型：'video'（扩散主体）/ 'encoder'（文本编码器）/ None（不是视频链路）。
 
-    只认明确命中标记的文件：生图扩散模型同样是 kv=0 的裸权重，若不命中视频标记
-    就返回 None，避免把 qwen_image 之类当成视频组件。
+    判定集中在 `sdprofile.video_role`：MiniMax-H3 的张量名是本机实测过的，直接算；
+    没实测过的家族（Wan）要额外满足"文件名带线索"，理由见那儿的注释。
+    生图扩散模型同样是 kv=0 的裸权重，若不命中视频标记就返回 None，
+    避免把 qwen_image / flux 之类当成视频组件。
     """
     s = gguf_structure(path)
     if not s or s[0]:
         return None
-    blob = s[1]
-    if not blob:
+    if not s[1]:
         return None
-    if any(m in blob for m in VIDEO_DIFFUSION_MARKERS):
-        return "video"
-    if all(m in blob for m in VIDEO_ENCODER_MARKERS):
-        return "encoder"
-    return None
+    return sdprofile.video_role(s[1], os.path.basename(path))
 
 def video_scan_dirs(cfg):
     """视频组件的扫描目录：配置的视频目录优先，其次模型目录顶层与其一级子目录。
@@ -158,13 +175,20 @@ def scan_models(cfg):
         for n in _ggufs(folder):
             if _chat_ok(folder, n):
                 chat.append(os.path.join(d, s, n))
-    # 生图目录：扩散模型 + 可配对 mmproj 的视觉组件
+    # 生图目录：扩散模型 + 可配对 mmproj 的视觉组件。
+    # 这里不再只盯 .gguf —— SDXL / Flux / SD3 的社区权重常常是单个 .safetensors/.ckpt，
+    # 引擎用 `-m` 直接吃（见 sdprofile 的 main_flag）。配套件（vae / clip / t5 / lora …）
+    # 由 is_model_file 的名字判据摘出去，带元数据的 .gguf 是语言模型（可当聊天模型）。
     pairs = find_vl_pairs(cfg)
-    for n in _ggufs(img_dir):
+    for n in sorted(os.listdir(img_dir) if os.path.isdir(img_dir) else []):
         p = os.path.join(img_dir, n)
-        if _is_mmproj(n) or video_component_role(p) == "video":
+        if not os.path.isfile(p) or _is_mmproj(n):
             continue
-        if is_image_diffusion(n):
+        if not str(n).lower().endswith(sdprofile.DIFFUSION_EXTS):
+            continue
+        if video_component_role(p) == "video":
+            continue
+        if is_diffusion_file(p):
             image.append(p)
         elif p in pairs and gguf_is_chat_capable(p):
             chat.append(p)
@@ -206,7 +230,11 @@ def find_vl_pairs(cfg):
             continue
         projs = [n for n in names if n.lower().startswith("mmproj")]
         for m in names:
-            if m.lower().startswith("mmproj") or is_image_diffusion(m):
+            # 跳过 mmproj 与"真扩散主体"。这里必须用带结构判据的 is_diffusion_file：
+            # 纯名字的 is_image_diffusion 认不出 Qwen3VL 这类文本编码器（它没有元数据以外
+            # 的特征），一旦把它跳掉，mmproj 配对就整条断掉 —— 生图的 --llm_vision
+            # 和"能不能看图"都靠这张表（原来靠文件名写死才碰巧没出问题）。
+            if m.lower().startswith("mmproj") or is_diffusion_file(os.path.join(folder, m)):
                 continue
             if not gguf_is_chat_capable(os.path.join(folder, m)):
                 continue

@@ -8,12 +8,13 @@ import time
 import tkinter as tk
 from tkinter import ttk, scrolledtext, messagebox, filedialog
 
-from ..core import capability, providers, textfile
+from ..core import capability, chatlog, providers, textfile
 from ..core.config import save_config
 from ..core.models import display_name
 from ..core.params import ctx_for, current_ngl
 from ..core.server import start_server, stop_server
 from ..connection import cloud as cloud_conn
+from ..connection import cloud_media
 from ..connection import stream as stream_conn
 from ..connection.stream import stream_worker
 
@@ -84,19 +85,22 @@ class ChatMixin:
         cloud = providers.is_cloud(self.cfg)
         if kind in ("image", "video"):
             if cloud:
-                # 云端这一期只做文生（W 定的范围）：在入口就说清楚，比让用户挑完图
-                # 再在发送时被拦下一次要省一步。判据来自 capability，文案不在这里重复写。
-                messagebox.showinfo("云端生图 / 生视频",
-                                    capability.resolve(self.cfg)["note"] +
-                                    "\n\n要带参考图或首帧，请在模型菜单里切回本地的"
-                                    "〔生图〕〔生视频〕模型（走 sd.cpp 那条链路）。")
-                return
+                # 云端生图能不能附图由 capability 判（判据 = 这一家的原生接口有没有
+                # 参考图字段）；生视频仍然只接文生。放行时不再重复弹说明，直接给文件框。
+                if capability.resolve(self.cfg)["verdict"] != capability.YES:
+                    messagebox.showinfo("云端生图 / 生视频",
+                                        capability.resolve(self.cfg)["note"] +
+                                        "\n\n要带参考图或首帧，请在模型菜单里切回本地的"
+                                        "〔生图〕〔生视频〕模型（走 sd.cpp 那条链路）。")
+                    return
             # 生图模式：附图 = 参考图/底图；生视频模式：附图 = 首帧。
-            # 这两类走引擎自己的图像输入通路（-i），跟"聊天模型能不能看图"是两回事，
-            # 所以不查 capability —— 之前视频模式误查过一次，报"当前模型不支持看图"。
+            # 这两类走引擎/接口的图像输入通路，跟"聊天模型能不能看图"是两回事，
+            # 所以不查聊天那条判据 —— 之前视频模式误查过一次，报"当前模型不支持看图"。
+            # 标题不写"底图"：云端各家把这张图当底图还是当主体参考不一样
+            # （providers.ref_image_mode），具体语义在发送后的回显里说。
             p = filedialog.askopenfilename(
                 title=("选择首帧图片（作为图生视频的第一帧）" if kind == "video"
-                       else "选择参考图（作为图生图的底图）"),
+                       else "选择参考图"),
                 filetypes=[("图片", "*.png *.jpg *.jpeg *.webp *.bmp"), ("所有文件", "*.*")])
             if p:
                 self.set_attachment(p)
@@ -259,19 +263,24 @@ class ChatMixin:
             # 不占显存——所以这里不走 _confirm_shared_vram 那套三选弹窗。
             # 费用确认（只有生视频）放在清空输入框之前：用户选"不"的时候一个字都不该丢。
             err = providers.validate_for_send(self.cfg)
-            if not err and self._attached_image:
-                err = ("云端这一期只接「文生」：参考图与首帧还只在本地那条链路里支持。\n"
-                       "  要图生图 / 首帧生视频，请在模型菜单里切回本地的〔生图〕〔生视频〕；"
-                       "图片已保留，不会丢。")
+            ref = self._attached_image or ""
+            if not err and ref:
+                # 最后一道：📎 入口已经按 capability 判过一次，但中途可能换了服务商，
+                # 而且"这张图这一家收不收（格式 / 体积 / 张数）"只有接口侧知道。
+                v = capability.resolve(self.cfg)
+                err = ((v["note"] if v["verdict"] != capability.YES else "")
+                       or cloud_media.ref_images_error(
+                           providers.current_provider(self.cfg), [ref]))
             if err:
-                self._append("\n[云端] %s\n" % err, "error")
+                self._append("\n[云端] %s%s\n" % (err, "" if not ref else
+                                                  "\n  图片已保留，不会丢。"), "error")
                 return
             if kind == "video" and not self._confirm_cloud_video_spend():
                 return
             self.input.delete("1.0", "end")
             self.clear_attachment()
             if kind == "image":
-                self._start_chat_image(text)
+                self._start_chat_image(text, ref_img=ref or None)
             else:
                 self._start_chat_video(text)
             return
@@ -413,6 +422,9 @@ class ChatMixin:
         msgs += self.history
         msgs.append(user_msg)
         self.history.append(user_msg)
+        # 先把"问题"落盘再开线程：连点发送、生成中途强杀 / 断电，用户那句都不会丢。
+        # 静默保存 —— "存在哪儿"那句话留到轮末再说，免得回答还没出来先刷一行日志
+        self._save_chat_log(quiet=True)
 
         self._busy = True
         self._stop_flag = threading.Event()
@@ -456,6 +468,48 @@ class ChatMixin:
             self._stop_flag.set()
             self.stop_gen_btn.configure(state="disabled", text="正在停止…")
 
+    # ---- 对话记录落盘（仅文本模型；本期只存不读，形状见 core/chatlog.py）----
+    def _save_chat_log(self, quiet=False):
+        """把当前会话整份写盘 → (是否已保存, 给用户看的一句话)。
+
+        四条约束：
+          ① 生图 / 生视频不存（成果本来就是文件）；
+          ② **永不抛异常** —— 它挂在每轮结束与关窗路径上，存不进去只少一份记录，
+             不能把发送或退出带崩；
+          ③ 整份覆盖重写而不是追加，天然幂等，也不需要"崩溃截断恢复"那套；
+          ④ 内容没变就直接返回（`_log_key` 是 (条数, 末条长度) 的廉价签名）。
+             连点发送时同一份内容会被三个触发点各敲一次，省掉重复写盘。
+        """
+        if self.cfg.get("model_kind") != "chat" or not chatlog.enabled(self.cfg):
+            return False, ""
+        if not self.history:
+            return False, ""
+        key = (len(self.history), len(str(self.history[-1].get("content") or "")))
+        if self._sess_saved and key == self._log_key:
+            # 内容没变：不重复写盘，但"说一次保存在哪儿"的账还是要结（可能上次是静默那次）
+            if quiet or self._announced_path == self._sess_path:
+                return True, ""
+            self._announced_path = self._sess_path
+            return True, "对话记录已存：%s" % self._sess_path
+        if not self._sess_id:
+            self._sess_id = chatlog.new_id()
+        p, err = chatlog.save(self.cfg, self._sess_id, self.history,
+                              model=self.cfg.get("model", ""),
+                              provider=self.cfg.get("model_provider", "local"))
+        if err:
+            return False, "对话记录没能写入（%s）：目录可在 gui_config.json 的 " \
+                          "chat_log_dir 里改。" % err
+        self._sess_path = p
+        self._log_key = key
+        self._sess_saved = True
+        # "已存到哪儿"这句话一份文件只说一次；静默那次（发送时）把机会留给轮末
+        if quiet:
+            return True, ""
+        if self._announced_path == p:
+            return True, ""
+        self._announced_path = p
+        return True, "对话记录已存：%s" % p
+
     def _finish_turn(self, error=False):
         self._busy = False
         self._stop_flag = None
@@ -466,6 +520,10 @@ class ChatMixin:
         usage, self._last_usage = self._last_usage, None
         if usage and not error and self.cfg.get("show_usage", True):
             self._append("\n〔用量〕%s\n" % format_usage(usage), "meta")
+        # 每轮结束落一次盘：断电 / 强杀 / 关窗都只丢"正在跑的这一轮"
+        _, note = self._save_chat_log()
+        if note:
+            self._append("\n[记录] %s\n" % note, "meta")
         if not error:
             self._append("\n\n────────────────\n", "meta")
         self.input.focus_set()
@@ -475,12 +533,21 @@ class ChatMixin:
             return
         if not messagebox.askyesno("清空对话", "确定清空当前对话记录？"):
             return
+        # 先存再清：清空不该顺手毁掉一份已经聊出来的记录
+        self._save_chat_log()
+        kept = self._sess_path
         self.history = []
+        self._sess_id = ""            # 下一次对话算新会话，另起一份文件
+        self._sess_saved = False
+        self._sess_path = ""
+        self._announced_path = ""
+        self._log_key = None
         self.clear_attachment()
         self.chat.configure(state="normal")
         self.chat.delete("1.0", "end")
         self.chat.configure(state="disabled")
-        self._append("对话已清空。\n", "meta")
+        self._append("对话已清空。%s\n"
+                     % (("原记录已存：%s" % kept) if kept else ""), "meta")
 
     def _flush_stream(self, chunks):
         """把本轮收到的流式片段合并后一次性写入（一次 insert + 一次滚动）。

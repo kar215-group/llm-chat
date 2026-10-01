@@ -9,10 +9,10 @@ import threading
 import tkinter as tk
 from tkinter import ttk, scrolledtext, messagebox, filedialog, font as tkfont
 
-from ..core import capability, cloudjobs, providers, secrets, textfile
+from ..core import capability, cloudjobs, providers, sdprofile, secrets, textfile
 from ..core.config import (CFG_VERSION, FLOAT_KEYS, INT_KEYS, STR_KEYS,
                            cloud_media_dir, gen_api_key, save_config)
-from ..core.models import scan_models
+from ..core.models import scan_models, scan_video_models
 from ..core.params import ctx_for, current_ngl
 from ..core.server import _query_serving_model, server_process_alive
 from ..connection import cloud
@@ -42,14 +42,14 @@ NAV_SPEC = [
         ]},
         {"key": "g_lmedia", "label": "图像与视频模型", "children": [
             {"key": "img", "label": "生图（sd.cpp）", "page": "local_media", "section": "img",
-             "title": "生图（sd.cpp / Qwen-Image）",
+             "title": "生图（sd.cpp）",
              "help": "本地生图走 sd.cpp 引擎：sd-cli 按需拉起、进程退出就释放显存，所以每次"
-                     "生成都要重载一次权重。\n参考图编辑（图生图）必须能配上视觉投影器"
-                     "（mmproj），否则引擎看不懂「换背景」这类指令。"},
+                     "生成都要重载一次权重。\n图生图要哪些配套件由模型族决定（Qwen-Image 要"
+                     "视觉投影器 mmproj，FLUX 用 Kontext 变体），缺件在发送前就会点名说缺什么。"},
             {"key": "vid", "label": "生视频（sd.cpp）", "page": "local_media", "section": "vid",
-             "title": "生视频（sd.cpp / MiniMax-H3）",
+             "title": "生视频（sd.cpp）",
              "help": "本地生视频与生图**共用同一个 sd-cli.exe**，只是多了视频参数。\n"
-                     "需要三件套权重：扩散主体、文本编码器、视频 VAE，**VAE 最容易漏下**，"
+                     "一般要三件套权重：扩散主体、文本编码器、视频 VAE，**VAE 最容易漏下**，"
                      "缺任一项在发送前就会点名说缺什么，不会让你白排队。\n"
                      "出片耗时取决于显卡与档位，生成中可随时点「停止生成」。"},
         ]},
@@ -74,8 +74,8 @@ NAV_SPEC = [
         {"key": "c_media", "label": "生图 / 生视频", "page": "cloud", "section": "cmedia",
          "title": "云端生图 / 生视频",
          "help": "云端生图与生视频走服务商的**原生接口**，不会启动本地 sd.cpp："
-                 "生图是同步请求，生视频是异步任务（提交 → 轮询 → 下载）。\n"
-                 "参考图与首帧目前只有本地那条链路支持。\n"
+                 "生图是同步请求（可以挂参考图），生视频是异步任务"
+                 "（提交 → 轮询 → 下载），首帧仍要用本地链路。\n"
                  "云端产物地址只活 24 小时，所以拿到就立刻下载到本地，不在云上留原图；"
                  "没来得及下载的会记进任务台账，重启后对话开头给「取回」按钮。"},
     ]},
@@ -122,6 +122,35 @@ def _open_outdir(path, what, setting=""):
     except Exception as e:
         messagebox.showwarning("输出目录", "打不开 %s：\n  %s" % (p, e))
         return False
+
+
+NEW_PROVIDER_LABEL = "＋ 新建服务商…"      # 下拉里"还没建起来"那一项的标签
+
+
+def provider_labels(cfg):
+    """服务商下拉的显示项 → `[(标签, pid)]`。
+
+    界面上只摆人看得懂的名字（中文优先，DeepSeek / Kimi / MiniMax 这类品牌名保留英文），
+    **不再把 `deepseek`、`aliyun-token-plan` 这种代码 id 摊到屏幕上**——原来两处下拉
+    用的是 id 与「id — 名称」，用户看到的是英文代号，认不出哪家是哪家。
+    只有两个服务商重名时（自定义条目同名很常见）才在标签里补 id 区分，否则标签→pid
+    的反查会有歧义。
+    """
+    rows = providers.list_providers(cfg, enabled_only=False)
+    names = [str(p.get("name") or p["id"]) for p in rows]
+    dup = {n for n in names if names.count(n) > 1}
+    out = []
+    for p, n in zip(rows, names):
+        out.append(("%s（%s）" % (n, p["id"]) if n in dup else n, p["id"]))
+    return out
+
+
+def provider_label_for(cfg, pid, fallback=""):
+    """某个服务商给用户看的名字（删除确认、状态回显这类单点场合用）。"""
+    for label, one in provider_labels(cfg):
+        if one == pid:
+            return label
+    return (providers.builtin(pid).get("name") or fallback or pid or "")
 
 
 class SettingsMixin:
@@ -352,18 +381,80 @@ class SettingsMixin:
             ent(t3, r3, "sd_dir", "引擎目录",
                 "sd.cpp 引擎所在目录（内含 sd-cli.exe / sd-server.exe）。", width=30)
             ent(t3, r3, "image_model_dir", "生图模型文件夹",
-                "生图大模型统一存放处（llm modle\\生图）：扩散模型、文本编码器、VAE、视觉编码器都在这里。", width=30)
+                "扩散模型与它的配套件（VAE、文本编码器、视觉投影器 mmproj）都放这里；"
+                "留空 = 模型目录下的「生图」子文件夹。", width=30)
             ent(t3, r3, "img_model_file", "默认生图模型",
-                "生图窗口默认选中的扩散模型文件名（如 qwen_image_2.1-Q6_K.gguf）。", width=30)
+                "默认选中的扩散模型文件名（.gguf / .safetensors / .ckpt 都行）。", width=30)
+            # 模型族：识别结果只决定"拼哪些参数、要哪些配套件"，参数值仍来自下面这些设置
+            _fam_opts = sdprofile.family_choices("image")
+            _code2label = {c: t for c, t in _fam_opts}
+            v["img_family"] = tk.StringVar(
+                value=_code2label.get(str(self.cfg.get("img_family", "") or "").strip(),
+                                      _fam_opts[0][1]))
+            fam_cb = ttk.Combobox(t3, textvariable=v["img_family"], state="readonly",
+                                  width=24, values=[t for _c, t in _fam_opts])
+            img_note = tk.StringVar(value="")
+            row(t3, r3, "模型族", fam_cb,
+                "程序会按权重文件里的张量名与文件名自动认这一族需要哪些配套件、该传什么参数。"
+                "认错了（比如社区改过名）就在这里手动指定；选「通用」= 只把扫到的文件喂给引擎，"
+                "不附加任何家族专属参数。", hint="一般用自动")
+            ttk.Label(t3, textvariable=img_note, foreground="#5a6a7a",
+                      font=("Microsoft YaHei UI", 9)).grid(
+                row=r3["i"], column=1, columnspan=2, sticky="w", pady=(0, 4))
+            r3["i"] += 1
+
+            def refresh_img_note(*_a):
+                """回显识别结果。内容长度固定 —— 状态类 Label 拼长文案会引发整页重排（坑 92）。"""
+                code = {t: c for c, t in sdprofile.family_choices("image")}.get(
+                    v["img_family"].get(), sdprofile.AUTO)
+                img_dir = str(self.cfg.get("image_model_dir", "") or "")
+                path = os.path.join(img_dir, str(self.cfg.get("img_model_file", "") or ""))
+                fid, basis, _ = sdprofile.detect_file(path, kind="image", forced=code)
+                tail = {"measure": "张量名实测过", "user": "你手动指定",
+                        "hint": "按名字猜的", "none": "认不出，走通用"}.get(
+                    basis, "")
+                img_note.set("识别为：%s（%s）" % (sdprofile.label_of(fid), tail or "自动"))
+
+            v["img_family"].trace_add("write", refresh_img_note)
+            ent(t3, r3, "img_vae_file", "VAE 文件",
+                "留空 = 在本族要求的目录里自动找（按文件名含 vae / ae）。放了多个家族"
+                "的权重又挑错时，在这里指名。", width=30, hint="留空=自动")
+            ent(t3, r3, "img_llm_file", "LLM 编码器",
+                "LLM 文本编码器的 .gguf（Qwen-Image、FLUX.2 这类要用）。CLIP 系的模型不用填。",
+                width=30, hint="留空=自动")
+            ent(t3, r3, "img_clip_l_file", "CLIP-L",
+                "clip_l.safetensors 之类（Flux / SD3 必需）。", width=30, hint="留空=自动")
+            ent(t3, r3, "img_clip_g_file", "CLIP-G",
+                "clip_g.safetensors 之类（SDXL / Flux 用）。", width=30, hint="留空=自动")
+            ent(t3, r3, "img_t5_file", "T5-XXL",
+                "t5xxl_fp16.safetensors 之类（Flux / SD3 必需）。", width=30, hint="留空=自动")
             ent(t3, r3, "img_steps", "默认步数",
-                "默认采样步数（4~50）：8 步 ~1m20s，12 步 ~1m50s，20 步 ~2m50s；少=快，多=细节更多。",
+                "默认采样步数（4~50）：Qwen-Image 在本机 8 步 ~1m20s、20 步 ~2m50s；"
+                "少=快，多=细节更多。别的模型族看各家文档。",
                 hint="8 步最快")
             ent(t3, r3, "img_size", "默认分辨率",
-                "宽x高，如 1024x1024。分辨率越高越慢。", width=12, hint="宽x高")
+                "宽x高，如 1024x1024。分辨率越高越慢。会自动补到本族要求的倍数"
+                "（SD 系 8 的倍数、Flux/SD3/Wan 16 的倍数），不合适的尺寸会被抬上去。",
+                width=12, hint="宽x高")
             ent(t3, r3, "img_cfg", "默认 CFG",
-                "提示词服从度，官方推荐 2.5。")
+                "提示词服从度。Qwen-Image 官方推荐 2.5；Flux dev/schnell 常给 1.0，"
+                "SDXL/SD1.5 常给 6~8。切族时记得改这一档。")
+            ent(t3, r3, "img_negative", "负向提示词",
+                "留空 = 不传给引擎（Qwen-Image 本来就不带这一项）。SD/SDXL/Wan 这类"
+                "支持负向提示词的模型可以自己填。", width=30, hint="留空=不传")
             ent(t3, r3, "img_seed", "默认种子",
                 "-1 随机；固定数字可复现同一次输出。")
+            ent(t3, r3, "img_backend", "组件后端",
+                "sd-cli --backend。留空 = 用该族默认（LLM 系走 te=cpu,diffusion=cuda0,vae=cuda0，"
+                "CLIP 系走 clip=cpu,…）。8GB 显存装不下时可以试 diffusion=cpu 或 vae=cpu。",
+                width=30, hint="留空=默认")
+            ent(t3, r3, "img_params_backend", "权重后端",
+                "sd-cli --params-backend。留空 = 引擎 auto-fit 自己安排；显存吃紧可填 "
+                "diffusion=disk 从内存/磁盘流式取权重。", width=30, hint="留空=自动")
+            ent(t3, r3, "img_extra_args", "附加参数",
+                "原样拼到命令行末尾，是「识别没覆盖到」的人工出口。例如 "
+                "--scheduler karras --prediction eps 或 --taesd <路径> 做快速预览。",
+                width=30, hint="可留空")
 
             ttk.Button(t3, text="打开输出文件夹",
                        command=lambda: _open_outdir(
@@ -371,12 +462,14 @@ class SettingsMixin:
                            "生图输出目录", "生图（sd.cpp） → 引擎目录")).grid(
                 row=r3["i"], column=1, sticky="w", pady=5)
             r3["i"] += 1
+            refresh_img_note()
 
         # ---- 区块 4：本地图像与视频 / 生视频 ----
         @section("local_media", "vid")
         def _t3b(t3b, r3b):
             ent(t3b, r3b, "video_model_dir", "视频模型文件夹",
-                "视频组件存放目录（放 MiniMax-H3 的扩散主体 + 文本编码器 + 视频 VAE）。"
+                "视频组件存放目录：扩散主体 + 文本编码器（LLM 或 T5-XXL）+ 视频 VAE，"
+                "MiniMax-H3 与 Wan 都是这套摆法。"
                 "该目录不存在时会自动改扫 models_dir 顶层与各子目录，所以文件散放在模型库里也能识别。",
                 width=30)
             ent(t3b, r3b, "vid_model_file", "扩散主体文件名",
@@ -385,6 +478,56 @@ class SettingsMixin:
                 "留空 = 自动取与扩散主体配套的编码器（按文件名匹配，通常名字里带 vl / llm）。", width=30)
             ent(t3b, r3b, "vid_vae_file", "视频 VAE 文件名",
                 "留空 = 在主体所在目录里按文件名含 vae 自动找（不含 audio 的那个）。", width=30)
+            _vf_opts = sdprofile.family_choices("video")
+            _vf2code = {t: c for c, t in _vf_opts}
+            v["vid_family"] = tk.StringVar(
+                value=_vf2code.get(str(self.cfg.get("vid_family", "") or "").strip(),
+                                   _vf_opts[0][1]))
+            vfile_cb = ttk.Combobox(t3b, textvariable=v["vid_family"], state="readonly",
+                                    width=24, values=[t for _c, t in _vf_opts])
+            vid_note = tk.StringVar(value="")
+            row(t3b, r3b, "模型族", vfile_cb,
+                "同一套 sd-cli 可以跑多个视频家族（MiniMax-H3 / Wan 2.1-2.2 / LTX / "
+                "HunyuanVideo）。认族决定「要哪些配套件、要不要负向提示词、尺寸对齐到几」。"
+                "认错了就在这里手动指定；选通用则只把找到的文件交给引擎。", hint="一般用自动")
+            ttk.Label(t3b, textvariable=vid_note, foreground="#5a6a7a",
+                      font=("Microsoft YaHei UI", 9)).grid(
+                row=r3b["i"], column=1, columnspan=2, sticky="w", pady=(0, 4))
+            r3b["i"] += 1
+
+            def refresh_vid_note(*_a):
+                """回显识别结果：一行、长度固定（长文案塞进 Label 会引发整页重排，坑 92）。"""
+                code = {t: c for c, t in sdprofile.family_choices("video")}.get(
+                    v["vid_family"].get(), sdprofile.AUTO)
+                vdir = str(self.cfg.get("video_model_dir", "") or "")
+                name = str(self.cfg.get("vid_model_file", "") or "")
+                path = os.path.join(vdir, name) if name else ""
+                if not (path and os.path.isfile(path)):
+                    try:
+                        vids, _e = scan_video_models(self.cfg)
+                        path = vids[0] if vids else ""
+                    except Exception:
+                        path = ""
+                fid, basis, _ = sdprofile.detect_file(path, kind="video", forced=code)
+                tail = {"measure": "张量名实测过", "user": "你手动指定",
+                        "hint": "按名字猜的", "none": "认不出，走通用"}.get(
+                    basis, "")
+                vid_note.set("识别为：%s（%s）" % (sdprofile.label_of(fid), tail or "自动"))
+
+            v["vid_family"].trace_add("write", refresh_vid_note)
+            ent(t3b, r3b, "vid_t5_file", "T5-XXL 文件名",
+                "Wan / LTX / HunyuanVideo 的文本编码器（--t5xxl）。MiniMax-H3 不用填这一项。",
+                width=30, hint="留空=自动")
+            ent(t3b, r3b, "vid_tokenizer_file", "tokenizer 文件",
+                "部分家族要 tokenizer.json（引擎的 --tokenizer）。留空 = 不传。",
+                width=30, hint="多数不用填")
+            ent(t3b, r3b, "vid_high_noise_file", "高噪段模型",
+                "Wan2.2 的 MoE 版是**两个**扩散文件（高噪段 + 低噪段），这里填高噪段那个"
+                "（--high-noise-diffusion-model）。5B 版与单文件模型留空即可。",
+                width=30, hint="MoE 才要")
+            ent(t3b, r3b, "vid_audio_vae_file", "音频 VAE",
+                "想要有声视频才需要（本机没下过这个文件，缺了只出无声视频）。"
+                "留空 = 按文件名含 audio + vae 自动找。", width=30, hint="留空=自动")
             ent(t3b, r3b, "vid_size", "分辨率",
                 "宽x高，如 512x512。视频分辨率对显存和耗时都很敏感，先小后大。", width=12)
             ent(t3b, r3b, "vid_frames", "帧数",
@@ -396,11 +539,13 @@ class SettingsMixin:
             ent(t3b, r3b, "vid_steps", "采样步数",
                 "步数直接决定耗时；链路先通再逐步加大。")
             ent(t3b, r3b, "vid_cfg", "CFG",
-                "提示词服从度。大于 1 时引擎会去编码负向提示词，所以下面那栏不能留空。")
+                "提示词服从度。MiniMax-H3 实测 5.0 可用；Wan 的文档区间是 3~6。"
+                "大于 1 时引擎会去编码负向提示词，H3 那一族下面那栏就不能留空。")
             ent(t3b, r3b, "vid_neg_prompt", "负向提示词",
-                "**不能为空**：MiniMax-H3 在 CFG>1 时必须编码负向提示词，留空会报 "
-                "failed to encode negative video prompt 并以退出码 1 结束（代码里有兜底默认值）。",
-                width=30, hint="不能留空")
+                "MiniMax-H3 在 CFG>1 时**必须能编码出负向提示词**，留空会报 "
+                "failed to encode negative video prompt 并退出码 1 —— 这一族留空时代码会用"
+                "内置兜底值。Wan / LTX 不要求，留空就不传给引擎。",
+                width=30, hint="H3 不能留空")
             ent(t3b, r3b, "vid_format", "输出容器",
                 "webm / avi / webp（sd-cli 单文件视频输出只支持这三种）。", width=10)
             ent(t3b, r3b, "vid_seed", "种子", "-1 随机。")
@@ -421,6 +566,7 @@ class SettingsMixin:
                            "生视频输出目录", "生视频（sd.cpp） → 引擎目录")).pack(side="left")
             row(t3b, r3b, "输出目录", fr_v,
                 "生成结果写在 sd.cpp\\video\\vid_时间戳.webm；引擎每次按需拉起，进程退出即释放显存。")
+            refresh_vid_note()
 
         # ---- 区块 5：API 连接（供 agent 调用） ----
         @section("api", "api")
@@ -720,7 +866,7 @@ class SettingsMixin:
                     save_config(self.cfg)
                     refresh_combo(keep=base_id)
                     if not silent:
-                        msg_lbl.set("已新建服务商「%s」。" % base_id)
+                        msg_lbl.set("已新建服务商「%s」。" % (name or base_id))
                     self._update_model_label()
                     return True, ""
                 data = {"name": vars_["name"].get(), "base_url": vars_["base_url"].get(),
@@ -753,7 +899,8 @@ class SettingsMixin:
                     msg_lbl.set("没有选中要删除的服务商。")
                     return
                 tip = ("「%s」是内置服务商，删掉后下次启动会按内置定义重新出现。"
-                       % pid) if providers.is_builtin(pid) else "删除「%s」？" % pid
+                       % provider_label_for(self.cfg, pid)) if providers.is_builtin(pid) \
+                    else "删除「%s」？" % provider_label_for(self.cfg, pid, vars_["name"].get())
                 if not messagebox.askyesno("删除服务商",
                                            tip + "\n\n模型清单会一起删除，已存密钥也会被清掉。"):
                     return
@@ -862,7 +1009,8 @@ class SettingsMixin:
                 # 顶部只放说明文字，按钮一律挪到底部：窄窗口里左右对撞会互相盖住
                 head = ttk.Frame(d)
                 head.pack(side="top", fill="x", padx=12, pady=(10, 2))
-                hint_lbl = ttk.Label(head, text="勾中并点「确定」才进主页面菜单；「图片输入」一改即生效",
+                hint_lbl = ttk.Label(head, text="勾中并点「确定」才进主页面菜单；「图片输入」一改即生效。"
+                                     "手填名字后按回车＝直接加入；「试一试」只对对话模型有意义",
                                      foreground="#808080", wraplength=520, justify="left",
                                      font=("Microsoft YaHei UI", 9))
                 hint_lbl.pack(side="left")
@@ -1060,13 +1208,21 @@ class SettingsMixin:
 
                 def layout_spec():
                     """决定显示顺序：模型多的服务商按名字前缀收组。组头落在"组里第一个成员
-                    原来所在的那一行"，成员紧跟组头之后，没进组的按原顺序平铺 —— 不这样排
-                    就看不出组是从哪冒出来的。**成员必须也进 spec**：regrid 是照 spec 逐行
-                    排格子的，只写组头的话展开时没有控件被 grid 回来（第一版就漏在这儿）。"""
+                    原来所在的那一行"，成员紧跟组头之后 —— 不这样排就看不出组是从哪冒出来的。
+                    **成员必须也进 spec**：regrid 是照 spec 逐行排格子的，只写组头的话展开时
+                    没有控件被 grid 回来（第一版就漏在这儿）。
+
+                    凑不成组的零散模型不再一条条平铺在顶上，而是统一收进末尾的「其他」组
+                    （与主页面菜单同一套口径，W 提的）。收起 ≠ 藏起来：行照常建、勾选照常算，
+                    `ok_apply` 收的是 `rows` 里的变量，跟折不折没关系。
+                    """
                     names = list(rows)
                     many = len(names) > providers.FOLD_AT
                     groups, flat = providers.fold_groups(
                         names, at=1 if many else providers.FOLD_AT)
+                    if many and flat:
+                        groups = groups + [{"key": providers.REST_KEY, "models": list(flat)}]
+                        flat = []
                     owner, members_of = {}, {}
                     for g in groups:
                         members_of[g["key"]] = list(g["models"])
@@ -1076,7 +1232,7 @@ class SettingsMixin:
                     for m in names:
                         k = owner.get(m)
                         if k is None:
-                            out.append(("row", m, [m]))       # flat 里的也是 k is None
+                            out.append(("row", m, [m]))       # 没建组的（含模型本来就少的）平铺
                             continue
                         if k in emitted:
                             continue                          # 成员已在组头后面排过
@@ -1117,7 +1273,11 @@ class SettingsMixin:
                             lbl = tk.Label(table, text="", cursor="hand2",
                                            font=("Microsoft YaHei UI", 9, "bold"),
                                            background=widgets.default_bg(), anchor="w")
-                            f = folds[key] = {"open": False, "hdr": lbl, "models": []}
+                            # 「其他」默认**展开**：它里面本来就是要露面的零散模型，
+                            # 收起来等于在这份"选哪些进主页面"的清单里把它们藏了。
+                            # （主页面菜单那边是 tk.Menu 的 cascade，天生收起，不冲突）
+                            f = folds[key] = {"open": key == providers.REST_KEY,
+                                              "hdr": lbl, "models": []}
                             lbl.bind("<Button-1>", lambda e, k=key: toggle(k))
                         f["models"] = list(models)
                         f["hdr"].configure(text=group_text(key, models, f["open"]))
@@ -1223,9 +1383,20 @@ class SettingsMixin:
                     status.set("接口给了 %d 个模型（新增 %d 个）。" % (len(ids), added))
 
                 def try_add():
+                    """"这名字服务端认不认"只有**对话模型**能零成本问出来。
+
+                    生图 / 生视频的模型名走各家原生接口：拿 `chat/completions` 去试必然
+                    `Model not exist`（服务端不认它是对话模型），而真正的媒体端点一试就是
+                    真金白银（MiniMax 出图按张计费）。所以认出来不是文本模型时**不发那次
+                    注定没意义的请求**，直接按名字收进表并说清为什么验不了。
+                    """
                     m = e_new.get().strip()
                     if not m:
                         status.set("先输入模型名。")
+                        return
+                    if providers.guess_kind(m) != "text":
+                        manual_add("这个名字看着像媒体模型，对话接口验不了它"
+                                   "（原生媒体接口一试就计费）")
                         return
                     status.set("正在用「%s」试一次最小请求（服务端会点名说这个名字认不认）…" % m)
 
@@ -1246,22 +1417,32 @@ class SettingsMixin:
                     else:
                         status.set("❌ %s：%s" % (m, text))
 
-                def manual_add():
+                def manual_add(why=""):
                     """生图 / 生视频的模型**不在** /models 清单里，也不能拿文本请求去试跑
                     （服务端会因"这个模型不能聊天"拒掉）。v40 接了 MiniMax/智谱/华为的
                     原生媒体接口后这条路必须开：按名字直接收进表，能力按名字给默认值，
-                    用户在那一行右侧的下拉里改。"""
+                    用户在那一行右侧的下拉里改。`why` 是"为什么没走验证"的说明。
+                    """
                     m = e_new.get().strip()
                     if not m:
                         status.set("先输入模型名。")
-                        return
+                        return False
                     if m in rows:
                         status.set("表里已经有「%s」了。" % m)
-                        return
+                        return False
                     k = providers.guess_kind(m)
                     add_models([(m, k, True)])
-                    status.set("已按名字加入「%s」（默认能力：%s；觉得不对在那一行右边改）。"
-                               % (m, providers.KIND_LABEL[k]))
+                    extra = ""
+                    if k != "text":
+                        p = providers.get_provider(self.cfg, pid) or {}
+                        if not providers.supports_media(p, k):
+                            extra = "；注意：这一家还没接%s的原生接口，发送前会被拦下" \
+                                % providers.KIND_LABEL[k]
+                    status.set("%s已按名字加入「%s」（能力：%s；觉得不对在那一行右边改）%s。"
+                               % ((why + "，") if why else "", m,
+                                  providers.KIND_LABEL[k], extra))
+                    e_new.delete(0, "end")
+                    return True
 
                 # 底部三件套：手填行（含刷新/验证按钮）+ 确定取消，都排在表格之前分配空间，
                 # 窗口再矮也是压表格，不会把按钮挤掉
@@ -1271,10 +1452,14 @@ class SettingsMixin:
                           font=("Microsoft YaHei UI", 9)).pack(side="left", padx=(0, 4))
                 e_new = ttk.Entry(botf, width=16)
                 e_new.pack(side="left", fill="x", expand=True)
+                # 回车 = 直接加入。以前这个框一个绑定都没有：敲完名字按回车什么也不会发生，
+                # 看起来就是"加不进去"（W 实测报的那条）。
+                e_new.bind("<Return>", lambda _e: manual_add())
+                e_new.bind("<KP_Enter>", lambda _e: manual_add())
                 ttk.Button(botf, text="试一试并加入", width=12,
                            command=try_add).pack(side="left", padx=(6, 0))
                 ttk.Button(botf, text="直接加入", width=10,
-                           command=manual_add).pack(side="left", padx=(6, 0))
+                           command=lambda: manual_add()).pack(side="left", padx=(6, 0))
                 # 最下沿：左边两个动作按钮，右边确定/取消，一行装得下 470px 的最小宽度
                 bf2 = ttk.Frame(d)
                 bf2.pack(side="bottom", fill="x", padx=12, pady=(2, 12), before=botf)
@@ -1403,17 +1588,18 @@ class SettingsMixin:
                 threading.Thread(target=work, daemon=True).start()
 
             def refresh_combo(keep=None):
-                ids = [p["id"] for p in providers.list_providers(self.cfg, enabled_only=False)]
-                combo["values"] = ids + ["＋ 新建 provider"]
-                target = keep if keep in ids else (ids[0] if ids else "")
-                combo.set(target or "＋ 新建 provider")
-                load(target)
+                """下拉只列显示名，pid 留在背后用（把代码 id 摆到界面上，用户认不出哪家）。"""
+                pairs = provider_labels(self.cfg)
+                combo["values"] = [lb for lb, _p in pairs] + [NEW_PROVIDER_LABEL]
+                by_pid = {p: lb for lb, p in pairs}
+                pid = keep if keep in by_pid else (pairs[0][1] if pairs else "")
+                combo.set(by_pid.get(pid, NEW_PROVIDER_LABEL))
+                load(pid)
 
             def on_pick(_e=None):
                 sel = combo.get()
-                load("" if sel not in [p["id"] for p in
-                                       providers.list_providers(self.cfg, enabled_only=False)]
-                     else sel)
+                pid = {lb: p for lb, p in provider_labels(self.cfg)}.get(sel, "")
+                load(pid)          # 选中"＋ 新建服务商…"时 pid 为空 → 空白新条目
 
             bar = ttk.Frame(t4b)
             bar.grid(row=r4b["i"], column=0, columnspan=3, sticky="w", pady=(0, 8))
@@ -1448,7 +1634,8 @@ class SettingsMixin:
             fields = ttk.Frame(t4b)      # 名称：只有自定义服务商可填
             fields.grid(row=r4b["i"], column=0, columnspan=3, sticky="w")
             sub = {"i": 0}
-            ent(fields, sub, None, "名称", "服务商显示名；新建时用它生成索引，起个短的英文名更好用。",
+            ent(fields, sub, None, "名称", "服务商显示名（菜单、下拉、提示里都用它，写中文就行）；"
+                                        "新建时它还兼作这条记录的索引名。",
                 width=30, var=vars_["name"])
             r4b["i"] += 1
 
@@ -1652,9 +1839,17 @@ class SettingsMixin:
             r4c["i"] += 1
             pi_var = tk.StringVar(value="0")
             ps_var = tk.StringVar(value="0")
+            # 下拉里同样只显示名字（原来写的是「id — 名称」，第一眼看去全是英文代号）
+            _pp = [(lb, p) for lb, p in provider_labels(self.cfg)
+                   if p in {x["id"] for x in cands}]
+            _pp_back = {lb: p for lb, p in _pp}
             price_combo = ttk.Combobox(
                 t4c, state="readonly", width=30,
-                values=["%s — %s" % (x["id"], x["name"]) for x in cands])
+                values=[lb for lb, _p in _pp])
+
+            def _price_pid():
+                return _pp_back.get(price_combo.get(), "")
+
             row(t4c, r4c, "服务商", price_combo,
                 "单价写进这个服务商的记录，只用于提交前的费用预估。")
             ent(t4c, r4c, None, "元/张", "生图单价（元）。不知道就留 0，界面会明说"
@@ -1664,7 +1859,7 @@ class SettingsMixin:
             price_lbl = tk.StringVar(value="")
 
             def pick_price_provider(*_a):
-                pid = price_combo.get().split(" — ")[0].strip()
+                pid = _price_pid()
                 p = providers.get_provider(self.cfg, pid) or {}
                 pi_var.set(str(p.get("price_per_image") or 0))
                 ps_var.set(str(p.get("price_per_second") or 0))
@@ -1673,7 +1868,7 @@ class SettingsMixin:
             price_combo.bind("<<ComboboxSelected>>", pick_price_provider)
 
             def save_price():
-                pid = price_combo.get().split(" — ")[0].strip()
+                pid = _price_pid()
                 if not pid:
                     price_lbl.set("先选一个服务商。")
                     return
@@ -1707,13 +1902,22 @@ class SettingsMixin:
             _n_rec = len(self.cfg.get("model_ngl") or {})
             _n_ctx = len(self.cfg.get("model_ctx") or {})
             _n_proj = len(self.cfg.get("model_mmproj") or {})
-            ttk.Label(t5, text=("当前：模型 %d 个（含可看图）｜ 层数记录 %d ｜ context 记录 %d ｜ mmproj 记录 %d\n"
+            _n_hid = len(self.cfg.get("model_hidden") or {})
+            ttk.Label(t5, text=("当前：模型 %d 个（含可看图）｜ 层数记录 %d ｜ context 记录 %d ｜ mmproj 记录 %d ｜ 未进菜单 %d\n"
                                 "打开软件时会自动补全缺失项；下方可手动触发，或整理文件结构。"
-                                % (len(_cc), _n_rec, _n_ctx, _n_proj)),
+                                % (len(_cc), _n_rec, _n_ctx, _n_proj, _n_hid)),
                       foreground="#555555", wraplength=760, justify="left",
                       font=("Microsoft YaHei UI", 9)).grid(
                 row=0, column=0, columnspan=3, sticky="w", pady=(0, 8))
             r5["i"] = 1
+
+            frm = ttk.Frame(t5)
+            ttk.Button(frm, text="管理本地模型…", width=18,
+                       command=self.open_local_models).pack(side="left")
+            row(t5, r5, "菜单与配套件", frm,
+                "三组模型与各自的配套件（VAE / 文本编码器 / CLIP / T5…）摊开在一页里，"
+                "可逐个勾选要不要出现在顶部模型菜单 —— 生图 / 生视频附带的"
+                "「能聊天的 .gguf 编码器」常需要收起来。只改显示，不动文件。")
 
             fr = ttk.Frame(t5)
             ttk.Button(fr, text="扫描并补全缺失项", width=18,
@@ -1883,6 +2087,13 @@ class SettingsMixin:
         for k in STR_KEYS:
             if k in v:
                 c[k] = str(v[k].get()).strip()
+        # 模型族下拉显示的是中文标签，配置里要存回 sdprofile 的家族代码；
+        # 选"自动判断"存空串——别让界面文案跑到配置里去。
+        for k, kind in (("img_family", "image"), ("vid_family", "video")):
+            if k in v:
+                code = {t: cf for cf, t in sdprofile.family_choices(kind)}.get(
+                    str(v[k].get()), sdprofile.AUTO)
+                c[k] = "" if code == sdprofile.AUTO else str(code)
         if "system_prompt" in v:
             c["system_prompt"] = v["system_prompt"].get("1.0", "end").rstrip("\n")
         if "show_reasoning" in v:

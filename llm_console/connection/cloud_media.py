@@ -21,8 +21,13 @@ connection 层，UI 只消费归一化后的事件与结构。
 
 坑 51/52 的规矩仍然成立：认不出来就明确拒绝，别拿一家形状去发另一家。
 
-范围边界（W 于 2026-09-30 定的二三期范围）：**只做文生**——云端生图不吃参考图、
-云端生视频不吃首帧；要图生图/首帧请切回本地 sd-cli 那条链路。
+范围边界：**云端生图可以吃参考图**，但只放行官方页写明入参格式的两家 ——
+阿里云把图放进 `content[]`、MiniMax 放进 `subject_reference[]`，两家的图都支持
+"公网 URL 或 base64 data URL"，所以本地图不用先上图床（见下方 REF_LIMITS）。
+2026-10-01 三家真机各跑一张：阿里云（Token Plan / 百炼按量）保住了底图的构图，
+是真正的图生图；MiniMax 的 `subject_reference` 实测是**主体/角色参考**（喂条纹图
+它生成人像），所以界面措辞按 `providers.ref_image_mode` 分开，别一律叫"图生图"。
+**云端生视频仍然只做文生**：首帧/尾帧请切回本地 sd-cli 那条链路。
 
 三条来自文档 §12.1 的硬约束（阿里云这条链路，本机实测过），都在代码里落实：
   · 异步任务端点**必须**带 X-DashScope-Async: enable，缺了直接报"不支持同步调用"；
@@ -554,8 +559,119 @@ def _size_for(protocol, size):
     return [("size", s)]
 
 
+# ---------------------------------------------------------------- 参考图（图生图）
+# 两家官方 API 页都写明参考图可以是 **URL 或 base64 data URL**，所以本地图不用先上图床：
+#   阿里云  POST …/multimodal-generation/generation
+#           input.messages[0].content = [{"image": …}, … , {"text": 提示词}]（一次最多 3 张，
+#           JPG/JPEG/PNG/BMP/TIFF/WEBP/GIF，单张 ≤10MB；qwen-image-edit 那一支不吃 size/prompt_extend）
+#   MiniMax POST /v1/image_generation
+#           subject_reference = [{"type": "character", "image_file": …}]（官方只写了 character
+#           这一种，图要 JPG/PNG、<10MB）
+# 智谱的 /images/generations 请求体里没有参考图入口（官方页只有 prompt/model/size 一类字段），
+# 华为那页没查过 —— 两家都不放行，判据在 providers.REF_IMAGE_APIS，别在这儿再列一遍。
+REF_MAX_BYTES = 10 * 1024 * 1024
+REF_LIMITS = {
+    PROTOCOL_ALIYUN: {"max": 3,
+                      "exts": {".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+                               ".png": "image/png", ".bmp": "image/bmp",
+                               ".tif": "image/tiff", ".tiff": "image/tiff",
+                               ".webp": "image/webp", ".gif": "image/gif"}},
+    PROTOCOL_MINIMAX: {"max": 1,
+                       "exts": {".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+                                ".png": "image/png"}},
+}
+
+
+def ref_limits(protocol):
+    return REF_LIMITS.get(protocol)
+
+
+def ref_data_url(path, protocol):
+    """本地图片 → data URL。返回 `(data_url, 错误说明)`，错误一律带下一步动作。
+
+    格式与体积都在**发出去之前**判：这两家对坏图的回包各不相同（有的给 400，有的给
+    200 + 空结果），拿真金白银去试服务端脸色不划算（同坑 53 的教训：提交返回 200
+    不等于没扣钱）。
+    """
+    lim = ref_limits(protocol)
+    if not lim:
+        return "", "这一家的生图接口不支持参考图"
+    p = str(path or "")
+    if not os.path.isfile(p):
+        return "", "参考图文件不在了：%s" % (p or "（空路径）")
+    ext = os.path.splitext(p)[1].lower()
+    mime = lim["exts"].get(ext)
+    if not mime:
+        ok_fmt = " / ".join(sorted({e.lstrip(".").upper() for e in lim["exts"]}))
+        return "", ("这一家的参考图只收 %s，你选的是 %s —— 另存成支持的格式再发"
+                    % (ok_fmt, ext or "无扩展名"))
+    try:
+        size = os.path.getsize(p)
+    except Exception:
+        size = 0
+    if size > REF_MAX_BYTES:
+        return "", "参考图 %.1fMB，超过这一家 10MB 的上限 —— 先把图压小一点" % (size / 1048576.0)
+    try:
+        with open(p, "rb") as f:
+            raw = f.read()
+    except Exception as e:
+        return "", "读不了这张图：%s" % e
+    if not raw:
+        return "", "这张图是空文件（0 字节），换一张"
+    return "data:%s;base64,%s" % (mime, base64.b64encode(raw).decode("ascii")), ""
+
+
+def ref_images_error(provider, paths):
+    """发送前的预检（数量 / 格式 / 体积）。返回人话说明，空串代表可以发。"""
+    paths = [p for p in (paths or []) if str(p or "").strip()]
+    if not paths:
+        return ""
+    proto = protocol_of(provider)
+    lim = ref_limits(proto)
+    if not lim:
+        return ("这一家的生图接口只收文字提示词，参考图请改用本地的〔生图〕模型"
+                "（图片已保留，不会丢）")
+    if len(paths) > lim["max"]:
+        return ("参考图一次最多 %d 张（这一家的上限），现在选了 %d 张"
+                % (lim["max"], len(paths)))
+    for p in paths:
+        _url, err = ref_data_url(p, proto)
+        if err:
+            return err
+    return ""
+
+
+def _shrink_for_log(body):
+    """日志里把 base64 那种超长字符串折成一行摘要。
+
+    逐任务 `.log` 存在的意义是"一眼看清发了什么"（H3 那次结案就靠它），把 8MB 的
+    base64 整段写进去就把日志本身变成了查不动的砖头。
+    """
+    if not isinstance(body, dict):
+        return body
+    out = {}
+    for k, v in body.items():
+        if isinstance(v, str) and len(v) > 200:
+            out[k] = "<%d 字符，已折行：%s…>" % (len(v), v[:60])
+        elif isinstance(v, dict):
+            out[k] = _shrink_for_log(v)
+        elif isinstance(v, list):
+            out[k] = [_shrink_for_log(i) if isinstance(i, (dict, list))
+                      else (i if not (isinstance(i, str) and len(i) > 200)
+                            else "<%d 字符，已折行：%s…>" % (len(i), i[:60])) for i in v]
+        else:
+            out[k] = v
+    return out
+
+
 def image_body(model, prompt, size="", negative="", seed=-1, extra=None,
-               protocol=PROTOCOL_ALIYUN):
+               protocol=PROTOCOL_ALIYUN, ref_images=None):
+    """拼一次云端生图的请求体。`ref_images` 是**已经编成 data URL 的参考图**列表。
+
+    编码放在 `generate_image` 里做（那里能出"这张图不合格"的人话），这里只负责各家**字段
+    形状不同**这一件事：阿里云把图塞进 `content[]`，MiniMax 塞进 `subject_reference[]`。
+    """
+    refs = [u for u in list(ref_images or []) if str(u).strip()]
     if protocol == PROTOCOL_MINIMAX:
         body = {"model": model, "prompt": prompt, "response_format": "url"}
         for k, v in _size_for(protocol, size):
@@ -567,6 +683,10 @@ def image_body(model, prompt, size="", negative="", seed=-1, extra=None,
             pass
         # 官方只写了 model/prompt/aspect_ratio 或 width+height/n/response_format/seed；
         # negative_prompt 这一家没有 → 不发明字段，交给 extra 显式带
+        for u in refs[:REF_LIMITS[PROTOCOL_MINIMAX]["max"]]:
+            # 图生图的入参就这一个字段；type 官方只列了 character 一种，不猜别的值
+            body.setdefault("subject_reference", []).append(
+                {"type": "character", "image_file": u})
         body.update(extra or {})
         return body
     if protocol == PROTOCOL_ZHIPU:
@@ -586,8 +706,9 @@ def image_body(model, prompt, size="", negative="", seed=-1, extra=None,
             pass
         body.update(extra or {})
         return body
-    body = {"model": model,
-            "input": {"messages": [{"role": "user", "content": [{"text": prompt}]}]}}
+    content = [{"image": u} for u in refs[:REF_LIMITS[PROTOCOL_ALIYUN]["max"]]]
+    content.append({"text": prompt})
+    body = {"model": model, "input": {"messages": [{"role": "user", "content": content}]}}
     p = {}
     for k, v in _size_for(protocol, size):
         p[k] = v
@@ -607,8 +728,11 @@ def image_body(model, prompt, size="", negative="", seed=-1, extra=None,
 
 
 def generate_image(cfg, provider, model, prompt, dest, emit=None, stop_flag=None,
-                   negative="", size="", seed=-1, log=None):
+                   negative="", size="", seed=-1, log=None, ref_images=None):
     """云端生图：同步端点出 URL；万一服务端给了 task_id，就地转成轮询。
+
+    `ref_images` 是本地参考图路径列表（图生图）。发送前先 `ref_images_error` 预检，
+    不合格就地报错，**一次请求都不发**（预检在 UI 侧也做一遍，这里是最后一道）。
 
     返回 dict(ok, paths, urls, error, seconds, log_path, raw)。产物 URL 只活 24 小时，
     所以成功判定 = **文件已经在本地**，而不是"服务端回了 200"。
@@ -620,11 +744,21 @@ def generate_image(cfg, provider, model, prompt, dest, emit=None, stop_flag=None
         log = _Log(dest + ".log", "云端生图 %s" % model)
     timeout = int(cfg.get("cloud_image_wait_seconds", 180) or 180)
     proto = protocol_of(provider)
+    bad = ref_images_error(provider, ref_images)
+    if bad:
+        return _img_fail(bad, t0, log)
+    urls_in = []
+    for p in [x for x in (ref_images or []) if str(x or "").strip()]:
+        data_url, err = ref_data_url(p, proto)
+        if err:
+            return _img_fail(err, t0, log)
+        urls_in.append(data_url)
     body = image_body(model, prompt, size=size, negative=negative, seed=seed,
                       extra=providers.media_extra_params(provider, model),
-                      protocol=proto)
-    log.json("请求 POST %s" % image_endpoint(provider), body)
-    emit(("line", "云端生图：%s" % providers.short_of(model)))
+                      protocol=proto, ref_images=urls_in)
+    log.json("请求 POST %s" % image_endpoint(provider), _shrink_for_log(body))
+    emit(("line", "云端生图：%s%s" % (providers.short_of(model),
+                                      "（带 %d 张参考图）" % len(urls_in) if urls_in else "")))
     emit(("progress", "☁ 云端生图中… %ds" % int(time.time() - t0)))
 
     st, text = _request(provider, "POST", image_endpoint(provider), body, timeout=timeout)

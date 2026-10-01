@@ -55,7 +55,7 @@ BUILTIN_PROVIDERS = {
         "base_url": "https://api.minimaxi.com/v1",
     },
     "zhipu": {
-        "name": "智谱 GLM",
+        "name": "智谱GLM",
         "base_url": "https://open.bigmodel.cn/api/paas/v4",
     },
     "kimi": {
@@ -186,7 +186,7 @@ MEDIA_ZHIPU = "zhipu"
 MEDIA_HUAWEI = "huawei"
 MEDIA_APIS = ("auto", "none", MEDIA_ALIYUN, MEDIA_MINIMAX, MEDIA_ZHIPU, MEDIA_HUAWEI)
 MEDIA_LABEL = {MEDIA_ALIYUN: "阿里云原生（DashScope）", MEDIA_MINIMAX: "MiniMax 原生",
-               MEDIA_ZHIPU: "智谱 GLM 原生", MEDIA_HUAWEI: "华为云 MaaS 原生"}
+               MEDIA_ZHIPU: "智谱GLM 原生", MEDIA_HUAWEI: "华为云MaaS 原生"}
 # 原生路径**自带版本段**（/v1/...）的协议：根地址只取到"协议+主机"，
 # 否则从 base_url 推根时会把 /openai 这种中间段留在根里，拼出 404
 _HOST_ONLY_MEDIA = (MEDIA_MINIMAX, MEDIA_HUAWEI)
@@ -296,6 +296,39 @@ def supports_media(p, kind):
     if kind not in (KIND_IMAGE, KIND_VIDEO):
         return True
     return bool(media_api(p) and media_api_root(p))
+
+
+# 收参考图（图生图）的原生协议。判据只认**各家官方 API 页写明的字段**：
+#   阿里云 `multimodal-generation/generation` → content[] 里放 {"image": URL 或 data:image/...;base64,...}
+#   MiniMax `/v1/image_generation` → subject_reference[].image_file（同样收 URL 或 base64 data URL）
+# 智谱的 `/images/generations` 请求体里只有 prompt/model/size 一类字段，官方页没有参考图入口；
+# 华为那页没查过（本机没密钥），所以两家都不放行 —— 放行错了就是白扣一次费。
+#
+# 2026-10-01 真机各跑一张（图=红黄斜条纹，提示词"改成夜晚蓝紫色调、其余不变"）：
+#   阿里云（Token Plan 与百炼按量）出图**保住了条纹的几何结构**，Token Plan 的 usage 里
+#   还回显 input_image_count=1 / rewrite_status=success → 这条是真正的"底图重绘"。
+#   MiniMax 的 subject_reference 官方定位就是**主体/角色参考**（type 只有 character 一种），
+#   喂条纹图它直接生成一个蓝紫夜景的人像 → 图被"用"了，但用的不是底图那条语义。
+REF_IMAGE_APIS = (MEDIA_ALIYUN, MEDIA_MINIMAX)
+REF_EDIT_APIS = (MEDIA_ALIYUN,)          # 参考图 = 底图重绘
+REF_SUBJECT_APIS = (MEDIA_MINIMAX,)      # 参考图 = 主体 / 角色一致性
+
+
+def supports_ref_image(p):
+    """这一家的云端生图能不能带参考图（能力判定层与 📎 入口都问它，别在界面里各写一遍）。
+
+    走 `media_api()` 而不是直接读字段：它同时处理"手动指定的协议"与"按域名自动认"两种来源。
+    """
+    return media_api(p) in REF_IMAGE_APIS
+
+
+def ref_image_mode(p):
+    """参考图在这一家到底是什么语义："edit"=底图重绘，"subject"=主体/角色参考。
+
+    回显与提示都问它。写成两种而不是"都叫图生图"：把 MiniMax 的角色参考说成底图重绘，
+    用户会以为出来的是同一张图换了个色调。
+    """
+    return "subject" if media_api(p) in REF_SUBJECT_APIS else "edit"
 
 
 
@@ -619,6 +652,7 @@ def short_labels(models):
 # ---------------------------------------------------------------------------
 FOLD_AT = 15          # 服务商模型数超过这个值才分组（W 定的阈值）
 FOLD_MAX_DEPTH = 2    # 前缀最多取两段
+REST_KEY = "其他"     # 堆叠生效后，凑不成同族组的零散条目统一收进这一组（菜单与勾选窗口共用）
 
 
 def _fam_key(model, depth):

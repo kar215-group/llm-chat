@@ -33,6 +33,14 @@ class App(ChatMixin, ImageGenMixin, VideoGenMixin, ServiceMixin, ModelsMixin, Se
         self.root = root
         self.cfg = cfg
         self.history = []            # 多轮对话（不含 system）
+        # 对话记录（core/chatlog）：会话号在第一条消息时才生成，
+        # 免得"打开又关掉"留一堆空文件；_sess_path 是它落盘后的路径，
+        # _announced_path = "这份已经在界面上说过一次了"，_log_key = 内容签名（防重复写盘）
+        self._sess_id = ""
+        self._sess_path = ""
+        self._sess_saved = False
+        self._announced_path = ""
+        self._log_key = None
         self._busy = False           # 正在生成回复
         self._svc_busy = False       # 服务启动/停止操作进行中（防重入）
         self._closing = False
@@ -162,30 +170,26 @@ class App(ChatMixin, ImageGenMixin, VideoGenMixin, ServiceMixin, ModelsMixin, Se
         self.chat.tag_configure("error", foreground="#c01c28")
         self.chat.tag_configure("meta", foreground="#a8a8a8",
                                 font=("Microsoft YaHei UI", 9))
-        # 启动时按当前模型类型给出引导
+        # 启动时按当前模型类型给出引导：只说"这一步怎么用"，细节留给选模型时那一句
+        # 与设置页 / README（W 的要求：字数变少，不逐条罗列细节）
         name = display_name(self.cfg, self.cfg["model"])
-        if self.cfg.get("model_kind") == "image":
+        kind = self.cfg.get("model_kind")
+        if kind in ("image", "video"):
+            # 附图在生图那边是参考图、在生视频这边是**首帧**（-i/--init-img，本机主体是
+            # fl2va 变体，写成"参考图"是坑 42 的老错）；云端生视频没有首帧入参，所以那条不承诺
+            extra = {"image": "和参考图（可选）",
+                     "video": "" if providers.is_cloud(self.cfg) else "和首帧（可选）"}[kind]
             self._append("本地对话台已就绪。\n"
-                         "当前模型：%s —— 生图无需启动服务，直接发提示词即可。\n"
+                         "当前模型：%s —— 无需启动服务，直接发提示词%s即可。\n"
                          "点顶部模型名切换模型；回车发送，Shift+回车换行；"
                          "生成中可点「停止生成」。\n"
-                         "────────────────────\n" % name, "meta")
-        elif self.cfg.get("model_kind") == "video":
-            # 附图是**首帧**（-i/--init-img）：本机主体是 fl2va 变体，不是 Ref2VA，
-            # 旧文案写"参考图"是 v30.2 之前的说法（坑 42）。
-            self._append("本地对话台已就绪。\n"
-                         "当前模型：%s —— 生视频同样无需启动服务，直接发提示词即可；"
-                         "附图会作为首帧。\n"
-                         "出片耗时取决于显卡与档位（通常几分钟）；生成中可点「停止生成」。\n"
-                         "点顶部模型名切换模型；回车发送，Shift+回车换行。\n"
-                         "────────────────────\n" % name, "meta")
+                         "────────────────────\n" % (name, extra), "meta")
         else:
             self._append("本地对话台已就绪。\n"
                          "当前模型：%s（语言模型）—— 点「启动服务」加载，"
                          "状态变 ● 运行中 后即可对话。\n"
                          "点顶部模型名切换模型；回车发送，Shift+回车换行；"
                          "「停止生成」会保留已生成的内容。\n"
-                         "新放进模型目录的 .gguf 会被自动识别，并按显存算好 GPU 层数。\n"
                          "────────────────────\n" % name, "meta")
 
     def _build_inputbar(self):
@@ -653,6 +657,8 @@ class App(ChatMixin, ImageGenMixin, VideoGenMixin, ServiceMixin, ModelsMixin, Se
         elif self._svc_busy:
             self._abort_startup()
         # 场景 3：空闲 —— 直接退出
+        # 关窗前把对话记录补一份：中途没走到 _finish_turn 的内容（只有用户话）也留住
+        self._save_chat_log()
         self._closing = True
         self.proxy.stop()
         self.root.destroy()

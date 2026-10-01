@@ -8,10 +8,11 @@
   聊天模型（云端）  /models 没有统一的能力字段，只能按名字启发式**猜**；
                    所以"猜出来的支持"不算数，要么用户明确声明，要么发一次真请求验证。
   生图模型          本地：附图 = 参考图/底图（图生图），由 sd.cpp 的 -i 决定 → 支持。
-                   云端：走服务商原生接口，本期只接文生 → 不支持附图。
+                   云端：看这一家的原生生图接口有没有参考图入参（providers.supports_ref_image，
+                   判据是各家官方页写明的字段）→ 有就支持，没有就是不支持，不猜。
   生视频模型        本地：能不能给首帧取决于权重变体：fl2va / flf2v / i2v / ref2va 都有
                    图像输入通路，纯 t2va / t2v 没有 → 按变体标记判，允许人工覆盖。
-                   云端：本期只接文生 → 不支持首帧。
+                   云端：目前各家只接了文生 → 不支持首帧。
 
 结论三态：yes / no / unknown；外加 basis 说明是谁下的结论，UI 才好决定要不要拦住用户。
 """
@@ -69,13 +70,22 @@ def auto_detect(cfg):
     cloud = providers.is_cloud(cfg)
     if kind == "image":
         if cloud:
-            # 云端生图（二期）走的是服务商原生接口，W 定的范围是**只做文生**：
-            # "本地图要怎么送到云端"是另一件事，别在这里放行成"能附图"。
-            return NO, "cloud", "云端生图这一期只接文生，参考图请用本地的〔生图〕模型"
+            # 云端生图能不能带参考图 = 这一家的原生接口有没有那个字段（判据在
+            # providers.REF_IMAGE_APIS，来源是各家官方页）。不靠"看起来像不像"放行：
+            # 放行错了就是一次白花花的计费。
+            p = providers.current_provider(cfg) or {}
+            if providers.supports_ref_image(p):
+                # 同样是"收参考图"，阿里云拿它当底图重绘，MiniMax 拿它当主体/角色参考
+                # （2026-10-01 真机各跑一张实测出来的差别），所以话分两句说
+                if providers.ref_image_mode(p) == "subject":
+                    return YES, "cloud", "这一家的生图接口收参考图（按主体/角色一致性用图）"
+                return YES, "cloud", "这一家的生图接口收参考图（图生图）"
+            return NO, "cloud", ("这一家的生图接口只收文字提示词，参考图请用本地的"
+                                 "〔生图〕模型")
         return YES, "engine", "生图走引擎的参考图通路（-i），可以附图"
     if kind == "video":
         if cloud:
-            return NO, "cloud", "云端生视频这一期只接文生，首帧请用本地的〔生视频〕模型"
+            return NO, "cloud", "云端生视频只接文生，首帧请用本地的〔生视频〕模型"
         if _VIDEO_IMG_IN.search(key):
             return YES, "variant", "该视频权重是带图像输入通路的变体（fl2va / flf2v / i2v 这类）"
         if _VIDEO_TEXT_ONLY.search(key):
