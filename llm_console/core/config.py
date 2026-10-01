@@ -30,7 +30,7 @@ CONFIG_PATH = os.path.join(APP_DIR, "gui_config.json")
 
 # 版本号：发版时改这一处（--selfcheck / --version 会打印它）。
 # GitHub Release 的 tag 要与它一致（tag 去掉开头的 v），Actions 工作流会做一致性校验。
-APP_VERSION = "0.0.1beta"
+APP_VERSION = "0.0.2beta"
 
 CFG_VERSION = 2
 
@@ -117,6 +117,22 @@ DEFAULT_CONFIG = {
     "model_provider": "local",     # 当前选中模型属于谁：local = 本地；否则是 provider id
     # 文本附件超预算时，是否让云端模型自己决定读哪一段（多花一次规划请求，默认关）
     "cloud_file_model_decides": False,
+    # ---- 云端生图 / 生视频（二三期：走服务商原生接口，不走本地 sd-cli）----
+    # 产物 URL 只活 24 小时，所以成功判定是"文件已在本地"；目录留空 = <程序目录>/cloud_out/*
+    "cloud_img_dir": "",
+    "cloud_vid_dir": "",
+    "cloud_img_size": "1024*1024",     # 界面按「宽x高」填，发出去前按各家写法换算
+    "cloud_img_negative": "",
+    "cloud_video_resolution": "",      # 空 = 不传该参数，用服务端默认（各家档位不一样）
+    "cloud_video_duration": 5,         # 秒；各家允许区间不同，超范围会被服务端点名报错
+    "cloud_video_ratio": "",           # 空 = 不传（图生视频时比例常由素材决定）
+    "cloud_video_negative": "",
+    "cloud_poll_seconds": 15,          # 官方建议 15s；三个端点合计 20 QPS，别调太密
+    "cloud_wait_minutes": 20,          # 单次等待上限，超了转入台账等「取回」
+    "cloud_image_wait_seconds": 180,   # 同步生图一次请求的超时
+    "cloud_submit_timeout": 90,
+    "cloud_download_seconds": 180,
+    "cloud_keep_days": 7,              # 台账里已完成任务保留天数（未完成的不过期就留着）
     # ---- 模型别名（key = GGUF 文件名；value = 页面显示的简称）----
     # 一般无需手填：display_name 会用 make_alias() 从文件名自动生成
     "model_aliases": {},
@@ -124,7 +140,10 @@ DEFAULT_CONFIG = {
 
 INT_KEYS = ("port", "ngl", "ctx", "threads", "reasoning_budget",
             "max_tokens", "top_k", "seed", "img_steps", "img_seed",
-            "proxy_port", "vid_frames", "vid_fps", "vid_steps", "vid_seed")
+            "proxy_port", "vid_frames", "vid_fps", "vid_steps", "vid_seed",
+            "cloud_video_duration", "cloud_poll_seconds", "cloud_wait_minutes",
+            "cloud_image_wait_seconds", "cloud_submit_timeout",
+            "cloud_download_seconds", "cloud_keep_days")
 
 FLOAT_KEYS = ("temperature", "top_p", "repeat_penalty", "vram_gb", "ram_gb",
               "img_cfg", "vid_cfg")
@@ -134,7 +153,10 @@ STR_KEYS = ("model", "models_dir", "host", "api_key", "reasoning_mode",
             "img_model_file", "video_model_dir", "vid_model_file",
             "vid_llm_file", "vid_vae_file", "vid_format", "vid_size",
             "vid_backend", "vid_params_backend", "vid_extra_args",
-            "vid_neg_prompt", "model_provider")
+            "vid_neg_prompt", "model_provider",
+            "cloud_img_dir", "cloud_vid_dir", "cloud_img_size",
+            "cloud_img_negative", "cloud_video_resolution", "cloud_video_ratio",
+            "cloud_video_negative")
 
 _CFG_LOCK = threading.RLock()   # 可重入：save_config 自带锁，调用方若已持锁不会自我死锁
 
@@ -196,3 +218,16 @@ def api_headers(cfg):
 
 def gen_api_key():
     return "sk-" + secrets.token_urlsafe(24)
+
+
+def cloud_media_dir(cfg, kind):
+    """云端产物目录：配置项优先，留空回退 <程序目录>/cloud_out/{images,videos}。
+
+    两条纪律：① 不写死盘符（坑 55，项目要分发）；② **不挂到 sd.cpp 下面**——
+    云端这条路根本不启动本地引擎，别人没部署 sd.cpp 时也该能出图出片。
+    """
+    key = "cloud_img_dir" if kind == "image" else "cloud_vid_dir"
+    d = str((cfg or {}).get(key, "") or "").strip()
+    if d:
+        return d
+    return os.path.join(APP_DIR, "cloud_out", "images" if kind == "image" else "videos")

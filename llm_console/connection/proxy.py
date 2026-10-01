@@ -86,6 +86,12 @@ class _ProxyHandler(http.server.BaseHTTPRequestHandler):
             payload = json.loads(self.rfile.read(n).decode("utf-8")) if n else {}
         except Exception as e:
             return self._json(400, {"error": {"message": "bad json: %s" % e}})
+        if not isinstance(payload, dict):
+            # 合法 JSON 但不是对象（[] / null / "x" / 数字）：下面全程按字典取值，
+            # 不在这里拦住就会在 try 之外抛 AttributeError —— 请求拿不到任何响应、
+            # 连接被直接断开，agent 侧只看到"连接重置"，查不出原因。
+            return self._json(400, {"error": {"message":
+                "请求体必须是 JSON 对象（收到 %s）" % type(payload).__name__}})
 
         target = self.server.ensure_model(str(payload.get("model", "")))
         if target is None:

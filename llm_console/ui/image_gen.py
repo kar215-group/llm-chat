@@ -9,8 +9,10 @@ import time
 import tkinter as tk
 from tkinter import ttk, scrolledtext, messagebox, filedialog
 
+from ..core import cloudjobs, config, providers
 from ..core.models import scan_models
 from ..core.media import build_img_cmd, resolve_img_files
+from ..connection import cloud_media
 
 
 class ImageGenMixin:
@@ -18,6 +20,10 @@ class ImageGenMixin:
 
     # ---- 聊天流内生图（方案 A：页面形态不变，输出内嵌对话流）----
     def _start_chat_image(self, prompt, ref_img=None):
+        # 云端生图走服务商原生接口（二期），不启动本地 sd-cli：两套链路在入口就分开，
+        # 免得拿云端模型名去喂本地引擎（那是 v32 拦下的那个错）。
+        if providers.is_cloud(self.cfg):
+            return self._start_cloud_image(prompt)
         sd = self.cfg.get("sd_dir", "")
         cli = os.path.join(sd, "sd-cli.exe")
         if not os.path.isfile(cli):
@@ -74,6 +80,11 @@ class ImageGenMixin:
         self._img_mark = mark
         self._img_busy = True
         self._img_out = out
+        # 每次任务重新开始：末尾缓冲、云端日志与"这一次是不是云端"都要归零
+        self._img_tail = []
+        self._img_extra_paths = []
+        self._img_log = ""
+        self._cloud_img = False
         self._t0 = time.time()
         self._saw_sampling = False
         self._saw_decode = False
@@ -95,6 +106,80 @@ class ImageGenMixin:
             return
         threading.Thread(target=self._img_reader, args=(self._img_proc, mygen),
                          daemon=True).start()
+
+    # ---- 云端生图（二期：服务商原生接口，按 providers.media_api 分派）----
+    def _start_cloud_image(self, prompt):
+        provider = providers.current_provider(self.cfg)
+        sp = providers.split_cloud_id(self.cfg.get("model", ""))
+        model = sp[1] if sp else ""
+        # 预检在提交前做完：云端一次请求就是真金白银/套餐额度，别把"缺密钥"这种
+        # 问题发给服务端再解析它的 401（与本地链路"Popen 前预检"是同一条纪律）
+        err = cloud_media.check(self.cfg, provider, model, "image")
+        if err:
+            self._append("\n[云端生图] %s\n" % err, "error")
+            return
+        outdir = config.cloud_media_dir(self.cfg, "image")
+        try:
+            os.makedirs(outdir, exist_ok=True)
+        except Exception as e:
+            self._append("\n[云端生图] 存放目录建不出来：%s\n"
+                         "  目录可在 设置 → 云端模型 → 生图 / 生视频 里改。\n" % e, "error")
+            return
+        out = os.path.join(outdir, time.strftime("img_%Y%m%d_%H%M%S") + ".png")
+        self._append("\n【你】\n" + prompt + "\n", "user")
+        gen, q, stop = self._cloud_begin("image")
+        self._cloud_pid = str(provider["id"])
+        self._img_out = out
+        self._img_log = out + ".log"
+        self._update_img_progress_line("☁ 云端生图中… %s（%s）"
+                                       % (providers.short_of(model),
+                                          provider.get("name") or ""))
+        threading.Thread(target=self._cloud_image_worker,
+                         args=(provider, model, prompt, out, gen, q, stop),
+                         daemon=True).start()
+
+    def _cloud_image_worker(self, provider, model, prompt, dest, gen, q, stop_flag,
+                            tid=""):
+        """子线程：只往队列里投事件，绝不碰控件（坑 11/54 的铁律）。"""
+        def persist(status, raw=None):
+            cloudjobs.update_job(tid, status=status)
+        try:
+            seed = int(self.cfg.get("img_seed", -1) or -1)
+        except Exception:
+            seed = -1
+        if tid:
+            # 取回旧任务：不再提交一次，只查 + 下载
+            res = cloud_media.wait_task(self.cfg, provider, tid, dest, kind="image",
+                                        emit=q.put, stop_flag=stop_flag,
+                                        persist=persist if tid else None, model=model)
+        else:
+            res = cloud_media.generate_image(
+                self.cfg, provider, model, prompt, dest, emit=q.put,
+                stop_flag=stop_flag,
+                negative=str(self.cfg.get("cloud_img_negative", "") or ""),
+                size=str(self.cfg.get("cloud_img_size", "") or ""), seed=seed)
+        paths = list(res.get("paths") or [])
+        # 真实落地路径可能与服务端给的扩展名一致而与我们的默认值不同（.png vs .jpg），
+        # 所以把主图路径回写：_handle_img_exit 是拿 os.path.isfile(_img_out) 判成功的。
+        # 这里只写普通属性、不碰控件，读它的是主线程的 exit 处理（在事件入队之后）。
+        if paths:
+            self._img_out = paths[0]
+        # 多张产物：主图走原有的内嵌回显，其余的只列路径（一次塞四张进聊天区会把界面撑爆）
+        self._img_extra_paths = paths[1:]
+        new_tid = str(res.get("task_id") or "")
+        if new_tid:
+            # 异步化的生图也要进台账：下载中断过 24 小时就再也拿不到了
+            if not cloudjobs.get_job(new_tid):
+                cloudjobs.add_job(new_tid, "image", provider["id"],
+                                  provider.get("name", ""), model, prompt, dest)
+            if paths:
+                cloudjobs.mark_done(new_tid, paths=paths, urls=res.get("urls"),
+                                    seconds=res.get("seconds", 0))
+            else:
+                cloudjobs.mark_failed(new_tid, res.get("error"), status="unknown")
+        if not paths:
+            q.put(("line", "[ERROR] %s" % (res.get("error") or "云端生图失败")))
+        q.put(("exit", 0 if paths else 1, gen))
 
     def _img_reader(self, proc, gen):
         try:
@@ -123,9 +208,16 @@ class ImageGenMixin:
         self.chat.configure(state="disabled")
 
     def _handle_img_line(self, line):
+        # 滚动保留输出末尾：进度行是 delete(mark,"end") 整行清除的，引擎/服务端的报错
+        # 会跟着一起被删掉，界面只剩"退出码 1"（坑 40，生视频链路已经吃过一次）。
+        if line.strip():
+            self._img_tail.append(line.strip()[:220])
+            if len(self._img_tail) > 12:
+                del self._img_tail[0]
         if self._stop_flag is not None and self._stop_flag.is_set():
             return
         elapsed = int(time.time() - self._t0) if getattr(self, "_t0", None) else 0
+        low = line.lower()
         if "generating image" in line:
             self._phase = "采样"
             return
@@ -142,6 +234,9 @@ class ImageGenMixin:
         if "decoding" in line and "latent" in line:
             self._saw_decode = True
             self._update_img_progress_line("🎨 解码图片… %ds" % elapsed)
+        elif "error" in low or "failed" in low or "out of memory" in low:
+            # 报错当场固化在进度行上，别等它被进度行一起删掉
+            self._update_img_progress_line("🎨 %s" % line.strip()[:160])
 
     def _handle_img_exit(self, rc, gen):
         if gen != self._img_gen:
@@ -149,6 +244,7 @@ class ImageGenMixin:
         elapsed = int(time.time() - self._t0) if getattr(self, "_t0", None) else 0
         self._img_busy = False
         self._img_proc = None
+        self._cloud_reset("image")
         self._set_busy_ui(False)
         out = getattr(self, "_img_out", "")
         cancelled = self._stop_flag is not None and self._stop_flag.is_set()
@@ -187,17 +283,41 @@ class ImageGenMixin:
                                   command=lambda p=out: self._open_containing(p))
                 self.chat.window_create("end", window=btn2)
                 self.chat.insert("end", "\n🎨 已保存：%s · 耗时 %ds\n" % (out, elapsed), "meta")
+                extra = [p for p in (getattr(self, "_img_extra_paths", []) or [])
+                         if p and os.path.isfile(p)]
+                if extra:
+                    self.chat.insert("end", "🎨 同批还有 %d 张：%s\n"
+                                     % (len(extra), "、".join(os.path.basename(p)
+                                                              for p in extra)), "meta")
                 self.chat.insert("end", "────────────────\n", "meta")
                 self.chat.see("end")
             except Exception as e:
                 self._append("🎨 [回显失败: %s] 图片已保存：%s\n" % (e, out), "error")
             self.chat.configure(state="disabled")
         else:
-            self._append("🎨 生成失败或已取消（退出码 %s）。\n" % rc, "error")
+            # 与生视频同一套失败回显：本地是"退出码 + 引擎末几行"，云端是"服务端原话"
+            src = "云端" if getattr(self, "_cloud_img", False) else "引擎"
+            # 前导换行：进度行是 delete(mark,"end") 整行删掉的，连它自带的那个换行一起没了，
+            # 不加回来这行就会粘在上一行尾巴上
+            self._append("\n🎨 生成失败（%s）。\n"
+                         % ("退出码 %s" % rc if rc else "%s 没有交付文件" % src), "error")
+            tail = [x for x in (getattr(self, "_img_tail", []) or []) if x][-6:]
+            self._append("%s最后输出：\n  " % src + "\n  ".join(tail) + "\n" if tail
+                         else "（没有可用的输出）\n", "error")
+            log = getattr(self, "_img_log", "")
+            if log and os.path.isfile(log):
+                self._append("完整日志：%s\n" % log, "meta")
             self._append("────────────────\n", "meta")
 
     def _cancel_chat_image(self):
-        """立即中止当前生图任务：杀进程、世代递增（旧回调失效）、清理进度行。"""
+        """立即中止当前生图任务：杀进程、世代递增（旧回调失效）、清理进度行。
+
+        返回 True = 这是云端任务，取消的结果**已由 _cloud_cancel_task 如实说过**，
+        调用方（stop_generate）就别再补一句"已取消生成"——云端任务在 RUNNING 时
+        根本取消不掉，那样说会把用户骗过去（文档 §12.3 ⑥）。
+        """
+        cloud = bool(getattr(self, "_cloud_img", False))
+        tid = getattr(self, "_cloud_tid", "")
         if self._img_proc is not None:
             try:
                 self._img_proc.kill()
@@ -211,6 +331,8 @@ class ImageGenMixin:
         self._img_gen += 1
         self._img_busy = False
         self._img_proc = None
+        self._cloud_img = False
+        self._cloud_tid = ""      # 清掉这一轮的 tid：留着会让下一次云端任务误取消它
         mark = getattr(self, "_img_mark", None)
         if mark:
             self.chat.configure(state="normal")
@@ -219,3 +341,6 @@ class ImageGenMixin:
             except Exception:
                 pass
             self.chat.configure(state="disabled")
+        if cloud:
+            return self._cloud_cancel_task(tid, "image")
+        return False

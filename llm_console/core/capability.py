@@ -7,9 +7,11 @@
                    这条可靠；但投影器文件名不规范 / 放在别处时会漏判 → 允许人工覆盖。
   聊天模型（云端）  /models 没有统一的能力字段，只能按名字启发式**猜**；
                    所以"猜出来的支持"不算数，要么用户明确声明，要么发一次真请求验证。
-  生图模型          附图 = 参考图/底图（图生图），由 sd.cpp 的 -i 决定 → 视为支持。
-  生视频模型        能不能给首帧取决于权重变体：fl2va / flf2v / i2v / ref2va 都有图像输入通路，
-                   纯 t2va / t2v 没有 → 按变体标记判，允许人工覆盖。
+  生图模型          本地：附图 = 参考图/底图（图生图），由 sd.cpp 的 -i 决定 → 支持。
+                   云端：走服务商原生接口，本期只接文生 → 不支持附图。
+  生视频模型        本地：能不能给首帧取决于权重变体：fl2va / flf2v / i2v / ref2va 都有
+                   图像输入通路，纯 t2va / t2v 没有 → 按变体标记判，允许人工覆盖。
+                   云端：本期只接文生 → 不支持首帧。
 
 结论三态：yes / no / unknown；外加 basis 说明是谁下的结论，UI 才好决定要不要拦住用户。
 """
@@ -64,9 +66,16 @@ def auto_detect(cfg):
     from .models import is_vl_model
     kind = str(cfg.get("model_kind") or "chat")
     key = model_key(cfg)
+    cloud = providers.is_cloud(cfg)
     if kind == "image":
+        if cloud:
+            # 云端生图（二期）走的是服务商原生接口，W 定的范围是**只做文生**：
+            # "本地图要怎么送到云端"是另一件事，别在这里放行成"能附图"。
+            return NO, "cloud", "云端生图这一期只接文生，参考图请用本地的〔生图〕模型"
         return YES, "engine", "生图走引擎的参考图通路（-i），可以附图"
     if kind == "video":
+        if cloud:
+            return NO, "cloud", "云端生视频这一期只接文生，首帧请用本地的〔生视频〕模型"
         if _VIDEO_IMG_IN.search(key):
             return YES, "variant", "该视频权重是带图像输入通路的变体（fl2va / flf2v / i2v 这类）"
         if _VIDEO_TEXT_ONLY.search(key):

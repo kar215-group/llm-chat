@@ -12,9 +12,10 @@ from tkinter import ttk, scrolledtext, messagebox, filedialog
 
 from ..core.config import (load_config, DEFAULT_CONFIG, APP_DIR, APP_VERSION,
                            CONFIG_PATH)
-from ..core import providers
+from ..core import cloudjobs, config, providers
 from ..core.models import display_name
 from ..core.server import _query_serving_model, server_process_alive, server_state, stop_server
+from ..connection import cloud_media
 from ..connection.proxy import ProxyServer
 from .dialogs import ExitDialog, ImageDialog
 from .chat import ChatMixin
@@ -63,6 +64,16 @@ class App(ChatMixin, ImageGenMixin, VideoGenMixin, ServiceMixin, ModelsMixin, Se
         self._vid_tail = []          # 引擎输出的滚动末尾（失败时回显原因，否则只剩一个退出码）
         self._vid_phase = "load"     # load / sample：区分权重加载与采样后的进度条，避免文案乱报
         self._vid_log = ""           # 本次任务的引擎日志路径（产物同名 + .log）
+        # ---- 云端生图 / 生视频（二三期）----
+        # 队列与进度行完全复用上面两套，差别只在**进度来自轮询而不是 stdout**，
+        # 以及"取消"分两种：PENDING 能真取消，RUNNING 只是不再等它（任务照跑、计费照算）。
+        self._cloud_img = False      # 本次生图走的是云端
+        self._cloud_vid = False      # 本次生视频走的是云端
+        self._cloud_tid = ""         # 当前云端任务 id（异步任务取消 / 取回要用）
+        self._cloud_pid = ""         # 当前云端任务属于哪个 provider（取消时要按它取密钥）
+        self._img_tail = []          # 生图侧的输出末尾：以前只有视频链路有，失败就只剩一个退出码（坑 40）
+        self._img_log = ""           # 本次云端生图的请求/回包日志路径
+        self._img_extra_paths = []   # 一次回多张时，除主图之外的落地路径
         self._q = queue.Queue()      # 流式输出队列
         self._sq = queue.Queue()     # 状态队列
         self._ui_q = queue.Queue()   # "请在主线程执行"的回调队列（子线程调 root.after 会炸）
@@ -89,6 +100,7 @@ class App(ChatMixin, ImageGenMixin, VideoGenMixin, ServiceMixin, ModelsMixin, Se
         threading.Thread(target=self._precompute_ngl, daemon=True).start()
         root.after(80, self._poll)
         self.input.focus_set()
+        self._offer_cloud_recovery()
 
     # ---- 布局 ----
     def _build_topbar(self):
@@ -229,6 +241,154 @@ class App(ChatMixin, ImageGenMixin, VideoGenMixin, ServiceMixin, ModelsMixin, Se
         """在资源管理器中打开文件所在文件夹并选中该文件。"""
         subprocess.run(["explorer", "/select,", os.path.normpath(path)])
 
+    # ---- 云端生图 / 生视频：进度行、任务取回、取消语义 ----
+    def _cloud_begin(self, kind):
+        """开一条进度行并置忙碌标志（与本地引擎链路共用同一套队列与渲染）。
+
+        返回 (gen, out_q, stop_flag)。进度行三件套与本地链路一致：mark 定在 "end-1c"、
+        gravity=left、进度文字自带前导换行——漏掉任何一条都会让进度行堆叠（坑 10）。
+        """
+        if kind == "image":
+            self._img_gen += 1
+            mark, q, gen = "imgprog%d" % self._img_gen, self._img_q, self._img_gen
+            self._img_mark = mark
+            self._img_busy, self._cloud_img = True, True
+            self._img_tail, self._img_extra_paths = [], []
+            self._img_log = ""
+            self._t0 = time.time()
+        else:
+            self._vid_gen += 1
+            mark, q, gen = "vidprog%d" % self._vid_gen, self._vid_q, self._vid_gen
+            self._vid_mark = mark
+            self._vid_busy, self._cloud_vid = True, True
+            self._vid_tail, self._vid_saw_decode = [], False
+            self._vid_phase = "sample"
+            self._vid_t0 = time.time()
+        # 新任务一律从"还没有 task_id"开始：上一轮云端任务被取消时 _cloud_reset 不会
+        # 跑到，残留的旧 tid 会被这一轮的「停止生成」误当成自己的任务去取消。
+        # 真实 tid 由 worker 提交成功后写回（见 _cloud_image_worker/_cloud_video_worker）。
+        self._cloud_tid = ""
+        self.chat.mark_set(mark, "end-1c")
+        self.chat.mark_gravity(mark, "left")
+        self._stop_flag = threading.Event()
+        self._set_busy_ui(True)
+        return gen, q, self._stop_flag
+
+    def _cloud_reset(self, kind):
+        """任务收尾时清掉"这一次是云端"的标记，免得本地链路误用云端取消分支。"""
+        if kind == "image":
+            self._cloud_img = False
+        else:
+            self._cloud_vid = False
+        self._cloud_tid = ""
+
+    def _offer_cloud_recovery(self):
+        """启动时列出没落地的云端任务，给「取回」按钮。
+
+        为什么要这个：产物 URL 只活 24 小时，而任务一旦提交就停在服务商那边——
+        断电、关窗、点"停止等待"都不会让它消失。没有这个入口，那份结果就再也拿不回来了。
+        """
+        try:
+            jobs = cloudjobs.unfinished()
+            cloudjobs.prune(int(self.cfg.get("cloud_keep_days", 7) or 7))
+        except Exception as e:
+            print("[云端台账读取失败] %s" % e)
+            return
+        if not jobs:
+            return
+        self.chat.configure(state="normal")
+        try:
+            self.chat.insert("end", "\n[云端] 有 %d 个云端任务的结果还没落地"
+                             "（产物地址只活 24 小时）：\n" % len(jobs), "meta")
+            for j in jobs[:6]:
+                self.chat.insert("end", "  " + cloudjobs.describe(j) + "\n", "meta")
+                if cloudjobs.expired(j):
+                    continue
+                if str(j.get("status")) in ("pending", "running", "unknown", "submitted"):
+                    text = "继续等"
+                else:
+                    text = "取回"
+                btn = ttk.Button(self.chat, text=text,
+                                 command=lambda x=j: self._recover_job(x))
+                self.chat.window_create("end", window=btn)
+                self.chat.insert("end", "  ", "meta")
+            self.chat.insert("end", "\n", "meta")
+            self.chat.see("end")
+        except Exception as e:
+            print("[云端任务列表异常] %s" % e)
+        finally:
+            self.chat.configure(state="disabled")
+
+    def _recover_job(self, job):
+        """取回一个云端任务：查状态 → 已完成就下载，还在跑就继续轮询。"""
+        tid = str(job.get("task_id") or "")
+        kind = "image" if str(job.get("kind")) == "image" else "video"
+        if self._img_busy or self._vid_busy or self._busy:
+            self._append("\n[云端] 现在正忙，等当前任务结束后再取回。\n", "meta")
+            return
+        if cloudjobs.expired(job):
+            self._append("\n[云端] 这个任务超过 24 小时了，产物地址已失效，取不回来。\n",
+                         "error")
+            return
+        provider = providers.get_provider(self.cfg, job.get("provider_id"))
+        if not provider:
+            self._append("\n[云端] 取不回 %s：provider「%s」已经不在了。\n"
+                         % (tid[:12], job.get("provider_id")), "error")
+            return
+        dest = str(job.get("dest") or "")
+        if not dest:
+            dest = os.path.join(config.cloud_media_dir(self.cfg, kind),
+                                time.strftime(("img_" if kind == "image" else "vid_")
+                                              + "%Y%m%d_%H%M%S")
+                                + (".png" if kind == "image" else ".mp4"))
+        try:
+            os.makedirs(os.path.dirname(dest), exist_ok=True)
+        except Exception as e:
+            self._append("\n[云端] 存放目录建不出来：%s\n" % e, "error")
+            return
+        gen, q, stop = self._cloud_begin(kind)
+        self._cloud_pid = str(provider["id"])
+        self._cloud_tid = tid
+        if kind == "image":
+            self._img_out = dest
+            self._img_log = dest + ".log"
+        else:
+            self._vid_out = dest
+            self._vid_log = dest + ".log"
+        self._append("\n[云端] 取回 task_id=%s…（查状态，已完成就直接下载）\n"
+                     % tid[:16], "meta")
+        threading.Thread(target=self._cloud_video_worker if kind == "video"
+                         else self._cloud_image_worker,
+                         args=(provider, str(job.get("model") or ""),
+                               str(job.get("prompt") or ""), dest, gen, q, stop, tid),
+                         daemon=True).start()
+
+    def _cloud_cancel_task(self, tid, kind):
+        """对云端任务发起取消。**只有排队中(PENDING)取消得掉**，运行中会被服务端拒。
+
+        这里绝不当成"已取消"：任务仍在跑、仍会计费，文案必须如实（文档 §12.3 ⑥）。
+        结果回主线程走 _ui_q（子线程直接碰控件会炸，坑 54）。
+        """
+        icon = "🎬" if kind == "video" else "🎨"
+        if not tid:
+            self._append("%s [已停止等待] 任务还没提交出去，不会再有结果。\n" % icon, "meta")
+            return True
+        provider = providers.get_provider(self.cfg, self._cloud_pid) or \
+            providers.current_provider(self.cfg)
+
+        def work():
+            if provider is None:
+                msg = "取消不了：找不到对应的服务商。任务可能还在云端跑，之后可在对话里点「取回」。"
+            else:
+                # MiniMax 的 v1/v2 两套轮询地址按模型名选，取消也要用同一个模型去认
+                job = cloudjobs.get_job(tid) or {}
+                _ok, msg = cloud_media.cancel(provider, tid,
+                                              str(job.get("model") or ""))
+            self._ui_q.put(lambda: self._append("%s %s\n────────────────\n" % (icon, msg),
+                                                 "meta"))
+        threading.Thread(target=work, daemon=True).start()
+        return True
+
     # ---- 状态线程 ----
     def _status_loop(self):
         while not self._closing:
@@ -322,6 +482,9 @@ class App(ChatMixin, ImageGenMixin, VideoGenMixin, ServiceMixin, ModelsMixin, Se
             try:
                 if item[0] == "line":
                     self._handle_img_line(item[1])
+                elif item[0] == "progress":
+                    # 云端生图：进度来自轮询/下载，没有 stdout 可解析，直接给整行文案
+                    self._update_img_progress_line(item[1])
                 elif item[0] == "exit":
                     self._handle_img_exit(item[1], item[2])   # exit 事件带 (rc, gen)
             except Exception as e:
@@ -339,6 +502,9 @@ class App(ChatMixin, ImageGenMixin, VideoGenMixin, ServiceMixin, ModelsMixin, Se
             try:
                 if item[0] == "line":
                     self._handle_vid_line(item[1])
+                elif item[0] == "progress":
+                    # 云端生视频：同生图，轮询事件直接给整行进度文案
+                    self._update_vid_progress_line(item[1])
                 elif item[0] == "exit":
                     self._handle_vid_exit(item[1], item[2])
             except Exception as e:

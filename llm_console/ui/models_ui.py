@@ -51,20 +51,57 @@ class ModelsMixin:
                                 "可在 设置 → 服务参数 → models_dir 修改目录；"
                                 "生图模型放在其下的「生图」子文件夹，"
                                 "视频组件放在「生视频」子文件夹；"
-                                "云端模型在 设置 → 云端 API 里配置。" % d)
+                                "云端模型在 设置 → 云端模型 → 服务商与密钥 里配置。" % d)
             return
         menu = tk.Menu(self.root, tearoff=0, font=("Microsoft YaHei UI", 10))
         cur = os.path.basename(self.cfg["model"])
         cur_id = self.cfg.get("model") if providers.is_cloud(self.cfg) else None
 
         def add_cloud(kind):
-            """把某个能力下的云模型追加进当前分组。"""
+            """把某个能力下的云模型追加进当前分组。
+
+            两条 v40 的规则：
+            1) 显示一律用 `short_labels()` 的缩写（标识符仍是原始名，配置里存原名）；
+               **按服务商各批一次**，这样不同服务商重名的模型不会被互相顶成长名字。
+            2) 模型数超过 FOLD_AT 的服务商，名字前缀一致的收进折叠组。tk.Menu 的
+               cascade 天生就是"默认收起、指上去才展开"，不用自己画；组里含着当前
+               模型时把 ● 点**在组名上**，否则收起状态下用户看不出自己在用哪一组。
+            """
+            order, per = [], {}
             for pid, _pname, m in cloud[kind]:
-                mark = "●  " if cur_id == providers.make_cloud_id(pid, m) else "○  "
-                menu.add_command(
-                    label="%s%s（云）%s" % (mark, m,
-                                        "" if secrets.has_api_key(pid) else "（缺密钥）"),
-                    command=lambda a=pid, b=m, c=kind: self.pick_cloud_model(a, b, c))
+                if pid not in per:
+                    per[pid] = []
+                    order.append(pid)
+                per[pid].append(m)
+            for pid in order:
+                p = providers.get_provider(self.cfg, pid) or {}
+                labels = providers.short_labels(per[pid])
+                many = len(p.get("models") or []) > providers.FOLD_AT
+                # at=1：只要前缀下凑得出 2 个成员就收起来（分组与否由"这个服务商
+                # 整体模型多不多"决定，不是由这一能力下面有几个决定）
+                groups, flat = providers.fold_groups(
+                    per[pid], at=1 if many else providers.FOLD_AT)
+
+                def item(parent, m):
+                    mark = "●  " if cur_id == providers.make_cloud_id(pid, m) else "○  "
+                    parent.add_command(
+                        label="%s%s（云）%s" % (mark, labels.get(m, m),
+                                            "" if secrets.has_api_key(pid)
+                                            else "（缺密钥）"),
+                        command=lambda a=pid, b=m, c=kind: self.pick_cloud_model(a, b, c))
+
+                for m in flat:
+                    item(menu, m)
+                for g in groups:
+                    sub = tk.Menu(menu, tearoff=0, font=("Microsoft YaHei UI", 10))
+                    for m in g["models"]:
+                        item(sub, m)
+                    hit = any(cur_id == providers.make_cloud_id(pid, m)
+                              for m in g["models"])
+                    menu.add_cascade(
+                        label="%s%s · %d 个 ▸" % ("●  " if hit else "",
+                                              g["key"], len(g["models"])),
+                        menu=sub)
 
         if chat or cloud[providers.KIND_TEXT]:
             menu.add_command(label="—— 文本模型 ——", state="disabled")
@@ -180,16 +217,26 @@ class ModelsMixin:
         self._render_status(self._server_alive_flag, self._server_ready_flag)
         p = providers.get_provider(self.cfg, pid) or {}
         key_note = ("" if secrets.has_api_key(pid)
-                    else "（**还没填 API Key**：设置 → 云端 API → 密钥）")
+                    else "（**还没填 API Key**：设置 → 云端模型 → 服务商与密钥 → 密钥）")
         if kind == providers.KIND_TEXT:
             note = "无需启动服务，直接发消息即可；本地服务若仍在运行不受影响。"
         else:
-            note = ("云端%s还没实现（按规划在%s期），选上也不会走本地引擎——"
-                    "要出图/出片请在本地模型那组里选。"
-                    % ("生图" if kind == providers.KIND_IMAGE else "生视频",
-                       "二" if kind == providers.KIND_IMAGE else "三"))
+            what = "生图" if kind == providers.KIND_IMAGE else "生视频"
+            if not providers.supports_media(p, kind):
+                note = ("这一条走的是服务商**原生**%s接口，而「%s」没有可用的原生接口地址——"
+                        "发出去之前会先拦下并说清楚缺什么。要出图/出片也可以直接在本地那组里选。"
+                        % (what, p.get("name") or pid))
+            elif kind == providers.KIND_VIDEO:
+                note = ("云端%s已经接通：提交异步任务 → 轮询 → 立即下载到本地"
+                        "（云端产物地址只活 24 小时）。**先建单后交付、按秒计费**，"
+                        "发送前会弹一次费用确认；参考图/首帧目前只有本地那条链路支持。" % what)
+            else:
+                note = ("云端%s已经接通：同步请求，出图后立即下载到本地（云端产物地址只活 24 小时）。"
+                        "参考图（图生图）目前只有本地那条链路支持。档位与存放目录在 "
+                        "设置 → 云端模型 → 生图 / 生视频。" % what)
         self._append("\n[云端] 已选择 %s · %s%s。%s\n"
-                     % (model, p.get("name") or pid, key_note, note), "meta")
+                     % (providers.short_of(model), p.get("name") or pid, key_note, note),
+                     "meta")
 
     # ---- 本机属性 + 新模型 GPU 层数自动计算 ----
     def _ensure_hw_info(self):

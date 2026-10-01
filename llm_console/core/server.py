@@ -20,22 +20,120 @@ _ALIVE_CACHE = {"t": 0.0, "v": False}
 
 _ALIVE_TTL = 4.0           # 进程状态缓存有效期（秒）：进程状态不会瞬变。
 
+# 判活认的映像名（与老实现里 `tasklist /fi "imagename eq ..."` 的过滤值逐字一致）
+SERVER_IMAGE_NAME = "llama-server.exe"
+
+_K32 = None                # 懒初始化的 kernel32 句柄（独立 WinDLL 实例，不动 ctypes.windll 那份）
+_PE32W = None              # 懒初始化的 PROCESSENTRY32W 结构体类
+
+
+def _k32():
+    """kernel32 的独立实例 + 只设本模块用到的那几个函数签名。
+
+    单独 WinDLL(use_last_error=True) 而不是复用 ctypes.windll.kernel32：
+    ① 要读到真实的 GetLastError（快照失败时区分"瞬时"还是"真不行"）；
+    ② 不去改共享实例的 argtypes，避免和 hardware.py 那边互相影响。
+    """
+    global _K32
+    if _K32 is None:
+        import ctypes
+        from ctypes import wintypes
+        pe = _pe32w()
+        k = ctypes.WinDLL("kernel32", use_last_error=True)
+        k.CreateToolhelp32Snapshot.restype = ctypes.c_void_p
+        k.CreateToolhelp32Snapshot.argtypes = [wintypes.DWORD, wintypes.DWORD]
+        k.Process32FirstW.restype = wintypes.BOOL
+        k.Process32FirstW.argtypes = [ctypes.c_void_p, ctypes.POINTER(pe)]
+        k.Process32NextW.restype = wintypes.BOOL
+        k.Process32NextW.argtypes = [ctypes.c_void_p, ctypes.POINTER(pe)]
+        k.CloseHandle.restype = wintypes.BOOL
+        k.CloseHandle.argtypes = [ctypes.c_void_p]
+        _K32 = k
+    return _K32
+
+
+def _pe32w():
+    """Win32 PROCESSENTRY32W（Unicode 版）。
+
+    用 W 版而不是 A 版：映像名可能是中文，A 版会按 OEM 代码页给出乱码。
+    th32DefaultHeapID 是 ULONG_PTR，64 位下必须占 8 字节（用 POINTER 保证宽度）。
+    类只建一次（每次调用重建 Structure 子类实测要十几毫秒，比枚举本身还贵）。
+    """
+    global _PE32W
+    if _PE32W is None:
+        import ctypes
+        from ctypes import wintypes
+
+        class _PROCESSENTRY32W(ctypes.Structure):
+            _fields_ = [("dwSize", wintypes.DWORD),
+                        ("cntUsage", wintypes.DWORD),
+                        ("th32ProcessID", wintypes.DWORD),
+                        ("th32DefaultHeapID", ctypes.POINTER(ctypes.c_ulong)),
+                        ("th32ModuleID", wintypes.DWORD),
+                        ("cntThreads", wintypes.DWORD),
+                        ("th32ParentProcessID", wintypes.DWORD),
+                        ("pcPriClassBase", wintypes.LONG),
+                        ("dwFlags", wintypes.DWORD),
+                        ("szExeFile", ctypes.c_wchar * 260)]
+
+        _PE32W = _PROCESSENTRY32W
+    return _PE32W
+
+
+def _probe_snapshot():
+    """进程内枚举系统进程表，看 SERVER_IMAGE_NAME 在不在（不 spawn 子进程）。
+
+    判据与老实现完全一致（同一个映像名、精确匹配），但实测单次
+    240~900ms（spawn 一个 tasklist，它还要逐进程取内存/会话信息）→ ~2ms。
+    而没有本地服务在跑时，后台每约 6 秒就要付一次、**空闲也永久付费**。
+
+    CreateToolhelp32Snapshot 官方文档明说可能因进程表在快照期间变化而返回
+    ERROR_BAD_LENGTH，所以按文档重试几次；重试完仍失败就**抛**——不静默退回
+    tasklist，因为那会把"判活坏了"藏起来，表现成状态灯永远说未运行。
+    """
+    import ctypes
+    k32 = _k32()
+    pe_cls = _pe32w()
+    TH32CS_SNAPPROCESS = 0x2
+    ERROR_BAD_LENGTH = 24
+    invalid = ctypes.c_void_p(-1).value
+    last = 0
+    for _attempt in range(5):
+        snap = k32.CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0)
+        if snap is None or snap == invalid:
+            last = ctypes.get_last_error()
+            if last == ERROR_BAD_LENGTH:
+                continue                     # 文档说的瞬时失败：重试
+            break
+        try:
+            entry = pe_cls()
+            entry.dwSize = ctypes.sizeof(pe_cls)
+            if not k32.Process32FirstW(snap, ctypes.byref(entry)):
+                last = ctypes.get_last_error()
+                break
+            while True:
+                if str(entry.szExeFile or "").lower() == SERVER_IMAGE_NAME:
+                    return True
+                if not k32.Process32NextW(snap, ctypes.byref(entry)):
+                    return False
+        finally:
+            k32.CloseHandle(snap)
+    raise OSError("进程表快照失败（GetLastError=%s）：本地服务判活不可用" % last)
+
+
 def _reset_alive_cache():
     """服务启停后立刻作废缓存（避免刚 stop 仍被判为存活）。"""
     _ALIVE_CACHE["t"] = 0.0
 
 def _probe_tasklist():
-    """真查一次系统进程表（约 0.5s，只在缓存过期时付一次）。"""
+    """真查一次系统进程表（只在缓存过期时付一次）。
+
+    名字沿用 _probe_tasklist：它是三级判活的第 3 级，调用点与测试打桩都指这个名字。
+    实现已从"spawn tasklist 子进程"换成进程内 Toolhelp 快照（见 _probe_snapshot）。
+    """
     if os.name != "nt":
-        return True                      # 非 Windows 无 tasklist，退回 HTTP 语义
-    try:
-        r = subprocess.run(
-            ["tasklist", "/fi", "imagename eq llama-server.exe", "/fo", "csv", "/nh"],
-            creationflags=subprocess.CREATE_NO_WINDOW,
-            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=5)
-        return b"llama-server" in r.stdout
-    except Exception:
-        return False
+        return True                      # 非 Windows 无进程表可查，退回 HTTP 语义
+    return _probe_snapshot()
 
 def server_process_alive():
     """本地进程级检查：llama-server.exe 是否在运行。

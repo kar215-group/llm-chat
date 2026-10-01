@@ -1,11 +1,12 @@
 # -*- coding: utf-8 -*-
-"""llm_console.connection.cloud — 云端调用。
+"""llm_console.connection.cloud — 云端调用（文本那一路）。
 
-一期只有 OpenAI 兼容文本（chat_stream）。二三期在这里加：
-  · 阿里云原生生图（Qwen-Image，同步/异步任务，产物 URL 只活 24h → 必须立即下载落地）
-  · 万相 / MiniMax 的异步视频任务（创建 → 轮询 → 下载，task_id 需持久化以便断电后取回）
+一期 = OpenAI 兼容文本（chat_stream），本模块负责。
+生图 / 生视频**没有** OpenAI 兼容格式，走厂商原生协议，实现独立在
+connection/cloud_media.py（阿里云原生 multimodal-generation 与异步 video-synthesis）。
+本模块只提供两者共用的错误人话化（humanize_http / humanize_net）与退避常量。
 
-铁律：**厂商字段名只允许出现在本模块**。core/providers.py 负责结构，UI 只消费
+铁律：**厂商字段名只允许出现在 connection 层**。core/providers.py 负责结构，UI 只消费
 与本地一致的事件（reasoning / content / usage / done / stopped / error）。
 """
 import json
@@ -71,7 +72,7 @@ def humanize_http(code, body, provider):
     if "stream_options" in low:
         msg += "\n  看起来是这个端点不认 stream_options（用量统计），可关掉重试。"
     if code == 401:
-        msg += "\n  检查：设置 → 云端 API → 密钥是否正确、是否过期。"
+        msg += "\n  检查：设置 → 云端模型 → 服务商与密钥 → 密钥是否正确、是否过期。"
     elif code == 404:
         msg += "\n  当前请求地址：%s" % providers.chat_completions_url(provider or {})
     elif code == 429:
@@ -156,8 +157,16 @@ def _ask_window(provider, key, model, preview, total, budget, question, timeout=
         return None, humanize_http(e.code, _safe_read(e), provider)
     except Exception as e:
         return None, humanize_net(e, provider)
+    if not isinstance(data, dict):
+        # 回包解析成功但不是 JSON 对象（数组/裸字符串）：这一句在 except 之外，
+        # 放过去就会穿出 chat_stream_with_file、打死聊天线程 —— 不投任何收尾事件，
+        # busy 永不复位、界面永久停在"生成中…"。折成"规划没成功"，走既有回退。
+        return None, "规划请求的回包不是 JSON 对象（原文：%s）" % str(data)[:120]
     choices = data.get("choices") or [{}]
-    msg = choices[0].get("message", {}) or {}
+    first = choices[0] if choices and isinstance(choices[0], dict) else {}
+    msg = first.get("message", {}) or {}
+    if not isinstance(msg, dict):
+        msg = {}          # 有的端点把 message 写成裸字符串，别在 .get 上再炸一次
     blob = "%s %s" % (msg.get("content") or "", msg.get("reasoning_content") or "")
     win = _parse_window(blob, total)
     if not win:
@@ -334,7 +343,7 @@ def chat_stream(cfg, messages, out_q, stop_flag):
         return
     key = secrets.get_api_key(provider["id"])
     if not key:
-        out_q.put(("error", "还没给「%s」填 API Key（设置 → 云端 API → 密钥）。"
+        out_q.put(("error", "还没给「%s」填 API Key（设置 → 云端模型 → 服务商与密钥 → 密钥）。"
                             % provider["name"]))
         return
     sp = providers.split_cloud_id(cfg.get("model", ""))

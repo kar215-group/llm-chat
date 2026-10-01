@@ -30,6 +30,8 @@ __pycache__/
 # 运行期配置与密钥：gui_config.json 里有本机路径，secrets.json 里是云端 API Key
 gui_config.json
 secrets.json
+# 云端异步任务台账（task_id + 24 小时就过期的产物地址），换机器还原毫无意义
+cloud_jobs.json
 *.env
 
 # 模型权重与媒体产物（都可从外部重新下载/生成）
@@ -78,3 +80,7 @@ desktop.ini
 /AI-交接文档.md
 /性能审计与重构报告-v28.md
 /*_U级.md
+# 云端产物的默认落地目录（都是可重新生成的媒体文件）
+/cloud_out/
+# 无头自检与探针脚本：只在开发机上跑，不进分发仓库
+/_selftest/

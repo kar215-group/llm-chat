@@ -68,11 +68,11 @@ class ChatMixin:
         """把"为什么现在不能发图"说清楚——尤其区分"确认不支持"与"还没确认"。"""
         if res["verdict"] == capability.UNKNOWN:
             return ("这个模型的看图能力还没确认：云端的 /models 不带能力字段，光看名字不算数。\n\n"
-                    "要放开：设置 → 云端 API → 选择模型 → 把「图片输入」改成"
+                    "要放开：设置 → 云端模型 → 服务商与密钥 → 选择模型 → 把「图片输入」改成"
                     "「支持」，或点「验证图片输入」发一次最小请求让服务端自己回答。")
         return ("当前模型不支持图片输入（%s）。\n"
                 "换成本地配了视觉投影器的模型（如 Qwen3VL-8B），"
-                "或在 设置 → 云端 API → 选择模型 里把「图片输入」改为「支持」。"
+                "或在 设置 → 云端模型 → 服务商与密钥 → 选择模型 里把「图片输入」改为「支持」。"
                 % res["note"])
 
     def pick_image(self):
@@ -83,6 +83,14 @@ class ChatMixin:
         kind = self.cfg.get("model_kind")
         cloud = providers.is_cloud(self.cfg)
         if kind in ("image", "video"):
+            if cloud:
+                # 云端这一期只做文生（W 定的范围）：在入口就说清楚，比让用户挑完图
+                # 再在发送时被拦下一次要省一步。判据来自 capability，文案不在这里重复写。
+                messagebox.showinfo("云端生图 / 生视频",
+                                    capability.resolve(self.cfg)["note"] +
+                                    "\n\n要带参考图或首帧，请在模型菜单里切回本地的"
+                                    "〔生图〕〔生视频〕模型（走 sd.cpp 那条链路）。")
+                return
             # 生图模式：附图 = 参考图/底图；生视频模式：附图 = 首帧。
             # 这两类走引擎自己的图像输入通路（-i），跟"聊天模型能不能看图"是两回事，
             # 所以不查 capability —— 之前视频模式误查过一次，报"当前模型不支持看图"。
@@ -112,7 +120,7 @@ class ChatMixin:
                         self._no_image_hint(res) +
                         "\n\n仍要按「支持图片输入」处理这个模型吗？\n"
                         "（选「是」= 记为该模型支持，之后不再拦；"
-                        "可在 设置 → 云端 API → 选择模型 里改回「自动判断」）"):
+                        "可在 设置 → 云端模型 → 服务商与密钥 → 选择模型 里改回「自动判断」）"):
                     capability.set_choice(self.cfg, capability.YES)
                     save_config(self.cfg)
                     self._append("\n[模型] 已把「%s」标记为支持图片输入。\n"
@@ -168,7 +176,7 @@ class ChatMixin:
         note = ""
         if dropped:
             note = ("\n超出本次上下文预算（约 %d token），先只带前 %d 行；"
-                    "云端模型可在 设置 → 云端 API 打开「让它自己决定读哪些行」。"
+                    "云端模型可在 设置 → 云端模型 → 文本模型 打开「让它自己决定读哪些行」。"
                     % (budget, len(kept)))
         self.attach_name.configure(
             text="📄 %s｜%d 行 / %d 字｜编码 %s%s"
@@ -243,12 +251,27 @@ class ChatMixin:
         text = self.input.get("1.0", "end").strip()
         if not text:
             return
-        if providers.is_cloud(self.cfg) and \
-                providers.kind_of_current(self.cfg) != providers.KIND_TEXT:
-            # 云端的生图/生视频只做到"能力已归类"，实现排在二三期：必须在这里就拦下，
-            # 否则会掉进下面**本地 sd-cli** 的分支，用云端模型名去跑本地引擎
-            self._append("\n[提示] %s\n" % (providers.validate_for_send(self.cfg)
-                                            or "云端这一能力还没实现。"), "error")
+        kind = self.cfg.get("model_kind")
+        if providers.is_cloud(self.cfg) and kind in ("image", "video"):
+            # 云端生图 / 生视频：走服务商原生接口，**完全不碰本地引擎**，也就自然
+            # 不占显存——所以这里不走 _confirm_shared_vram 那套三选弹窗。
+            # 费用确认（只有生视频）放在清空输入框之前：用户选"不"的时候一个字都不该丢。
+            err = providers.validate_for_send(self.cfg)
+            if not err and self._attached_image:
+                err = ("云端这一期只接「文生」：参考图与首帧还只在本地那条链路里支持。\n"
+                       "  要图生图 / 首帧生视频，请在模型菜单里切回本地的〔生图〕〔生视频〕；"
+                       "图片已保留，不会丢。")
+            if err:
+                self._append("\n[云端] %s\n" % err, "error")
+                return
+            if kind == "video" and not self._confirm_cloud_video_spend():
+                return
+            self.input.delete("1.0", "end")
+            self.clear_attachment()
+            if kind == "image":
+                self._start_chat_image(text)
+            else:
+                self._start_chat_video(text)
             return
         if self.cfg.get("model_kind") == "image":
             # 方案 A：聊天输入即生图提示词，结果内嵌到聊天流，页面形态不变。
@@ -339,8 +362,8 @@ class ChatMixin:
     def _do_send(self, text, allow_image=True):
         """常规发送：本地服务就绪且模型一致，或已选定云端模型时才会走到这里。
 
-        allow_image=False（云端一期）时忽略附件且**不清除**它——用户切回本地
-        VL 模型后可以直接再发一次，不用重新选图。
+        allow_image=False（云端聊天模型没被确认支持看图）时忽略附件且**不清除**它——
+        用户声明/验证过能力或切回本地 VL 模型后可以直接再发一次，不用重新选图。
         若已附图（当前模型可看图），按 OpenAI 多模态格式发送
         （content 数组 + image_url base64），并在聊天流内嵌缩略图。
         """
@@ -413,16 +436,18 @@ class ChatMixin:
     def stop_generate(self):
         # 聊天流生图中：取消生图（杀引擎进程，显存即释放）
         if self._img_busy:
-            self._cancel_chat_image()
-            self._append("🎨 [已取消生成]\n", "meta")
-            self._append("────────────────\n", "meta")
+            # 云端任务自己会说清楚"取消掉了"还是"只是不再等它"，这里就别再补一句
+            # "已取消生成"——那种说法在任务仍在云端运行时是假的。
+            if not self._cancel_chat_image():
+                self._append("🎨 [已取消生成]\n", "meta")
+                self._append("────────────────\n", "meta")
             self._set_busy_ui(False)
             return
         # 聊天流生视频中：同一套取消语义
         if self._vid_busy:
-            self._cancel_chat_video()
-            self._append("🎬 [已取消生成]\n", "meta")
-            self._append("────────────────\n", "meta")
+            if not self._cancel_chat_video():
+                self._append("🎬 [已取消生成]\n", "meta")
+                self._append("────────────────\n", "meta")
             self._set_busy_ui(False)
             return
         if self._busy and self._stop_flag is not None and not self._stop_flag.is_set():
