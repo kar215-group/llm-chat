@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """llm_console.core.sdprofile — sd.cpp 的"模型族适配层"。
 
-**为什么需要这一层**：生图与生视频原来只认本机那一对模型 —— `build_img_cmd` 把
+**为什么需要这一层**：生图与生视频原来只认开发机那一对模型 —— `build_img_cmd` 把
 Qwen-Image 的参数组合（`--llm` + `--flow-shift 3` + `euler` + `te=cpu`）硬写进命令行，
 视频组件只认 MiniMax-H3 的张量名，`is_image_diffusion()` 还把"文本编码器"硬编码成
 文件名里带 `qwen3vl`。换个模型（Flux / SDXL / SD3 / Wan / LTX / MiniMax 的其它变体）
@@ -11,8 +11,8 @@ Qwen-Image 的参数组合（`--llm` + `--flow-shift 3` + `euler` + `te=cpu`）�
 判据按可信度分三层，越靠前越硬：
 
   1. 人工覆盖（设置 → 生图 / 生视频 的「模型族」下拉，存进 `img_family` / `vid_family`）
-  2. **本机实测过的张量名标记**（只有 Qwen-Image 与 MiniMax-H3 属于这层 —— 其余家族的
-     张量名没法在本机验证，不敢拿来自动判定，见坑 52"文档写了也要看是谁写的"）
+  2. **开发机实测过的张量名标记**（只有 Qwen-Image 与 MiniMax-H3 属于这层 —— 其余家族的
+     张量名没法在开发机验证，不敢拿来自动判定，见坑 52"文档写了也要看是谁写的"）
   3. 文件名线索（Flux / SDXL / Wan 这些是**上游文档与 sd-cli --help 明确写过的形状**，
      线索命中只用来选槽位与默认档位，缺件时预检会点名要什么）
   4. 都没有 → `generic`：只按通用规则把扫到的文件交出去，不加任何家族专属参数。
@@ -52,7 +52,7 @@ SLOTS = {
 }
 
 # ---------------------------------------------------------------- 家族表
-# markers：只在**本机实测过**的家族上填，用于张量名判定。
+# markers：只在**开发机实测过**的家族上填，用于张量名判定。
 # names：文件名线索（小写子串，命中即候选）。
 # require：缺了就不能开工的槽位（预检会点名）。optional：找到就带上。
 # main_flag：主体文件用哪个参数交给引擎 —— 单文件 ckpt/safetensors 走 -m，
@@ -63,7 +63,7 @@ H3_MARK = (b"adaln_t_table", b"audio_patch_proj.weight", b"blocks.0.attn.qkv_pro
 H3_ENC = (b"visual.blocks", b"model.embed_tokens")
 
 FAMILIES = {
-    # ---------------- 本机实测过（argv 必须与调优前逐字一致）----------------
+    # ---------------- 开发机实测过（argv 必须与调优前逐字一致）----------------
     "qwen-image": {
         "label": "Qwen-Image",
         "kind": "image",
@@ -101,16 +101,16 @@ FAMILIES = {
         "steps_hint": "20",
         "cfg_hint": "5.0",
     },
-    # ---------------- 上游文档 / sd-cli --help 明确的形状（未在本机实测）----------------
+    # ---------------- 上游文档 / sd-cli --help 明确的形状（未在开发机实测）----------------
     "flux": {
         "label": "FLUX.1",
         "kind": "image",
-        "markers": (b"double_blocks.0.img_attn", b"single_blocks."),   # 未本机验证，只作辅助
+        "markers": (b"double_blocks.0.img_attn", b"single_blocks."),   # 未开发机验证，只作辅助
         "names": ("flux1", "flux-dev", "flux-schnell", "flux1-dev", "flux1-schnell", "flux.1"),
         "main_flag": "--diffusion-model",
         "require": ("diffusion", "vae", "clip_l", "t5xxl"),
         # 故意不把 llm 列为 optional：FLUX.1 的文本编码器就是 clip_l+clip_g+t5xxl，
-        # 目录里通常还躺着一个 Qwen3VL/聊天 GGUF（本机就有），"顺手带上 --llm"会把
+        # 目录里通常还躺着一个 Qwen3VL/聊天 GGUF（开发机就有），"顺手带上 --llm"会把
         # 引擎引到另一套编码路径上。要用 LLM 编码器的是 FLUX.2 —— 那是另一个家族。
         "optional": ("clip_g", "taesd"),
         "sampler": "euler",
@@ -274,8 +274,8 @@ IMAGE_ONLY = tuple(f for f, p in FAMILIES.items() if p.get("kind") == "image")
 VIDEO_ONLY = tuple(f for f, p in FAMILIES.items() if p.get("kind") == "video")
 
 # 这些家族是 DiT/Transformer 主干，`--diffusion-fa`（扩散侧 flash attention）有收益；
-# SD1.5/SDXL 这类 UNet 不硬开（本机没实测过，交给引擎默认）。
-# Qwen-Image 必须在这张表里：它的 argv 是本机实测校准的，原来就带着 --diffusion-fa。
+# SD1.5/SDXL 这类 UNet 不硬开（开发机没实测过，交给引擎默认）。
+# Qwen-Image 必须在这张表里：它的 argv 是开发机实测校准的，原来就带着 --diffusion-fa。
 FA_FAMILIES = {"qwen-image", "flux", "flux2", "sd3", "wan", "ltx", "hunyuan-video"}
 
 
@@ -362,11 +362,11 @@ def detect(blob=None, name="", kind=None, forced=""):
     if forced and forced != AUTO and forced in FAMILIES:
         return forced, "user", "你在设置里指定了模型族"
     blob = blob or b""
-    # 1) 张量名（只有本机实测过的家族参与）
+    # 1) 张量名（只有开发机实测过的家族参与）
     if blob:
         for fid in ("qwen-image", "minimax-h3"):
             if any(m in blob for m in FAMILIES[fid]["markers"]):
-                return fid, "measure", "命中本机实测过的张量名"
+                return fid, "measure", "命中开发机实测过的张量名"
     # 2) 文件名线索（按 kind 收窄，避免把 wan 的视频名认成生图家族）
     cands = []
     for fid, p in FAMILIES.items():
@@ -379,7 +379,7 @@ def detect(blob=None, name="", kind=None, forced=""):
     if cands:
         # 命中多个时取"线索更长"的那个（`flux1-schnell` 该归 flux，不该被 "sd" 抢走）
         best = max(cands, key=lambda x: max((len(str(h)) for h in x[1]["names"]), default=0))
-        return best[0], "hint", "按文件名线索匹配（这一家的张量名本机没实测过）"
+        return best[0], "hint", "按文件名线索匹配（这一家的张量名开发机没实测过）"
     # 3) 兜底：generic
     return "generic", "none", "认不出模型族，按通用方式只喂文件"
 
@@ -404,7 +404,7 @@ def detect_file(path, kind=None, forced="", name=None):
                   kind, forced)
 
 
-# 没在本机实测过的视频家族，其张量名只能当**辅助**：要求"文件名带线索 + 至少 N 个标记
+# 没在开发机实测过的视频家族，其张量名只能当**辅助**：要求"文件名带线索 + 至少 N 个标记
 # 命中"才算视频主体。原因是 `patch_embedding` 这类名字在 PixArt / Flux 等图模型里也能见到，
 # 单凭张量名会把生图模型抢进视频列表。判错方向的代价是"这个视频模型进不了菜单"
 # ——那还有 设置 → 生视频 的手填文件名 这条出口救，比"生图模型莫名其妙消失"轻得多。
@@ -417,7 +417,7 @@ UNVERIFIED_VIDEO = (
 def video_role(blob, name=""):
     """kv=0 的裸权重在视频链路里的角色 → 'video'（扩散主体）/ 'encoder' / None。
 
-    MiniMax-H3 的两组标记（`VIDEO_DIFFUSION_MARKERS` / `H3_ENC`）是本机实测过的，直接算；
+    MiniMax-H3 的两组标记（`VIDEO_DIFFUSION_MARKERS` / `H3_ENC`）是开发机实测过的，直接算；
     其余家族见 `UNVERIFIED_MARKERS` 的额外门槛。LTX / HunyuanVideo 连张量名都没验证过，
     这里**不猜** —— 用设置里的手填文件名走人工出口。
     """
@@ -477,7 +477,7 @@ def _common_prefix(a, b):
 def rank_pool(pool, family, pbase):
     """给同一个目录里的多个候选排序：**先挑"像给这个模型配套"的那个**。
 
-    一个目录里放了好几套家族的文件是很常见的（本机生视频目录里就同时有 H3 的 VAE 和
+    一个目录里放了好几套家族的文件是很常见的（开发机生视频目录里就同时有 H3 的 VAE 和
     Wan 的 VAE）。只按文件名排序会抓到隔壁家族的组件 —— 引擎不会报错，只会用错 VAE
     出一堆糊片。排序依据：① 命中本家族名字线索的优先；② 与主体文件名公共前缀长的优先；
     ③ 名字本身。**找不到匹配本家族的候选时才退回原来的选择**，所以单家族目录不受影响。
@@ -654,6 +654,6 @@ def note_of(family, files):
                     else SLOTS[slot][1].split("（")[0])
             got.append("%s=%s" % (name, os.path.basename(p)))
     basis = files.get("basis") or ""
-    tail = "" if basis in ("", "measure", "user") else "（按文件名猜的，没在本机实测过）"
+    tail = "" if basis in ("", "measure", "user") else "（按文件名猜的，没在开发机实测过）"
     return "模型族：%s%s｜%s" % (prof["label"], tail,
                                 "、".join(got) if got else "还没找到配套文件")

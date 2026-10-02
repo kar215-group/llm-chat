@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""llm_console.core.hardware — 本机属性探测：GPU 型号/显存（nvidia-smi）与物理内存"""
+"""llm_console.core.hardware — 该机器硬件探测：GPU 型号/显存（nvidia-smi）与物理内存"""
 
 import os
 import subprocess

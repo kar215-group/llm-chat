@@ -12,6 +12,8 @@
 !/.gitattributes
 !/.github/
 !/README.md
+!/LICENSE
+!/CONTRIBUTING.md
 !/llama_gui.py
 !/llm_console/
 !/tools/

@@ -96,7 +96,7 @@ NAV_SPEC = [
     ]},
     {"key": "api", "label": "API 连接", "page": "api", "section": "api",
      "title": "API 连接（供 agent 调用）",
-     "help": "把「当前选中的本地模型」暴露成一个 OpenAI 兼容的本机端点，给 agent 或其他"
+     "help": "把「当前选中的本地模型」暴露成一个 OpenAI 兼容的本地端点，给 agent 或其他"
              "软件直接调用。\n这个代理**只转本地模型**：云端对话在应用内直连服务商，"
              "生图 / 生视频不经这里。"},
     {"key": "about", "label": "关于与诊断", "page": "about", "section": "about",
@@ -342,7 +342,7 @@ class SettingsMixin:
             分成两段是为了：左栏每个叶子指向"哪页哪段"，点下去能滚到那一段的标题；
             但真正建内容时把**这一页的所有区块一起建**（见 _nav_select）——
             只建一段会得到半页空白 + 保存漏钩子。
-            仍然按页懒建的理由是本机每个 ttk 控件创建+布局约 1.3ms，五页一次全建约 280ms 会卡。
+            仍然按页懒建的理由是每台 ttk 控件创建+布局约 1.3ms，五页一次全建约 280ms 会卡。
             """
             def deco(build):
                 registry[(page_id, sec_id)] = build
@@ -436,7 +436,7 @@ class SettingsMixin:
         @section("local_text", "svc")
         def _t2(t2, r2):
 
-            # 本机属性：自动探测预填，存配置；GPU 层数计算直接使用这里的显存值
+            # 硬件属性：自动探测预填，存配置；GPU 层数计算直接使用这里的显存值
             ent(t2, r2, "gpu_name", "GPU 型号",
                 "显卡型号（首次启动自动探测预填，可手动修改）。", width=32)
             ent(t2, r2, "vram_gb", "显存 (GB)",
@@ -1107,7 +1107,7 @@ class SettingsMixin:
                 e.focus_set()
 
             def do_local_api():
-                """本页的密钥是给云端用的；本机 API 地址在「API 连接」区块配。"""
+                """本页的密钥是给云端用的；本地 API 地址在「API 连接」区块配。"""
                 nav.select("api")
 
             # ---------------- 模型选择界面 ----------------
@@ -1759,7 +1759,7 @@ class SettingsMixin:
             r4b["i"] += 1
             ttk.Button(kr, text="填该服务商 API Key", width=20,
                        command=do_key_dialog).pack(side="left")
-            ttk.Button(kr, text="配置本机 API 地址", width=18,
+            ttk.Button(kr, text="配置本地 API 地址", width=18,
                        command=do_local_api).pack(side="left", padx=6)
             # 密钥状态单独一行：它跟着按钮排在同一行时，掩码文本会把这行撑得比
             # 可视区宽（横向不可滚 = 后面的内容看不见）

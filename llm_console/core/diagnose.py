@@ -286,7 +286,7 @@ def run_checks(cfg, proxy_running=False, server_running=False, probe_gpu=True):
                       "这类目录会后台同步、偶尔锁文件，首次加载明显变慢还可能写不进配置。"
                       "建议移到本地磁盘的普通文件夹。"))
     if dt in (2, 5, 6):
-        out.append(_c("media_type", GROUP_ENV, WARN, "程序所在介质不是本机硬盘",
+        out.append(_c("media_type", GROUP_ENV, WARN, "程序所在介质不是该机器本地硬盘",
                       {2: "可移动磁盘", 5: "光驱", 6: "内存盘"}.get(dt, ""),
                       "换设备或弹出后就找不到了；模型文件也会读得很慢。"))
 
@@ -309,7 +309,7 @@ def run_checks(cfg, proxy_running=False, server_running=False, probe_gpu=True):
         pass
 
     free = _free_gb(app_dir)
-    out.append(_c("disk", GROUP_ENV, OK if free >= 20 else WARN, "本机磁盘剩余",
+    out.append(_c("disk", GROUP_ENV, OK if free >= 20 else WARN, "磁盘剩余",
                   "%.1f GB" % free,
                   "" if free >= 20 else "模型文件动辄 10GB 以上，剩余空间偏少；"
                                         "下载大模型前先腾出空间。"))

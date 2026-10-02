@@ -30,7 +30,7 @@ CONFIG_PATH = os.path.join(APP_DIR, "gui_config.json")
 
 # 版本号：发版时改这一处（--selfcheck / --version 会打印它）。
 # GitHub Release 的 tag 要与它一致（tag 去掉开头的 v），Actions 工作流会做一致性校验。
-APP_VERSION = "1.0.1repair"
+APP_VERSION = "1.0.2"
 
 CFG_VERSION = 2
 
@@ -49,7 +49,7 @@ DEFAULT_CONFIG = {
     "host": "127.0.0.1",
     "port": 8080,
     "api_key": "sk-local",
-    # ---- 本机属性（自动探测预填，可手动修改；层数计算直接读这里的值）----
+    # ---- 开发机属性（自动探测预填，可手动修改；层数计算直接读这里的值）----
     "gpu_name": "",
     "vram_gb": 0,                  # 显存容量（GB）；0 = 首次启动时经 nvidia-smi 探测
     "ram_gb": 0,                   # 系统内存（GB）
@@ -100,7 +100,7 @@ DEFAULT_CONFIG = {
     "img_negative": "",            # 负向提示词：只有填了才传 -n（Qwen-Image 原来就不带）
     "img_extra_args": "",          # 原样拼进命令行的人工出口
     # ---- 生视频（sd.cpp，与生图同一引擎、不同链路）----
-    # 注意：以下档位是"能跑通链路"的保守默认值，尚未在本机 8GB 显存上实测校准
+    # 注意：以下档位是"能跑通链路"的保守默认值，尚未在开发机 8GB 显存上实测校准
     "video_model_dir": "",           # 视频组件目录；留空/不存在时回退扫描 models_dir
     "vid_model_file": "",          # 视频扩散主体文件名（留空 = 用扫描到的第一个）
     "vid_llm_file": "",            # 视频文本编码器文件名（留空 = 自动配对同目录编码器）
@@ -243,7 +243,7 @@ _LAST_WRITE = {"path": "", "reason": "", "n": 0}     # 最近一次"写不进去
 def atomic_write_json(path, data):
     """原子写 JSON：先写 `<path>.tmp` 再 `os.replace` 落位；返回是否成功（不抛）。
 
-    为什么必须原子：本机每天 23:30 断电（交接文档多处以此为设计前提），直接
+    为什么必须原子：开发机每天 23:30 断电（交接文档多处以此为设计前提），直接
     `open(path, "w")` 覆写时一次中途断电就把文件截成半份 —— 而读侧（load_config /
     load_secrets / load_jobs）解析失败一律**静默回退空表/默认值**，表现成"设置全部
     丢失"。chatlog / 云端下载 / 备份脚本早已是 `.part`+replace，这三份状态文件不能例外。

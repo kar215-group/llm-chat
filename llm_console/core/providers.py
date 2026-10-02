@@ -384,7 +384,7 @@ def supports_media(p, kind):
 #   阿里云 `multimodal-generation/generation` → content[] 里放 {"image": URL 或 data:image/...;base64,...}
 #   MiniMax `/v1/image_generation` → subject_reference[].image_file（同样收 URL 或 base64 data URL）
 # 智谱的 `/images/generations` 请求体里只有 prompt/model/size 一类字段，官方页没有参考图入口；
-# 华为那页没查过（本机没密钥），所以两家都不放行 —— 放行错了就是白扣一次费。
+# 华为那页没查过（开发机没密钥），所以两家都不放行 —— 放行错了就是白扣一次费。
 #
 # 2026-10-01 真机各跑一张（图=红黄斜条纹，提示词"改成夜晚蓝紫色调、其余不变"）：
 #   阿里云（Token Plan 与百炼按量）出图**保住了条纹的几何结构**，Token Plan 的 usage 里

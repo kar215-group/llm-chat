@@ -29,7 +29,7 @@ connection 层，UI 只消费归一化后的事件与结构。
 它生成人像），所以界面措辞按 `providers.ref_image_mode` 分开，别一律叫"图生图"。
 **云端生视频仍然只做文生**：首帧/尾帧请切回本地 sd-cli 那条链路。
 
-三条来自文档 §12.1 的硬约束（阿里云这条链路，本机实测过），都在代码里落实：
+三条来自文档 §12.1 的硬约束（阿里云这条链路，开发机实测过），都在代码里落实：
   · 异步任务端点**必须**带 X-DashScope-Async: enable，缺了直接报"不支持同步调用"；
   · 产物 URL 只活 24 小时（MiniMax 的检索地址更短，1 小时）→ 终态后立即下载落地；
   · 下载用的是临时签名地址，**绝不带 Authorization**（把云密钥发给第三方主机）。
@@ -463,7 +463,7 @@ def download(url, dest, emit=None, timeout=None, log=None, stop_flag=None):
     timeout = int(timeout or 180)
     part = dest + ".part"
     # 目录可能在任务进行中途被人删掉/换掉（改过 设置 → 云端模型 → 生图/生视频 的存放目录就是这样）：
-    # 下载前补一次，否则用户只会看到一个 [Errno 2]，跟"云端失败了"完全无关（本机实测踩过）
+    # 下载前补一次，否则用户只会看到一个 [Errno 2]，跟"云端失败了"完全无关（开发机实测踩过）
     try:
         d = os.path.dirname(dest)
         if d:

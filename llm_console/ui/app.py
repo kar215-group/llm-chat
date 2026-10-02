@@ -320,7 +320,7 @@ class App(ChatMixin, ImageGenMixin, VideoGenMixin, ServiceMixin, ModelsMixin, Se
             name = display_name(self.cfg, self.cfg["model"])
         kind = self.cfg.get("model_kind")
         if kind in ("image", "video") and not missing:
-            # 附图在生图那边是参考图、在生视频这边是**首帧**（-i/--init-img，本机主体是
+            # 附图在生图那边是参考图、在生视频这边是**首帧**（-i/--init-img，开发机主体是
             # fl2va 变体，写成"参考图"是坑 42 的老错）；云端生视频没有首帧入参，所以那条不承诺
             extra = {"image": "和参考图（可选）",
                      "video": "" if cloud else "和首帧（可选）"}[kind]

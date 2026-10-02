@@ -23,7 +23,7 @@ REFUSED_EXTS = {".doc", ".pdf", ".rtf", ".odt", ".xls", ".xlsx", ".xlsm", ".ppt"
                 ".pptx", ".pages", ".numbers", ".key", ".epub", ".mobi", ".docm"}
 
 MAX_READ_BYTES = 4 << 20                 # 单文件最多读 4MB：再大的该先自己切，别把界面卡死
-# 字符→token 的换算系数。两个真实测量：① 本机 llama-server 的 /tokenize（Qwen 分词）
+# 字符→token 的换算系数。两个真实测量：① 开发机 llama-server 的 /tokenize（Qwen 分词）
 # 中文 1.40 / 本项目 markdown 1.56 / 代码 2.50 字每 token；② DeepSeek 线上 usage
 # 对"中文+数字"的表格式文本给到 1.39 字每 token。取 1.3 比所有实测都保守，
 # 宁可少带几十行，也不能把上下文顶爆（估算偏低就会真的超）。

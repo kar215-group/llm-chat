@@ -525,9 +525,9 @@ class ModelsMixin:
         sync_note()
         return win
 
-    # ---- 本机属性 + 新模型 GPU 层数自动计算 ----
+    # ---- 该机器硬件属性 + 新模型 GPU 层数自动计算 ----
     def _ensure_hw_info(self):
-        """补齐缺失的本机属性（GPU 型号/显存/内存）；配置里已有值则不问系统。"""
+        """补齐缺失的硬件属性（GPU 型号/显存/内存）；配置里已有值则不问系统。"""
         changed = False
         if not self.cfg.get("vram_gb") or not self.cfg.get("gpu_name"):
             name, vram = detect_gpu()

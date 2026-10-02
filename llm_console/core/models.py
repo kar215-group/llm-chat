@@ -45,7 +45,7 @@ def display_name(cfg, path):
 
 IMAGE_SUBDIR = "生图"             # models_dir 下存放生图大模型的子文件夹名
 
-# 生图目录里"不是模型本体"的文件名特征。原来这里写死了 `qwen3vl`（本机那个文本编码器
+# 生图目录里"不是模型本体"的文件名特征。原来这里写死了 `qwen3vl`（开发机那个文本编码器
 # 的名字），换一家模型就会把它当成扩散模型列进菜单。现在交给 sdprofile 的通用配套件
 # 名单（vae / clip / t5 / lora / tokenizer / motion / …），判定不再围着某一个文件名转。
 IMAGE_COMPONENT_PATTERNS = sdprofile.COMPANION_PATTERNS
@@ -83,7 +83,7 @@ VIDEO_SUBDIR = "生视频"            # models_dir 下存放视频模型的子�
 def video_component_role(path):
     """视频链路组件类型：'video'（扩散主体）/ 'encoder'（文本编码器）/ None（不是视频链路）。
 
-    判定集中在 `sdprofile.video_role`：MiniMax-H3 的张量名是本机实测过的，直接算；
+    判定集中在 `sdprofile.video_role`：MiniMax-H3 的张量名是开发机实测过的，直接算；
     没实测过的家族（Wan）要额外满足"文件名带线索"，理由见那儿的注释。
     生图扩散模型同样是 kv=0 的裸权重，若不命中视频标记就返回 None，
     避免把 qwen_image / flux 之类当成视频组件。
@@ -199,7 +199,7 @@ def has_local_chat(cfg):
 
     没有本地聊天模型时这个代理就是个空壳：agent 连上来也拿不到回答，所以
     「启用 API 代理」既默认关、也不给打开（判据只有这一处，界面与启动都问它）。
-    实测本机（5 个模型）`scan_models` 约 9~11ms，放在启动路径上付得起。
+    实测开发机（5 个模型）`scan_models` 约 9~11ms，放在启动路径上付得起。
     """
     try:
         _d, chat, _i = scan_models(cfg)

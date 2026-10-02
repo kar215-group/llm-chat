@@ -233,7 +233,7 @@ class VideoGenMixin:
 
     def _vid_reader(self, proc, gen, log_path, t0):
         # 完整引擎输出落盘：内存里的 _vid_tail 只有 12 行，够回答"为什么失败"，
-        # 不够回答"引擎说自己成功了却没写出文件"这类问题（本机踩过，见 §11 第 2 条）。
+        # 不够回答"引擎说自己成功了却没写出文件"这类问题（开发机踩过，见 §11 第 2 条）。
         # 日志路径走参数而不是 self._vid_log：取消后立刻重开一次任务时，旧线程会把
         # 自己的输出追加进新任务的日志里。
         log = None
@@ -282,7 +282,7 @@ class VideoGenMixin:
 
     def _handle_vid_line(self, line):
         # 滚动保留引擎输出末尾：失败时进度行会被整行删掉，没有这份记录就只剩一个
-        # "退出码 1"，用户无从判断原因（本机踩过：--mode / 负向提示词两处报错都看不见）
+        # "退出码 1"，用户无从判断原因（开发机踩过：--mode / 负向提示词两处报错都看不见）
         if line.strip():
             self._vid_tail.append(line.strip()[:220])
             if len(self._vid_tail) > 12:

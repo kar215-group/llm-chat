@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """llm_console.core.media — sd-cli 命令行组装（生图 / 生视频）：**按模型族决定槽位与参数**
 
-v0.0.3 之前这里的参数组合是围着本机那两个模型写死的（生图固定 `--llm` + `euler` +
+v0.0.3 之前这里的参数组合是围着开发机那两个模型写死的（生图固定 `--llm` + `euler` +
 `--flow-shift 3`，生视频固定 MiniMax-H3 那三件套）。现在改成先由 `core.sdprofile`
 认出模型族，再按那一族的形状决定：
 
@@ -13,7 +13,7 @@ v0.0.3 之前这里的参数组合是围着本机那两个模型写死的（生�
 
 **已实测过的两个家族（Qwen-Image 2.1 / MiniMax-H3）的 argv 与改造前逐字一致**，
 由 `_selftest/test_sd_profiles.py` 钉住；其余家族的形状来自上游 README、docs/sd.md、
-docs/flux.md、docs/wan.md 与 `sd-cli --help` 的原文（本机没实测过的，界面会如实说明）。
+docs/flux.md、docs/wan.md 与 `sd-cli --help` 的原文（开发机没实测过的，界面会如实说明）。
 """
 
 import os
@@ -194,7 +194,7 @@ def build_img_cmd(cfg, prompt, out_path, steps, size, diffusion_path, cfg_scale,
             args += ["-r", init_img]
         else:
             # 附图 = 底图（img2img）。LLM 编码器家族还要配视觉投影器，否则引擎
-            # 读不懂"把背景换成海边"这类语义指令（本机实测 --llm_vision 必需）。
+            # 读不懂"把背景换成海边"这类语义指令（开发机实测 --llm_vision 必需）。
             vis = str(files.get("llm_vision") or "")
             if prof.get("edit_needs") and not vis:
                 vis = find_vl_pairs(cfg).get(llm) or ""
@@ -336,7 +336,7 @@ def build_video_cmd(cfg, prompt, out_path, files, frames, fps, size, steps,
     if pb:
         args += ["--params-backend", pb]
     if ref_img and os.path.isfile(ref_img):
-        # 附图 = 首帧（图生视频）。本机主体是 fl2va 变体，用 -i/--init-img；
+        # 附图 = 首帧（图生视频）。开发机主体是 fl2va 变体，用 -i/--init-img；
         # -r/--ref-image 是给 Ref2VA 变体的，用错引擎不认（实测踩中）。
         # 首帧由引擎自己 crop/resize 到 -W/-H（实测 1024x1024 → 512x512），
         # 且 fl2va 只要首帧就能跑，不需要 --end-img（那是 flf2v 的尾帧）。

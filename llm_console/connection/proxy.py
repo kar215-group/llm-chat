@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""llm_console.connection.proxy — OpenAI 兼容中转代理：本机 HTTP 服务、模型名解析、按需换载与 context 校验"""
+"""llm_console.connection.proxy — OpenAI 兼容中转代理：本地 HTTP 服务、模型名解析、按需换载与 context 校验"""
 
 import json
 import os

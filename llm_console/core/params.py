@@ -5,6 +5,10 @@ import os
 
 from .gguf import read_gguf_info
 
+# ctx 取不到时的兜底：与 core/config.DEFAULT_CONFIG["ctx"] 同步（params 不能反向 import config）。
+# 只可能在配置被手改 / 损坏成 0 或 null 时现形，必须往小兜 —— 兜大了就是坑 130 那一族（下次启动 OOM）。
+_CTX_FALLBACK = 10240
+
 
 def current_ngl(cfg):
     """当前模型应使用的 GPU 层数：按模型记忆优先，否则回落全局 ngl。"""
@@ -24,7 +28,7 @@ def compute_ngl(cfg, path, vram_gb):
       3) 显存上限层数 ngl_max = 预算 ÷ 每层显存
       4) 最终应用 = ngl_max × 性能折扣
          —— dense 模型折扣 0.85：笔记本 GPU PCIe 带宽有限，GPU 层堆到
-            接近显存上限时跨设备搬运开销反而拖慢速度；由本机 27B 实测
+            接近显存上限时跨设备搬运开销反而拖慢速度；由开发机 27B 实测
             校准（算出上限约 28 层，×0.85 ≈ 23，与实测甜点 24 吻合）
          —— MoE 模型折扣 1.0 且预算更宽松：每 token 只激活约 3B/35B
             参数，CPU offload 部分本来就快，堆层收益温和但为正；专家
@@ -47,7 +51,7 @@ def compute_ngl(cfg, path, vram_gb):
             head_dim = emb // heads if heads else 0
         is_moe = int(info.get("expert_count") or 0) > 0
 
-        ctx = max(512, int(cfg.get("ctx", 8192)))
+        ctx = max(512, int(cfg.get("ctx", 8192)))   # 故意不等于 _CTX_FALLBACK：它参与 ngl 反推，系数按此值校准
         if is_moe:
             layer_ratio = 0.97          # 专家权重占绝对大头，非层占比极小
             overhead = int(0.5 * (1 << 30))
@@ -87,15 +91,16 @@ def ctx_for(cfg, path=None, agent=False):
             v = int(other.get(b) or 0)
         except Exception:
             v = 0
-    return v if v > 0 else int(cfg.get("ctx", 65536) or 65536)
+    return v if v > 0 else int(cfg.get("ctx", _CTX_FALLBACK) or _CTX_FALLBACK)
 
 def auto_ctx_for_model(cfg, path):
     """按 GGUF 元数据 + 显存/内存预算，自动推算该模型的安全 context。
 
-    规则（系数用本机 27B / 35B-MoE 实测手配值校准）：
-      显存预算 = 显存 − 权重常驻(ngl 部分；MoE 专家多数自动回退 CPU，按 0.3 折算) − 0.7GB 缓冲
+    规则（系数用开发机 27B / 35B-MoE 实测手配值校准）：
+      显存预算 = 显存 − 权重常驻(ngl 部分；MoE 专家多数自动回退 CPU，按 0.3 折算) − 0.6GB 缓冲
       内存预算 = 内存 − 权重(CPU 部分) − 8GB 系统保留
       cap = min(两预算推导值, 131072, GGUF 声明的原生上下文)，再圆整到常用档位。
+      main 档另夹 98304：主页面比 agent 保守一档（大 ctx 首 token 明显变慢），与显存够不够无关。
     返回 {"main": …, "agent": …}；元数据不足返回 None。
     """
     info = read_gguf_info(path)
@@ -135,7 +140,7 @@ def auto_ctx_for_model(cfg, path):
             below = [s for s in steps if s <= v]
             return below[-1] if below else 8192
 
-        return {"main": snap(min(cap, 65536)), "agent": snap(cap)}
+        return {"main": snap(min(cap, 98304)), "agent": snap(cap)}
     except Exception:
         return None
 
@@ -143,7 +148,7 @@ def estimate_kv_gb(cfg, path=None, ctx=None):
     """估算 KV cache 占用（GB）：total / 显存部分 / 内存部分；元数据不足返回 None。"""
     path = path or cfg.get("model", "")
     try:
-        ctx = int(ctx or cfg.get("ctx", 65536) or 65536)
+        ctx = int(ctx or cfg.get("ctx", _CTX_FALLBACK) or _CTX_FALLBACK)
         info = read_gguf_info(path)
         if not info:
             return None
