@@ -9,8 +9,9 @@ import tkinter as tk
 from tkinter import ttk, messagebox, font as tkfont
 
 from ..core import capability, cloudjobs, providers, sdprofile, secrets, textfile
-from ..core.config import (APP_DIR, APP_VERSION, CFG_VERSION, FLOAT_KEYS,
-                           INT_KEYS, STR_KEYS, cloud_media_dir, gen_api_key, save_config)
+from ..core.config import (APP_DIR, APP_VERSION, CFG_VERSION, DEFAULT_CONFIG,
+                           FLOAT_KEYS, INT_KEYS, STR_KEYS, cloud_media_dir,
+                           gen_api_key, save_config)
 from ..core.models import has_local_chat, scan_models, scan_video_models
 from ..core.params import ctx_for, current_ngl
 from ..core.server import _query_serving_model, server_process_alive
@@ -336,6 +337,86 @@ class SettingsMixin:
         self._settings_nav = nav            # 输出栏的按钮要能直接跳到某个叶子
         sp = widgets.ScrollPage(main)
 
+        # ---- 「高级参数」折叠区（设置页分层）----
+        # 口径：把"族相关 / 高级"参数默认收起来，页面只剩常用的那几项；控件**照旧建**
+        # （收起走 `grid_remove()`，只挪格子不销毁）→ 值不丢、底部「保存」的钩子也照跑
+        # （与 ScrollPage / 勾选窗口折叠组同一套路，见 13 坑 85 的教训）。
+        # "用户改过"的项绝不藏：但它只体现在折叠标题的计数上（`已改 N`），不把行搬出来
+        # —— 搬行要重排行号、还会让版面随用户历史漂移（v40「收起状态也要让用户看见这组里
+        # 有我勾的东西」是同一判据）。
+        folds = {}          # name → [控件]（收起时 grid_remove）
+        fold_heads = {}     # name → 折叠标题 Label
+        fold_keys = {}      # name → [配置键]（算总数与"已改 N"）
+        sess = getattr(self, "_settings_ui", None)
+        if not isinstance(sess, dict):        # 老实例 / 直接构造时兜底
+            sess = {"show_all": False, "fold": {}}
+            self._settings_ui = sess
+        sess.setdefault("show_all", False)
+        sess.setdefault("fold", {})
+
+        def _changed(key):
+            """这一项是不是改过出厂默认（改过的项绝不被藏）。"""
+            return str(self.cfg.get(key, "")) != str(DEFAULT_CONFIG.get(key, ""))
+
+        def _render_fold(name):
+            """按当前状态摆/收这一组，并刷新标题（▸/▾ + 项数 + 已改数）。"""
+            open_ = bool(sess.get("show_all")) or bool((sess.get("fold") or {}).get(name))
+            for w in folds.get(name) or []:
+                try:
+                    if open_:
+                        w.grid()
+                    else:
+                        w.grid_remove()
+                except Exception:
+                    pass
+            head = fold_heads.get(name)
+            if head is None:
+                return
+            keys = fold_keys.get(name) or []
+            cut = sum(1 for k in keys if _changed(k))
+            tail = ("（%d · 已改 %d）" % (len(keys), cut)) if cut else ("（%d）" % len(keys))
+            try:
+                head.configure(text="%s 高级参数%s" % ("▾" if open_ else "▸", tail))
+            except Exception:
+                pass
+
+        def _toggle_fold(name):
+            d = sess.setdefault("fold", {})
+            d[name] = not bool(d.get(name))
+            _render_fold(name)
+
+        def _fold_head(parent, rows, name, keys):
+            """插一行折叠标题（可点）：展开 / 收起这一组。"""
+            fold_keys[name] = list(keys)
+            i = rows["i"]
+            rows["i"] += 1
+            lab = tk.Label(parent, text="", cursor="hand2", anchor="w",
+                           background=widgets.default_bg(),
+                           font=("Microsoft YaHei UI", 10, "bold"))
+            lab.grid(row=i, column=0, columnspan=3, sticky="w", pady=(10, 2))
+            lab.bind("<Button-1>", lambda _e, n=name: _toggle_fold(n))
+            fold_heads[name] = lab
+            _render_fold(name)
+            return lab
+
+        def _state_row(parent, rows, var, fn, *args):
+            """区块顶部的动态状态回显（一行）：这一块"能不能用 / 缺什么"。
+
+            走 textvariable 留在页面上 —— 动态回显不进悬停（红/黄与状态那一条口径）。
+            依赖没就绪**不藏参数**：指路靠的就是块内那几项，藏了用户就没地方填。
+            填充函数经 `_idle_fill` 延后跑（那一步可能要扫盘 / 读 GGUF 头）。
+            """
+            i = rows["i"]
+            rows["i"] += 1
+            lab = ttk.Label(parent, textvariable=var, foreground="#5a6a7a",
+                            font=("Microsoft YaHei UI", 9))
+            lab.grid(row=i, column=0, columnspan=3, sticky="w", pady=(0, 6))
+            # 变量必须挂在控件上保活：`StringVar` 一旦被 GC，Tcl 侧的名字就没了，
+            # 这个 Label 会静默变空（同坑 122 的 `lab._logo_img`）。after_idle 的闭包
+            # 只在回调期间持有它 —— 撑不住。
+            lab._state_var = var
+            _idle_fill(parent, fn, *args)
+
         def section(page_id, sec_id):
             """注册一个区块的构建函数（构建粒度是**页**，注册粒度是区块）。
 
@@ -349,7 +430,7 @@ class SettingsMixin:
                 return build
             return deco
 
-        def _row(parent, rows, label, widget, desc, hint="", lw=14):
+        def _row(parent, rows, label, widget, desc, hint="", lw=14, fold=None):
             """一行：标签（旁边挂 "?"）/ 控件 / 短摘要。
 
             v39 起灰色长说明**不再内联**（它把窗口撑到 1020 宽、还把版面切成三段），
@@ -361,6 +442,9 @@ class SettingsMixin:
 
             `lw` 是标签列的字符宽：整页布局用 14（要容得下 repeat_penalty 这种长英文名），
             云端那两列并排时只有 802/2 的横向预算，标签列收到 8（中文标签最长 5 个字）。
+
+            `fold` 给一个折叠组名时，这一行的三格（标签 / 控件 / 摘要）会一起登记进那一组，
+            并按当前状态收起 —— 只是 `grid_remove()` 挪格子，控件与它的值都还在。
             """
             i = rows["i"]
             rows["i"] += 1
@@ -370,17 +454,26 @@ class SettingsMixin:
             ttk.Label(lab, text=label, width=lw, anchor="w").pack(side="left")
             widgets.HelpDot(lab, desc).pack(side="left", padx=(2, 0))
             widget.grid(row=i, column=1, sticky="w", padx=(0, 10), pady=5)
+            cell = None
             if hint:
                 cell = tk.Frame(parent, background=bg)
                 cell.grid(row=i, column=2, sticky="w", pady=5)
                 ttk.Label(cell, text=hint, foreground="#5a5a5a",
                           font=("Microsoft YaHei UI", 9)).pack(side="left")
+            if fold:
+                grp = folds.setdefault(fold, [])
+                for w in (lab, widget, cell):
+                    if w is not None:
+                        grp.append(w)
+                # 登记后立刻按当前状态摆 / 收 —— 不能无条件 grid_remove：
+                # 「显示全部参数」勾着时重开设置窗，这些行本来就该是展开的
+                _render_fold(fold)
 
-        def row(parent, rows, label, widget, desc, hint="", lw=14):
-            return _row(parent, rows, label, widget, desc, hint, lw)
+        def row(parent, rows, label, widget, desc, hint="", lw=14, fold=None):
+            return _row(parent, rows, label, widget, desc, hint, lw, fold)
 
         def ent(parent, rows, key, label, desc, width=8, var=None, trace=None, hint="",
-                lw=14):
+                lw=14, fold=None):
             """一行"标签 + 输入框"，说明在标签旁的 "?" 里。
 
             key 非空时变量登记进 v（由 _apply_settings 统一写回 cfg）；
@@ -392,7 +485,7 @@ class SettingsMixin:
             e = ttk.Entry(parent, textvariable=var, width=width)
             if trace is not None:
                 var.trace_add("write", lambda *a: trace())
-            _row(parent, rows, label, e, desc, hint, lw)
+            _row(parent, rows, label, e, desc, hint, lw, fold)
 
         # ---- 区块 1：本地文本模型 / 生成参数 ----
         @section("local_text", "gen")
@@ -401,17 +494,10 @@ class SettingsMixin:
                 "采样温度（0~2）：越高输出越发散有创意，越低越稳定保守；接近 0 时几乎固定。")
             ent(t1, r1, "top_p", "top_p",
                 "核采样（0~1）：只在累计概率达到 p 的候选词里抽样。")
-            ent(t1, r1, "top_k", "top_k",
-                "每一步只在概率最高的 k 个词中选取，常用 40。")
-            ent(t1, r1, "repeat_penalty", "repeat_penalty",
-                "重复惩罚（通常 1.0~1.3）：大于 1 抑制复读式重复，1.0 表示关闭。")
             ent(t1, r1, "max_tokens", "max_tokens",
                 "单次回复上限（token）。注意：思考过程 + 正式回答共享该额度，"
                 "Qwen3 思考较长，建议 ≥4096；到上限会被截断并提示。",
                 hint="思考与回答共用")
-            ent(t1, r1, "seed", "seed",
-                "随机种子：-1 表示随机；填固定数字可复现同一次输出。")
-
             i = r1["i"]
             r1["i"] += 1
             head = tk.Frame(t1, background=widgets.default_bg())
@@ -432,18 +518,20 @@ class SettingsMixin:
                             variable=v["show_reasoning"]).grid(
                 row=i, column=0, columnspan=3, sticky="w", pady=8)
 
+            # 「高级参数」：采样细节（top_k / 重复惩罚）与随机种子 —— 平时不动它们
+            fold_gen = "local_text:gen"
+            _fold_head(t1, r1, fold_gen, ("top_k", "repeat_penalty", "seed"))
+            ent(t1, r1, "top_k", "top_k",
+                "每一步只在概率最高的 k 个词中选取，常用 40。", fold=fold_gen)
+            ent(t1, r1, "repeat_penalty", "repeat_penalty",
+                "重复惩罚（通常 1.0~1.3）：大于 1 抑制复读式重复，1.0 表示关闭。",
+                fold=fold_gen)
+            ent(t1, r1, "seed", "seed",
+                "随机种子：-1 表示随机；填固定数字可复现同一次输出。", fold=fold_gen)
+
         # ---- 区块 2：本地文本模型 / 服务参数 ----
         @section("local_text", "svc")
         def _t2(t2, r2):
-
-            # 硬件属性：自动探测预填，存配置；GPU 层数计算直接使用这里的显存值
-            ent(t2, r2, "gpu_name", "GPU 型号",
-                "显卡型号（首次启动自动探测预填，可手动修改）。", width=32)
-            ent(t2, r2, "vram_gb", "显存 (GB)",
-                "显存容量：新模型 GPU 层数自动计算直接使用此值，不再临时询问系统；"
-                "探测失败或多卡时可手动填写。", width=8)
-            ent(t2, r2, "ram_gb", "内存 (GB)",
-                "系统内存总量（首次启动自动探测预填，可修改；目前预留展示）。", width=8)
 
             ent(t2, r2, "model", "model",
                 "当前模型 GGUF 完整路径（也可直接点主页模型名切换）。", width=30)
@@ -467,8 +555,6 @@ class SettingsMixin:
                  "而 27B（大 head_dim）约 16GB / 64K —— 后者请适当降低，"
                  "否则占用大量内存/显存（启动时界面会显示 KV 预估）。",
                  hint="按模型记忆")
-            ent(t2, r2, "threads", "threads",
-                "CPU 线程数，0 = 自动。一般留 0。")
             ent(t2, r2, "port", "port",
                 "API 端口，默认 8080。")
             # 这里**不放 api_key**：那是「API 连接」那一页的事（生成 / 复制 / 撤销都在一处），
@@ -479,16 +565,53 @@ class SettingsMixin:
             row(t2, r2, "reasoning", cb,
                 "思考模式：default 跟随模型模板；off 关闭思考（更快、不吃 max_tokens 额度）；"
                 "budget 限制思考 token 数。")
-            ent(t2, r2, "reasoning_budget", "budget tokens",
-                "思考预算：reasoning=budget 时，思考最多用多少 token。")
-            ent(t2, r2, "extra_args", "extra_args",
-                "附加命令行参数（高级）：空格分隔，原样追加给 llama-server。", width=24)
             ent(t2, r2, "exe", "server 路径",
                 "llama-server.exe 完整路径。", width=30)
 
+            # 「高级参数」：硬件属性（自动探测预填，平时不用看）、线程数、
+            # 思考预算（只在 reasoning=budget 时用）、附加命令行 —— 都是"配一次就不管"的，
+            # 收起来；常用那几个（模型 / 层数 / 上下文 / 端口 / 思考模式 / server 路径）留在外面
+            fold_svc = "local_text:svc"
+            _fold_head(t2, r2, fold_svc,
+                       ("gpu_name", "vram_gb", "ram_gb", "threads",
+                        "reasoning_budget", "extra_args"))
+            ent(t2, r2, "gpu_name", "GPU 型号",
+                "显卡型号（首次启动自动探测预填，可手动修改）。", width=32, fold=fold_svc)
+            ent(t2, r2, "vram_gb", "显存 (GB)",
+                "显存容量：新模型 GPU 层数自动计算直接使用此值，不再临时询问系统；"
+                "探测失败或多卡时可手动填写。", width=8, fold=fold_svc)
+            ent(t2, r2, "ram_gb", "内存 (GB)",
+                "系统内存总量（首次启动自动探测预填，可修改；目前预留展示）。", width=8,
+                fold=fold_svc)
+            ent(t2, r2, "threads", "threads",
+                "CPU 线程数，0 = 自动。一般留 0。", fold=fold_svc)
+            ent(t2, r2, "reasoning_budget", "budget tokens",
+                "思考预算：reasoning=budget 时，思考最多用多少 token。", fold=fold_svc)
+            ent(t2, r2, "extra_args", "extra_args",
+                "附加命令行参数（高级）：空格分隔，原样追加给 llama-server。", width=24,
+                fold=fold_svc)
+
         # ---- 区块 3：本地图像与视频 / 生图 ----
+        #
+        # 分层：状态行（依赖就绪与否）→ 常改的 7 项 → 「高级参数」折叠区（配套文件 + 后端 /
+        # 种子 / 附加参数，共 10 项，默认收起）。折叠只挪格子不毁控件 —— 值不丢、保存钩子
+        # 照跑（见 _row 的 fold 说明）；底部「显示全部参数」一勾全展开。
         @section("local_media", "img")
         def _t3(t3, r3):
+            def _fill_state(var):
+                """依赖就绪回显：认出几个生图模型（延后跑，要扫盘）。"""
+                try:
+                    _dd, _chat, imgs = scan_models(self.cfg)
+                    n = len(imgs)
+                except Exception:
+                    n = 0
+                if n:
+                    var.set("生图模型：认出 %d 个" % n)
+                else:
+                    var.set("还没认到生图模型：先填下面两项，或去「模型文件与引擎」扫描")
+
+            img_state = tk.StringVar(value="")
+            _state_row(t3, r3, img_state, _fill_state, img_state)
             ent(t3, r3, "sd_dir", "引擎目录",
                 "sd.cpp 引擎所在目录（内含 sd-cli.exe / sd-server.exe）。", width=30)
             ent(t3, r3, "image_model_dir", "生图模型文件夹",
@@ -529,18 +652,6 @@ class SettingsMixin:
             v["img_family"].trace_add("write", refresh_img_note)
             # 开页这次回显要读模型文件头，延到开页之后（_idle_fill）；下拉联动那次仍即时算
             _idle_fill(t3, refresh_img_note)
-            ent(t3, r3, "img_vae_file", "VAE 文件",
-                "留空 = 在本族要求的目录里自动找（按文件名含 vae / ae）。放了多个家族"
-                "的权重又挑错时，在这里指名。", width=30, hint="留空=自动")
-            ent(t3, r3, "img_llm_file", "LLM 编码器",
-                "LLM 文本编码器的 .gguf（Qwen-Image、FLUX.2 这类要用）。CLIP 系的模型不用填。",
-                width=30, hint="留空=自动")
-            ent(t3, r3, "img_clip_l_file", "CLIP-L",
-                "clip_l.safetensors 之类（Flux / SD3 必需）。", width=30, hint="留空=自动")
-            ent(t3, r3, "img_clip_g_file", "CLIP-G",
-                "clip_g.safetensors 之类（SDXL / Flux 用）。", width=30, hint="留空=自动")
-            ent(t3, r3, "img_t5_file", "T5-XXL",
-                "t5xxl_fp16.safetensors 之类（Flux / SD3 必需）。", width=30, hint="留空=自动")
             ent(t3, r3, "img_steps", "默认步数",
                 "默认采样步数（4~50）：少 = 快、多 = 细节更多，耗时大致与步数成正比"
                 "（8 步与 20 步差两倍多）。具体到某个模型族的推荐值，看它自己页面的说明。",
@@ -552,34 +663,77 @@ class SettingsMixin:
             ent(t3, r3, "img_cfg", "默认 CFG",
                 "提示词服从度。Qwen-Image 官方推荐 2.5；Flux dev/schnell 常给 1.0，"
                 "SDXL/SD1.5 常给 6~8。切族时记得改这一档。")
+            fold_img = "local_media:img"
+            _fold_head(t3, r3, fold_img,
+                       ("img_vae_file", "img_llm_file", "img_clip_l_file",
+                        "img_clip_g_file", "img_t5_file", "img_negative",
+                        "img_seed", "img_backend", "img_params_backend",
+                        "img_extra_args"))
+            ent(t3, r3, "img_vae_file", "VAE 文件",
+                "留空 = 在本族要求的目录里自动找（按文件名含 vae / ae）。放了多个家族"
+                "的权重又挑错时，在这里指名。", width=30, hint="留空=自动", fold=fold_img)
+            ent(t3, r3, "img_llm_file", "LLM 编码器",
+                "LLM 文本编码器的 .gguf（Qwen-Image、FLUX.2 这类要用）。CLIP 系的模型不用填。",
+                width=30, hint="留空=自动", fold=fold_img)
+            ent(t3, r3, "img_clip_l_file", "CLIP-L",
+                "clip_l.safetensors 之类（Flux / SD3 必需）。", width=30, hint="留空=自动",
+                fold=fold_img)
+            ent(t3, r3, "img_clip_g_file", "CLIP-G",
+                "clip_g.safetensors 之类（SDXL / Flux 用）。", width=30, hint="留空=自动",
+                fold=fold_img)
+            ent(t3, r3, "img_t5_file", "T5-XXL",
+                "t5xxl_fp16.safetensors 之类（Flux / SD3 必需）。", width=30, hint="留空=自动",
+                fold=fold_img)
             ent(t3, r3, "img_negative", "负向提示词",
                 "留空 = 不传给引擎（Qwen-Image 本来就不带这一项）。SD/SDXL/Wan 这类"
-                "支持负向提示词的模型可以自己填。", width=30, hint="留空=不传")
+                "支持负向提示词的模型可以自己填。", width=30, hint="留空=不传", fold=fold_img)
             ent(t3, r3, "img_seed", "默认种子",
-                "-1 随机；固定数字可复现同一次输出。")
+                "-1 随机；固定数字可复现同一次输出。", fold=fold_img)
             ent(t3, r3, "img_backend", "组件后端",
                 "sd-cli --backend。留空 = 用该族默认（LLM 系走 te=cpu,diffusion=cuda0,vae=cuda0，"
                 "CLIP 系走 clip=cpu,…）。8GB 显存装不下时可以试 diffusion=cpu 或 vae=cpu。",
-                width=30, hint="留空=默认")
+                width=30, hint="留空=默认", fold=fold_img)
             ent(t3, r3, "img_params_backend", "权重后端",
                 "sd-cli --params-backend。留空 = 引擎 auto-fit 自己安排；显存吃紧可填 "
-                "diffusion=disk 从内存/磁盘流式取权重。", width=30, hint="留空=自动")
+                "diffusion=disk 从内存/磁盘流式取权重。", width=30, hint="留空=自动",
+                fold=fold_img)
             ent(t3, r3, "img_extra_args", "附加参数",
                 "原样拼到命令行末尾，是「识别没覆盖到」的人工出口。例如 "
                 "--scheduler karras --prediction eps 或 --taesd <路径> 做快速预览。",
-                width=30, hint="可留空")
+                width=30, hint="可留空", fold=fold_img)
 
-            ttk.Button(t3, text="打开输出文件夹",
+            # 「输出目录」这一行与生视频那块**同一形状**（标签 + 打开按钮 + 一句说明），
+            # 两块的尾巴长得一样，扫一眼就知道哪儿开文件夹
+            fr_i = ttk.Frame(t3)
+            ttk.Button(fr_i, text="打开图片输出文件夹",
                        command=lambda: _open_outdir(
                            os.path.join(str(self.cfg.get("sd_dir", "") or ""), "output"),
-                           "生图输出目录", "生图（sd.cpp） → 引擎目录")).grid(
-                row=r3["i"], column=1, sticky="w", pady=5)
-            r3["i"] += 1
+                           "生图输出目录", "生图（sd.cpp） → 引擎目录")).pack(side="left")
+            row(t3, r3, "输出目录", fr_i,
+                "生成结果写在 sd.cpp\\output\\img_时间戳.png；引擎每次按需拉起，进程退出即释放显存。")
             refresh_img_note()
 
         # ---- 区块 4：本地图像与视频 / 生视频 ----
+        #
+        # 分层同生图：状态行 → 常改的 8 项（目录 / 主体 / 族 / 分辨率 / 帧数 / 帧率 / 步数 /
+        # CFG）→ 「高级参数」折叠区（编码器 / VAE / MoE 高噪段 / 音频 VAE / 负向词 / 容器 /
+        # 后端，共 12 项，默认收起）。
         @section("local_media", "vid")
         def _t3b(t3b, r3b):
+            def _fill_state(var):
+                """依赖就绪回显：扫到几个视频扩散主体（延后跑，要读 GGUF 头）。"""
+                try:
+                    vids, _encs = scan_video_models(self.cfg)
+                    n = len(vids)
+                except Exception:
+                    n = 0
+                if n:
+                    var.set("视频模型：认出 %d 个" % n)
+                else:
+                    var.set("还没认到视频模型：先填下面两项，或去「模型文件与引擎」扫描")
+
+            vid_state = tk.StringVar(value="")
+            _state_row(t3b, r3b, vid_state, _fill_state, vid_state)
             ent(t3b, r3b, "video_model_dir", "视频模型文件夹",
                 "视频组件存放目录：扩散主体 + 文本编码器（LLM 或 T5-XXL）+ 视频 VAE，"
                 "MiniMax-H3 与 Wan 都是这套摆法。"
@@ -587,10 +741,6 @@ class SettingsMixin:
                 width=30)
             ent(t3b, r3b, "vid_model_file", "扩散主体文件名",
                 "留空 = 用扫描到的第一个视频扩散 GGUF。", width=30)
-            ent(t3b, r3b, "vid_llm_file", "文本编码器文件名",
-                "留空 = 自动取与扩散主体配套的编码器（按文件名匹配，通常名字里带 vl / llm）。", width=30)
-            ent(t3b, r3b, "vid_vae_file", "视频 VAE 文件名",
-                "留空 = 在主体所在目录里按文件名含 vae 自动找（不含 audio 的那个）。", width=30)
             _vf_opts = sdprofile.family_choices("video")
             _vf2code = {t: c for c, t in _vf_opts}
             v["vid_family"] = tk.StringVar(
@@ -628,19 +778,6 @@ class SettingsMixin:
                 vid_note.set("识别为：%s（%s）" % (sdprofile.label_of(fid), tail or "自动"))
 
             v["vid_family"].trace_add("write", refresh_vid_note)
-            ent(t3b, r3b, "vid_t5_file", "T5-XXL 文件名",
-                "Wan / LTX / HunyuanVideo 的文本编码器（--t5xxl）。MiniMax-H3 不用填这一项。",
-                width=30, hint="留空=自动")
-            ent(t3b, r3b, "vid_tokenizer_file", "tokenizer 文件",
-                "部分家族要 tokenizer.json（引擎的 --tokenizer）。留空 = 不传。",
-                width=30, hint="多数不用填")
-            ent(t3b, r3b, "vid_high_noise_file", "高噪段模型",
-                "Wan2.2 的 MoE 版是**两个**扩散文件（高噪段 + 低噪段），这里填高噪段那个"
-                "（--high-noise-diffusion-model）。5B 版与单文件模型留空即可。",
-                width=30, hint="MoE 才要")
-            ent(t3b, r3b, "vid_audio_vae_file", "音频 VAE",
-                "只有想要**有声视频**才需要；没有它照样出片，只是没有声音。"
-                "留空 = 按文件名含 audio + vae 自动找。", width=30, hint="留空=自动")
             ent(t3b, r3b, "vid_size", "分辨率",
                 "宽x高，如 512x512。视频分辨率对显存和耗时都很敏感，先小后大。", width=12)
             ent(t3b, r3b, "vid_frames", "帧数",
@@ -654,23 +791,52 @@ class SettingsMixin:
             ent(t3b, r3b, "vid_cfg", "CFG",
                 "提示词服从度。MiniMax-H3 用 5.0 就行；Wan 的官方区间是 3~6。"
                 "大于 1 时引擎会去编码负向提示词，H3 那一族下面那栏就不能留空。")
+
+            fold_vid = "local_media:vid"
+            _fold_head(t3b, r3b, fold_vid,
+                       ("vid_llm_file", "vid_vae_file", "vid_t5_file",
+                        "vid_tokenizer_file", "vid_high_noise_file",
+                        "vid_audio_vae_file", "vid_neg_prompt", "vid_format",
+                        "vid_seed", "vid_backend", "vid_params_backend",
+                        "vid_extra_args"))
+            ent(t3b, r3b, "vid_llm_file", "文本编码器文件名",
+                "留空 = 自动取与扩散主体配套的编码器（按文件名匹配，通常名字里带 vl / llm）。",
+                width=30, fold=fold_vid)
+            ent(t3b, r3b, "vid_vae_file", "视频 VAE 文件名",
+                "留空 = 在主体所在目录里按文件名含 vae 自动找（不含 audio 的那个）。",
+                width=30, fold=fold_vid)
+            ent(t3b, r3b, "vid_t5_file", "T5-XXL 文件名",
+                "Wan / LTX / HunyuanVideo 的文本编码器（--t5xxl）。MiniMax-H3 不用填这一项。",
+                width=30, hint="留空=自动", fold=fold_vid)
+            ent(t3b, r3b, "vid_tokenizer_file", "tokenizer 文件",
+                "部分家族要 tokenizer.json（引擎的 --tokenizer）。留空 = 不传。",
+                width=30, hint="多数不用填", fold=fold_vid)
+            ent(t3b, r3b, "vid_high_noise_file", "高噪段模型",
+                "Wan2.2 的 MoE 版是**两个**扩散文件（高噪段 + 低噪段），这里填高噪段那个"
+                "（--high-noise-diffusion-model）。5B 版与单文件模型留空即可。",
+                width=30, hint="MoE 才要", fold=fold_vid)
+            ent(t3b, r3b, "vid_audio_vae_file", "音频 VAE",
+                "只有想要**有声视频**才需要；没有它照样出片，只是没有声音。"
+                "留空 = 按文件名含 audio + vae 自动找。", width=30, hint="留空=自动",
+                fold=fold_vid)
             ent(t3b, r3b, "vid_neg_prompt", "负向提示词",
                 "MiniMax-H3 在 CFG>1 时**必须能编码出负向提示词**，留空会报 "
                 "failed to encode negative video prompt 并退出码 1 —— 这一族留空时代码会用"
                 "内置兜底值。Wan / LTX 不要求，留空就不传给引擎。",
-                width=30, hint="H3 不能留空")
+                width=30, hint="H3 不能留空", fold=fold_vid)
             ent(t3b, r3b, "vid_format", "输出容器",
-                "webm / avi / webp（sd-cli 单文件视频输出只支持这三种）。", width=10)
-            ent(t3b, r3b, "vid_seed", "种子", "-1 随机。")
+                "webm / avi / webp（sd-cli 单文件视频输出只支持这三种）。", width=10,
+                fold=fold_vid)
+            ent(t3b, r3b, "vid_seed", "种子", "-1 随机。", fold=fold_vid)
             ent(t3b, r3b, "vid_backend", "组件后端",
                 "sd-cli --backend：各组件跑在哪。默认把文本编码器放 CPU、扩散与 VAE 放显卡，"
-                "与生图一致。", width=30)
+                "与生图一致。", width=30, fold=fold_vid)
             ent(t3b, r3b, "vid_params_backend", "权重后端",
                 "sd-cli --params-backend：权重放哪。显存吃紧时可填 diffusion=disk 让引擎从内存/磁盘流式取权重。",
-                width=30)
+                width=30, fold=fold_vid)
             ent(t3b, r3b, "vid_extra_args", "附加参数",
                 "原样拼进命令行。默认开了 --vae-tiling --temporal-tiling 分块解码来压显存。",
-                width=30)
+                width=30, fold=fold_vid)
 
             fr_v = ttk.Frame(t3b)
             ttk.Button(fr_v, text="打开视频输出文件夹",
@@ -2385,6 +2551,19 @@ class SettingsMixin:
             if restart:
                 self.restart_server()
 
+        # 「显示全部参数」：常驻底部按钮条（固定外框，不随滚动消失）。勾上 = 把**所有**
+        # 「高级参数」折叠区一起展开（含还没建起来的页 —— 那些页建的时候会问会话状态）。
+        # 状态存在 App._settings_ui（会话内记住：关掉设置窗再开还在，退程序才清），
+        # **不写进配置文件** —— 它纯粹是界面偏好，不是功能设置。
+        show_var = tk.BooleanVar(value=bool(sess.get("show_all")))
+
+        def _apply_show_all():
+            sess["show_all"] = bool(show_var.get())
+            for _n in list(fold_heads):
+                _render_fold(_n)
+
+        ttk.Checkbutton(bar, text="显示全部参数", variable=show_var,
+                        command=_apply_show_all).pack(side="left", padx=(2, 0))
         ttk.Button(bar, text="关闭", command=win.destroy).pack(side="right", padx=4)
         ttk.Button(bar, text="保存并重启服务",
                    command=lambda: _global_save(restart=True)).pack(side="right", padx=4)

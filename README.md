@@ -200,4 +200,4 @@ python -m PyInstaller --noconfirm --clean --onefile --windowed --name llm-chat \
 - **模型权重**：各自遵循其在发布平台上的条款，商用前请逐个确认。
 - **云端 API**：按各服务商计费策略产生费用，注意 token 成本。
 
-本仓库**未附加开源许可证**：默认保留所有权利。要 fork、二次分发或商用之前，请先确认授权范围。
+本项目采用 **PolyForm Noncommercial License 1.0.0**：**仅限非商业用途**。完整条款见仓库根目录的 [`LICENSE`](LICENSE)。

@@ -59,6 +59,9 @@ class App(ChatMixin, ImageGenMixin, VideoGenMixin, ServiceMixin, ModelsMixin, Se
         self._stop_flag = None
         self._settings_win = None
         self._settings_nav = None       # 设置窗口的左栏（输出栏的按钮要 jump 到某个叶子）
+        # 设置页的会话内界面状态：{"show_all": 底部「显示全部参数」勾没勾, "fold": {区块名: 展开}}
+        # 挂在 App 上（不是窗口上）→ 关掉设置窗再开，勾选与展开状态还在；程序一退就没了
+        self._settings_ui = {"show_all": False, "fold": {}}
         self._diag_win = None         # 「诊断」次级页面（设置 → 关于 的按钮开的，放路径与一键诊断）
         self._alias_tried = set()    # （备用）已尝试向模型请求别名的模型
         self._serving_model = None   # 当前服务实际加载的模型文件名（None=未知/未运行）
