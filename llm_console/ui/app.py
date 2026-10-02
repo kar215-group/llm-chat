@@ -306,31 +306,44 @@ class App(ChatMixin, ImageGenMixin, VideoGenMixin, ServiceMixin, ModelsMixin, Se
                                 font=("Microsoft YaHei UI", 9))
         # 启动时按当前模型类型给出引导：只说"这一步怎么用"，细节留给选模型时那一句
         # 与设置页 / README（W 的要求：字数变少，不逐条罗列细节）
-        # 「根本没选上模型」和「这是个纯文本模型」是两件事，判据与顶栏共用同一个
-        # （`model_missing`，坑 128）：原来这里无条件拼 display_name，空模型时打成
-        # 「当前模型：（语言模型）」这种半截话
+        # 「根本没选上模型」「本地纯文本模型」「云端直连模型」是三件事，判据与顶栏共用
+        # （`model_missing`，坑 128：同一事实的两个入口各写一遍迟早走偏）。原来这里无条件
+        # 拼 display_name → 空模型时打成「当前模型：（语言模型）」，云端模型则打出
+        # 「t-wl::qwen3-plus」这种内部 id，还叫用户去点「启动服务」（云端根本不用启动）。
+        cloud = providers.is_cloud(self.cfg)
         missing = model_missing(self.cfg)
-        name = NO_MODEL_LABEL if missing else display_name(self.cfg, self.cfg["model"])
+        if missing:
+            name = NO_MODEL_LABEL
+        elif cloud:
+            name = providers.display_of_cloud(self.cfg, self.cfg.get("model", ""))
+        else:
+            name = display_name(self.cfg, self.cfg["model"])
         kind = self.cfg.get("model_kind")
         if kind in ("image", "video") and not missing:
             # 附图在生图那边是参考图、在生视频这边是**首帧**（-i/--init-img，本机主体是
             # fl2va 变体，写成"参考图"是坑 42 的老错）；云端生视频没有首帧入参，所以那条不承诺
             extra = {"image": "和参考图（可选）",
-                     "video": "" if providers.is_cloud(self.cfg) else "和首帧（可选）"}[kind]
+                     "video": "" if cloud else "和首帧（可选）"}[kind]
             self._append("本地对话台已就绪。\n"
                          "当前模型：%s —— 无需启动服务，直接发提示词%s即可。\n"
                          "点顶部模型名切换模型；回车发送，Shift+回车换行；"
                          "生成中可点「停止生成」。\n"
                          "────────────────────\n" % (name, extra), "meta")
         else:
-            what = ("模型目录里放一个 .gguf，或在 设置 → 云端模型 填一家密钥，就能选上"
-                    if missing else "点「启动服务」加载，状态变 ● 运行中 后即可对话")
+            if missing:
+                what = ("模型目录里放一个 .gguf 就能选上"
+                        if not cloud else "在 设置 → 云端模型 里挑一个就能选上")
+            elif cloud:
+                what = "云端模型直连服务商，不用启动服务，发送后稍等一会儿就有回答"
+            else:
+                what = "点「启动服务」加载，状态变 ● 运行中 后即可对话"
             self._append("本地对话台已就绪。\n"
                          "当前模型：%s —— %s。\n"
                          "点顶部模型名切换模型；回车发送，Shift+回车换行；"
                          "「停止生成」会保留已生成的内容。\n"
                          "────────────────────\n"
-                         % (name if missing else name + "（语言模型）", what), "meta")
+                         % (name if (missing or cloud) else name + "（语言模型）", what),
+                         "meta")
 
     def _build_inputbar(self):
         # 附件预览条（默认隐藏；有附图或文本文件时 pack 到输入区上方）

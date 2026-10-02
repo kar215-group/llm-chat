@@ -2289,6 +2289,13 @@ class SettingsMixin:
             build(body, {"i": 0})
             return body
 
+        # 区块标题的"闪一下"同一时刻只许有一个：原来是每次点击各挂一个 1200ms 定时器，
+        # 连点同页两个区块（生成参数 → 服务参数）就会两处同时黄底，用户反而不知道
+        # 自己跳到哪儿了（W 2026-10-02 提的）。所以记下当前闪的标签与它的定时器 id，
+        # 新的来了先撤旧定时器、先把旧的那处熄灭。代价是每次点击多一次 after_cancel
+        # 与一次 configure（微秒级），不在任何热路径上。
+        flashed = {"lbl": None, "timer": None}
+
         def _unflash(lbl):
             try:
                 if lbl.winfo_exists():
@@ -2298,6 +2305,15 @@ class SettingsMixin:
 
         def _flash(head):
             """定位过去之后把区块标题闪一下底色：不闪的话用户不知道页面滚到了哪儿。"""
+            if flashed["timer"] is not None:
+                try:
+                    win.after_cancel(flashed["timer"])
+                except Exception:
+                    pass
+                flashed["timer"] = None
+            if flashed["lbl"] is not None:
+                _unflash(flashed["lbl"])
+                flashed["lbl"] = None
             if head is None:
                 return
             lbl = [w for w in head.winfo_children() if isinstance(w, tk.Label)]
@@ -2305,9 +2321,20 @@ class SettingsMixin:
                 return
             try:
                 lbl[0].configure(background="#fff3c4")
-                win.after(1200, lambda: _unflash(lbl[0]))
             except Exception:
-                pass
+                return
+            flashed["lbl"] = lbl[0]
+
+            def _done():
+                flashed["timer"] = None
+                if flashed["lbl"] is not None:
+                    _unflash(flashed["lbl"])
+                    flashed["lbl"] = None
+
+            try:
+                flashed["timer"] = win.after(1200, _done)
+            except Exception:
+                _done()
 
         def _nav_select(item):
             page_id, sec_id = item["page"], item["section"]
