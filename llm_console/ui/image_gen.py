@@ -137,6 +137,13 @@ class ImageGenMixin:
             else:
                 self._append("[云端图生图] 参考图：%s\n" % os.path.basename(ref_img), "meta")
             refs = [ref_img]
+        # 费用就近打在对话流里，而且必须打在**提交之前**：生图不弹二次确认（同步、
+        # 单次几分钱，每次都问只会让人不看内容按回车），但那不等于不告诉。
+        # 单价按模型查，没填就明说"以账单为准"，不编数字。
+        self._append("[云端生图] 模型 %s · %s\n"
+                     % (model or "（未选）",
+                        providers.media_price_note(provider, providers.KIND_IMAGE,
+                                                   0, model)), "meta")
         gen, q, stop = self._cloud_begin("image")
         self._cloud_pid = str(provider["id"])
         self._img_out = out

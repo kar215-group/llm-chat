@@ -110,8 +110,20 @@ jobs:
           fi
           echo "Tcl 数据目录 = $TCLDIR"
           echo "Tk  数据目录 = $TKDIR"
+          # 图标资源先验一下：丢了也能打出包，只是 exe 又变回 PyInstaller 那根默认羽毛，
+          # 流水线全绿、没人发现 —— 宁可在这里红。重生成命令见 tools/make_icon.py。
+          if [ ! -f "llm_console/ui/app.ico" ]; then
+            echo "::error::缺少 llm_console/ui/app.ico"
+            exit 1
+          fi
+          # --icon 必须给**绝对路径**：PyInstaller 是拿 `--specpath` 所在目录去解析相对
+          # 图标路径的，写 "llm_console/ui/app.ico" 会去找 build/llm_console/ui/app.ico
+          # 然后 FileNotFoundError（本地实测）。
+          ICON=$(python -c "import os; print(os.path.abspath(os.path.join('llm_console','ui','app.ico')))")
+          echo "图标 = $ICON"
           python -m PyInstaller --noconfirm --clean \
             --onefile --windowed --name "$APP_NAME" \
+            --icon "$ICON" \
             --distpath dist --workpath build/work --specpath build \
             --add-data "$TCLDIR;_tcl_data" --add-data "$TKDIR;_tk_data" \
             llama_gui.py
@@ -194,7 +206,8 @@ jobs:
           ### 怎么装
           1. 下载 zip，解压出 `llm-chat.exe`。
           2. 推荐把它放到推理引擎旁边：`llm-chat.exe` + `llama-server.exe`（含其 dll）+ `models\*.gguf` 同一层目录。
-             放别处也行，第一次启动后在 设置 → 服务参数 里指路。
+             放别处也行，第一次启动后在 设置 → 本地模型 → 服务参数 里指路；引擎本身还没下载的话，
+             设置 → 本地模型 → 获取引擎 那一屏有官方下载页的入口。
           3. 双击运行。首次会在同目录生成 `gui_config.json`（配置）与 `secrets.json`（云端密钥）。
 
           ### 注意

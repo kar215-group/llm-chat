@@ -247,7 +247,7 @@ class ModelsMixin:
         self._render_status(self._server_alive_flag, self._server_ready_flag)
         p = providers.get_provider(self.cfg, pid) or {}
         key_note = ("" if secrets.has_api_key(pid)
-                    else "（**还没填 API Key**：设置 → 云端模型 → 服务商与密钥 → 密钥）")
+                    else "（还没填 API Key：设置 → 云端模型 → 服务商与密钥 → 密钥）")
         if kind == providers.KIND_TEXT:
             note = "无需启动服务，直接发消息即可；不影响正在运行的本地服务。"
         else:

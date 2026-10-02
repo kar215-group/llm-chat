@@ -7,17 +7,19 @@ import subprocess
 import sys
 import threading
 import time
+import traceback
 import tkinter as tk
 from tkinter import ttk, scrolledtext, messagebox, filedialog
 
 from ..core.config import (load_config, DEFAULT_CONFIG, APP_DIR, APP_VERSION,
                            CONFIG_PATH)
-from ..core import cloudjobs, config, providers
-from ..core.models import display_name
+from ..core import cloudjobs, config, crashlog, diagnose, providers
+from ..core.models import display_name, has_local_chat
 from ..core.server import _query_serving_model, server_process_alive, server_state, stop_server
 from ..connection import cloud_media
 from ..connection.proxy import ProxyServer
 from .dialogs import ExitDialog, ImageDialog
+from . import guide, widgets
 from .chat import ChatMixin
 from .image_gen import ImageGenMixin
 from .video_gen import VideoGenMixin
@@ -29,9 +31,15 @@ from .settings import SettingsMixin
 class App(ChatMixin, ImageGenMixin, VideoGenMixin, ServiceMixin, ModelsMixin, SettingsMixin):
     """主窗口外壳：布局、主轮询、状态灯、退出；其余职责分散在各 Mixin。"""
 
-    def __init__(self, root, cfg):
+    def __init__(self, root, cfg, first_run=False):
         self.root = root
         self.cfg = cfg
+        # 首跑判定由 main() 传进来（它得在 load_config 之前才知道配置文件原本存不存在）
+        self._first_run = bool(first_run)
+        # 遮罩引导：同一时刻只允许一层（重复打开会把遮罩叠遮罩，鼠标点哪儿都不通）
+        self._guide = None
+        # 状态线程用来去重"配置写不进去"这条提醒（同一份错误只说一次）
+        self._write_err_seen = ""
         self.history = []            # 多轮对话（不含 system）
         # 对话记录（core/chatlog）：会话号在第一条消息时才生成，
         # 免得"打开又关掉"留一堆空文件；_sess_path 是它落盘后的路径，
@@ -48,6 +56,8 @@ class App(ChatMixin, ImageGenMixin, VideoGenMixin, ServiceMixin, ModelsMixin, Se
         self._server_ready_flag = False
         self._stop_flag = None
         self._settings_win = None
+        self._settings_nav = None       # 设置窗口的左栏（输出栏的按钮要 jump 到某个叶子）
+        self._diag_win = None         # 「诊断」次级页面（设置 → 关于 的按钮开的，放路径与一键诊断）
         self._alias_tried = set()    # （备用）已尝试向模型请求别名的模型
         self._serving_model = None   # 当前服务实际加载的模型文件名（None=未知/未运行）
         self._pending_text = None    # 换载期间暂存的消息，就绪后自动发送
@@ -98,17 +108,138 @@ class App(ChatMixin, ImageGenMixin, VideoGenMixin, ServiceMixin, ModelsMixin, Se
         self._build_topbar()
         self._build_chat()
         self._build_inputbar()
+        # Tk 找的是**控件身上的** report_callback_exception（`self._root().…`），而 App 不是
+        # tk.Tk 的子类 —— 不挂这一行，方法定义了也永远不会被叫到：Tk 回调里炸的东西
+        # 全都不落错误日志，而那是 `--windowed` exe 用户唯一的痕迹（A/B 实测过：
+        # 不挂时日志空白，挂上才有那段 traceback）
+        root.report_callback_exception = self.report_callback_exception
 
-        # OpenAI 兼容中转：供 agent 应用接入（127.0.0.1:proxy_port）
+        # OpenAI 兼容中转：供 agent 应用接入（127.0.0.1:proxy_port）。
+        # 没有本地可转发的文本模型就不起 —— 代理空跑着也只是让 agent 连上来拿不到回答
         self.proxy = ProxyServer(cfg, note_fn=lambda m: self._sq.put(("note", m)))
-        if cfg.get("proxy_enabled", True):
+        self._proxy_usable = has_local_chat(cfg)
+        if cfg.get("proxy_enabled", True) and self._proxy_usable:
             self.proxy.start()
+        elif cfg.get("proxy_enabled", True):
+            # 不起代理必须说一声：否则 agent 那边是"连不上"，用户在这儿什么线索都没有
+            self._sq.put(("note", "API 代理没有启动：这台机器上还没有可转发的本地文本模型。"
+                                  "备好引擎与模型后在 设置 → API 连接 里启用。"))
 
         threading.Thread(target=self._status_loop, daemon=True).start()
         threading.Thread(target=self._precompute_ngl, daemon=True).start()
         root.after(80, self._poll)
         self.input.focus_set()
         self._offer_cloud_recovery()
+        self._offer_crash_notice()
+        self._offer_engine_hint()
+
+    def report_callback_exception(self, exc, val, tb):
+        """Tk 回调里抛出的异常：先落进崩溃日志，再照原样打一份。
+
+        Tk 自己只会 print，而 `--windowed` 的 exe 没有控制台（stdout/stderr 都是 DEVNULL），
+        那些异常等于没发生过 —— 坑 93 那次"用户点什么都没反应、界面上零痕迹"就是这么来的。
+        """
+        text = "".join(traceback.format_exception(exc, val, tb))
+        try:
+            crashlog.note(text)
+        except Exception:
+            pass
+        try:
+            sys.stderr.write(text + "\n")
+        except Exception:
+            pass
+
+    def _offer_crash_notice(self):
+        """上次留下过崩溃记录就主动开口一次（下载 exe 用的用户不会自己去翻 .log）。
+
+        判据是"日志的 mtime+size 与上次看过时不一样"，所以同一条崩溃只说一次；
+        说完就把这个指纹写回配置。任何一步失败都不能拖住启动。
+        """
+        try:
+            p = crashlog.log_path()
+            if not os.path.isfile(p):
+                return
+            st = os.stat(p)
+            seen = "%d:%d" % (int(st.st_mtime), st.st_size)
+            if str(self.cfg.get("crashlog_seen", "")) == seen:
+                return
+            self.cfg["crashlog_seen"] = seen
+            config.save_config(self.cfg)
+            messagebox.showwarning(
+                "上次异常退出",
+                "这个程序上一次的错误记录还没被看过。\n\n日志文件：%s\n\n"
+                "最近几条：\n%s\n\n设置 → 关于与诊断 →「诊断」里有「打开错误日志」与「一键诊断」。"
+                % (p, crashlog.tail(6) or "（读不出内容）"))
+        except Exception:
+            pass
+
+    def _guide_missing(self):
+        """引导第一屏那份缺件清单。
+
+        走 `diagnose.guide_missing`（廉价判据：引擎在不在 / 有没有可聊的模型 / 云端有没有
+        密钥），**不跑整套 run_checks** —— 那套会真试写目录、bind 端口、逐模型算 ngl，
+        而这里是主线程，一点「新手引导」就冻一下。
+        首跑与「设置 → 关于与诊断 → 新手引导」**共用这一处**，所以重看引导看到的
+        第一屏跟第一次打开时是同一份（W 2026-10-02：不该一边是"环境无问题"一边是缺件）。
+        """
+        try:
+            return diagnose.guide_missing(self.cfg)
+        except Exception:
+            return []                    # 判据坏了就放欢迎页，别把引导一起拖死
+
+    def _first_run_flow(self):
+        """首跑：把"还缺什么"写进引导第一页，然后放一遍遮罩引导。
+
+        只在"这次真的是首跑"（配置文件之前不存在）且没看过当前版本的引导时自动放；
+        升级不重弹 —— 重看入口常驻 设置 → 关于与诊断。
+        诊断**不探显卡**：首跑时配置里还没有 GPU 信息，探一次最坏要等 nvidia-smi
+        的 10 秒超时，而那件事跟"缺不缺引擎和模型"无关（坑 4：外部命令别挡在界面上）。
+        """
+        if not self._first_run:
+            return
+        if str(self.cfg.get("guide_done", "")) == APP_VERSION:
+            return
+        self.start_guide()
+
+    def start_guide(self, missing=None):
+        """放一遍遮罩引导（首跑自动放；之后由 设置 → 关于与诊断 的按钮重看）。
+
+        **先关掉设置窗口**：引导挖的洞对准的是主窗口上的控件，隔着一个盖住大半屏的设置
+        窗口去放，用户看到的就是"遮罩压在设置页上、被指着的东西根本不在洞里"（W 报的）。
+        关掉等于点「关闭」—— 没保存的编辑会丢，这点与设置窗口一贯的行为一致。
+        「诊断」次级页面同理：它还开着就会盖在遮罩上面，所以一起关掉。
+        """
+        if missing is None:
+            missing = self._guide_missing()
+        for attr in ("_settings_win", "_diag_win"):
+            w = getattr(self, attr, None)
+            if w is not None:
+                try:
+                    if w.winfo_exists():
+                        w.destroy()
+                except Exception:
+                    pass
+                setattr(self, attr, None)
+        if self._guide is not None and self._guide.alive():
+            self._guide.close()        # 不叠两层：重看 = 关掉旧的再开
+
+        def _done():
+            self.cfg["guide_done"] = APP_VERSION
+            try:
+                config.save_config(self.cfg)
+            except Exception:
+                pass
+            self._guide = None
+
+        try:
+            self.root.lift()           # 主窗口先回到最前，遮罩才有东西可盖
+            self._guide = widgets.SpotlightGuide(self.root, guide.steps(self, missing),
+                                                 on_close=_done)
+        except Exception as e:
+            self._guide = None
+            messagebox.showwarning("新手引导",
+                                   "引导没能打开（%s: %s），界面照常可用。"
+                                   % (type(e).__name__, e))
 
     # ---- 布局 ----
     def _build_topbar(self):
@@ -135,7 +266,8 @@ class App(ChatMixin, ImageGenMixin, VideoGenMixin, ServiceMixin, ModelsMixin, Se
         # 右侧按钮组（pack side=right 自右向左排列）
         # （「🎨 生图」独立窗口已废弃：生图统一在主聊天流进行，见 model_kind=image 分支；
         #   ImageDialog / open_image_dialog 代码保留备用，不再有入口调用）
-        ttk.Button(top, text="设置", command=self.open_settings).pack(side="right", padx=3)
+        self.btn_settings = ttk.Button(top, text="设置", command=self.open_settings)
+        self.btn_settings.pack(side="right", padx=3)
         self.stop_svc_btn = ttk.Button(top, text="停止服务",
                                        command=self.stop_server_async, state="disabled")
         self.stop_svc_btn.pack(side="right", padx=3)
@@ -210,7 +342,13 @@ class App(ChatMixin, ImageGenMixin, VideoGenMixin, ServiceMixin, ModelsMixin, Se
         # side="bottom" 让输入区在分配空间时先于可伸缩的聊天区被满足：
         # 窗口再小也是压缩输出区，输入框不会再消失
         bot.pack(side="bottom", fill="x", padx=10, pady=(4, 10))
-        self.input = tk.Text(bot, height=3, font=("Microsoft YaHei UI", 10),
+        self.input = tk.Text(bot, height=3,
+                             # width 必须显式给小值，理由与上面聊天区给小 height 同一条（坑 56）：
+                             # tk.Text 默认 width=80 字符，在 200% 缩放的机器上（Tk scaling≈2.0）
+                             # 请求宽度就到 966px，比 880 窗口的空腔还宽 —— pack 把整条 cavity
+                             # 给了输入框，右边那列「发送 / 📎 附件」直接被挤成 1x1 不可见，
+                             # 用户看到的就是"没有发送按钮"。实际宽度靠 expand 撑，不靠这个值。
+                             width=20, font=("Microsoft YaHei UI", 10),
                              relief="flat", highlightthickness=1,
                              highlightbackground="#cccccc")
         self.input.pack(side="left", fill="both", expand=True)
@@ -324,6 +462,40 @@ class App(ChatMixin, ImageGenMixin, VideoGenMixin, ServiceMixin, ModelsMixin, Se
         finally:
             self.chat.configure(state="disabled")
 
+    def _offer_engine_hint(self):
+        """本地与云端两条路都不通时，在输出栏留一行说明 + 一个直达按钮。
+
+        为什么不靠引导说完就完：引导走完人就关了，"这台机器还差一步"得在**他下次打开
+        程序时还在**（W 2026-10-02 验收原话："知道有地方但不会立刻去"）。
+        云端只要有一家填过密钥就不催 —— 只想用云端的人不缺东西，催他下引擎是噪音。
+        """
+        try:
+            q = diagnose.quick_paths(self.cfg)
+        except Exception:
+            return                      # 提示坏了不能把窗口开不成
+        if q["local"] or q["cloud"]:
+            return
+        self.chat.configure(state="normal")
+        try:
+            self.chat.insert("end", "\n[环境] 这台机器上两条路都还没通：\n", "meta")
+            for m in q["missing"]:
+                self.chat.insert("end", "  · %s\n" % m, "meta")
+            self.chat.insert("end", "  · 云端还没填 API Key（只想用云端的话填一家密钥就能聊）\n",
+                             "meta")
+            btn = ttk.Button(self.chat, text="去配置引擎",
+                             command=lambda: self.open_settings(jump="eng"))
+            self.chat.window_create("end", window=btn)
+            self.chat.insert("end", "  ", "meta")
+            btn2 = ttk.Button(self.chat, text="填云端密钥",
+                              command=lambda: self.open_settings(jump="c_prov"))
+            self.chat.window_create("end", window=btn2)
+            self.chat.insert("end", "\n", "meta")
+            self.chat.see("end")
+        except Exception as e:
+            print("[环境提示渲染失败] %s" % e)
+        finally:
+            self.chat.configure(state="disabled")
+
     def _recover_job(self, job):
         """取回一个云端任务：查状态 → 已完成就下载，还在跑就继续轮询。"""
         tid = str(job.get("task_id") or "")
@@ -424,6 +596,17 @@ class App(ChatMixin, ImageGenMixin, VideoGenMixin, ServiceMixin, ModelsMixin, Se
                 continue
             probe_broken = False
             self._sq.put(("status", alive, ready))
+            # 状态文件写不进去（只读目录 / 磁盘满）以前是彻底静默的：症状是"每次启动都回到
+            # 默认设置"，没人会想到去查目录权限。atomic_write_json 的"不抛"约定保留，但要说出来
+            # —— 同一份错误只说一次（签名变了才再说），走既有的 note 通道，不弹窗打断。
+            path, reason = config.write_error()
+            sig = "%s|%s" % (path, reason)
+            if path and sig != self._write_err_seen:
+                self._write_err_seen = sig
+                self._sq.put(("note",
+                              "[配置] 写不进去：%s（%s）—— 设置不会保存。"
+                              "把本程序换到一个可写的文件夹，或在 设置 → 关于 里点「一键诊断」。"
+                              % (os.path.basename(path), reason)))
             time.sleep(3)
 
     # ---- 主循环轮询 ----
@@ -640,6 +823,13 @@ class App(ChatMixin, ImageGenMixin, VideoGenMixin, ServiceMixin, ModelsMixin, Se
         self._img_win = ImageDialog(self.root, self.cfg)
 
     def on_close(self):
+        # 遮罩引导先关掉：它是 overrideredirect 的无边框窗，留着会在退出流程里挡住鼠标
+        if getattr(self, "_guide", None) is not None:
+            try:
+                self._guide.close()
+            except Exception:
+                pass
+            self._guide = None
         # 场景 0：生图/生视频任务进行中 —— 立即中止（快速关闭也能即时停止任务）
         if self._img_busy:
             self._cancel_chat_image()
@@ -716,6 +906,8 @@ def main():
     if "--version" in sys.argv[1:]:
         _say("LLM Chat %s" % APP_VERSION)
         return
+    crashlog.install()               # 未捕获异常先落盘再走默认处理（--windowed 没有控制台）
+    first_run = not os.path.isfile(CONFIG_PATH)
     cfg = load_config()
     # 默认值不指向任何一台具体机器上的文件（分发给别人时才有意义）：
     # 没配模型、或配的模型文件不在，就从模型目录里挑一个能聊天的顶上。
@@ -733,6 +925,9 @@ def main():
     root.title("LLM 本地对话台 - llama.cpp")
     root.geometry("880x660")
     root.minsize(720, 520)
-    app = App(root, cfg)
+    widgets.set_app_icon(root)
+    app = App(root, cfg, first_run=first_run)
     root.protocol("WM_DELETE_WINDOW", app.on_close)
+    # 首跑引导等界面画完再放（要量控件的真实位置来挖洞），400ms 足够首帧落地
+    root.after(400, app._first_run_flow)
     root.mainloop()

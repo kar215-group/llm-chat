@@ -45,7 +45,7 @@ from .config import APP_DIR, APP_VERSION
 
 VERSION = 1
 TITLE_CHARS = 24
-PLACEHOLDER = "〔图片已省略：%d 字符的 base64；原图见本机文件〕"
+PLACEHOLDER = "〔这一轮的图没写进记录（原图保存在本机文件里，%d 字符的编码数据太大）〕"
 
 
 def enabled(cfg):
@@ -81,15 +81,23 @@ def title_of(messages):
 
 
 def _shrink(obj):
-    """把内联的 base64 图片折成占位串：记录要能读、能 diff，不能塞几百 KB 的 blob。"""
+    """把内联的 base64 图片折成占位串：记录要能读、能 diff，不能塞几百 KB 的 blob。
+
+    只认 `data:` 开头的 data URL（内联图片在本项目里的唯一形态）：
+    早先的版本还会折"任何含 `base64,` 子串的长文本"——用户只要在长消息里提到这个词
+    （比如贴一段讲 base64 的代码/文档），落盘的内容就被悄悄换成占位串，破坏了
+    "messages 可以原样回灌"的契约。普通长文本一个字都不能动。
+    """
     if isinstance(obj, dict):
         return {k: _shrink(v) for k, v in obj.items()}
     if isinstance(obj, list):
         return [_shrink(v) for v in obj]
-    s = str(obj or "")
-    if len(s) > 200 and ("base64," in s or s.startswith("data:")):
-        head = s[:40]
-        return PLACEHOLDER % len(s) + "（%s…）" % head
+    if not isinstance(obj, str):
+        return obj
+    if len(obj) > 200 and obj.startswith("data:"):
+        # 不再附上数据前 40 字符：那串 base64 在记录里既读不出什么，又让人以为
+        # 图片"还在里面"（面向使用者的记录不该有这种开发期的调试残留）
+        return PLACEHOLDER % len(obj)
     return obj
 
 
@@ -106,10 +114,19 @@ def save(cfg, sid, messages, model="", provider="", model_kind="chat"):
         sid = new_id()
     p = path_for(cfg, sid)
     now = time.time()
+    # 同一份文件会被每轮重写：created_at 必须沿用首次落盘的时间，不能跟着"这次保存"漂移
+    # （否则"会话创建于什么时候"越存越不准；updated_at 才是每次刷新的那个）。
+    created = now
+    try:
+        with open(p, "r", encoding="utf-8") as f:
+            old = json.load(f)
+        created = float(old.get("created_at")) if isinstance(old, dict) else now
+    except Exception:
+        created = now
     payload = {
         "version": VERSION,
         "id": sid,
-        "created_at": now,
+        "created_at": created,
         "updated_at": now,
         "app_version": APP_VERSION,
         "model": model or "",

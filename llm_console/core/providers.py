@@ -167,9 +167,11 @@ PROVIDER_TEMPLATE = {
     "media_api": "auto",
     # 个别模型要额外 parameters（各家档位不一致，留个不用改代码的口子）
     "media_extra_params": {},
-    # 单价（元）：只在提交前给用户看费用预估用；0 = 未填，界面就明说"以账单为准"，不编数字
-    "price_per_image": 0.0,
-    "price_per_second": 0.0,
+    # 单价（元）：**按模型记，不按服务商**。同一家下 happyhorse-1.0 与 1.1 就不同价，
+    # MiniMax 的 H3 按秒、Hailuo 按条，连计费单位都不一样 —— 挂在服务商上必然算错。
+    # 形状：{"模型名": {"price": 0.5, "unit": "秒"|"张"|"条"}}；空 = 没填，界面明说
+    # "以账单为准"，绝不编一个数字出来。
+    "media_prices": {},
 }
 
 # 阿里云原生媒体接口可用的域名（文档 §12.1/§12.3：Token Plan 专属域名与百炼按量的
@@ -274,20 +276,100 @@ def media_extra_params(p, model):
     return dict(val) if isinstance(val, dict) else {}
 
 
-def media_price_note(p, kind, seconds=0):
-    """费用预估一行；单价没填就明说不知道，别拍一个数字出来（坑 55 的延伸：不编数）。"""
-    p = p or {}
+PRICE_UNITS = ("秒", "张", "条")      # 元/秒（按秒计费的视频）、元/张（图）、元/条（整条计费的视频）
+# 各家计费口径不同这件事是实测出来的：H3 ≈0.50 元/秒、Hailuo 768P/6s ≈2 元/条、
+# 图像按张 ≈0.025~0.5 元 —— 只给"元/秒 + 元/张"两档就会把按条的模型算成 0。
+_DEFAULT_UNIT = {KIND_IMAGE: "张", KIND_VIDEO: "秒"}
+
+
+def _norm_prices(raw):
+    """把 provider 记录里的单价表洗成 {模型: {"price": float>0, "unit": 认识的单位}}。"""
+    out = {}
+    if not isinstance(raw, dict):
+        return out
+    for m, e in raw.items():
+        m = str(m or "").strip()
+        if not m or not isinstance(e, dict):
+            continue
+        try:
+            per = float(e.get("price") or 0)
+        except Exception:
+            continue
+        u = str(e.get("unit") or "").strip()
+        if per > 0 and u in PRICE_UNITS:
+            out[m] = {"price": per, "unit": u}
+    return out
+
+
+def price_of(p, model):
+    """某个媒体模型的单价与计费单位 → (元, 单位)；没填或形状不对 → (0.0, "")。"""
+    e = _norm_prices((p or {}).get("media_prices")).get(str(model or "").strip())
+    return (e["price"], e["unit"]) if e else (0.0, "")
+
+
+def set_price(cfg, pid, model, price, unit):
+    """写某个模型的单价（元）。**price<=0 = 删掉这条记录**；单位不认识 = 直接拒写。
+
+    单位不认时不能顺手删：那会让一个手滑的配置值把已经填好的单价抹掉，
+    而"抹掉"在界面上长得像"我没填过" —— 拒写返回 False，让调用方去解释。
+    只改内存里的 cfg，**落盘由调用方负责**（与 update_provider 同一条约定）。
+    """
+    model = str(model or "").strip()
+    if not model:
+        return False
+    p = get_provider(cfg, pid)
+    if not p:
+        return False
     try:
-        per = float(p.get("price_per_image") or 0) if kind == KIND_IMAGE \
-            else float(p.get("price_per_second") or 0)
+        per = float(price)
     except Exception:
-        per = 0.0
+        return False
+    unit = str(unit or "").strip()
+    if per > 0 and unit not in PRICE_UNITS:
+        return False
+    prices = _norm_prices(p.get("media_prices"))
     if per <= 0:
-        return "单价未在设置里填写，费用以服务商账单为准。"
-    if kind == KIND_IMAGE:
+        prices.pop(model, None)
+    else:
+        prices[model] = {"price": per, "unit": unit}
+    return bool(update_provider(cfg, pid, {"media_prices": prices}))
+
+
+def price_table(p):
+    """这家填过的单价表 → {模型名: {"price": float, "unit": str}}（形状已洗净）。"""
+    return _norm_prices((p or {}).get("media_prices"))
+
+
+def default_unit(model, kind=None):
+    """没填过时给个起始计费单位：图片按张、视频按秒（认不出能力就按秒）。"""
+    k = kind or guess_kind(model)
+    return _DEFAULT_UNIT.get(k, "秒")
+
+
+def priced_models(p, kind=None):
+    """这家填过单价的模型名（可按能力筛，筛据 = 名字猜的 kind，仅用于分组显示）。"""
+    out = sorted(_norm_prices((p or {}).get("media_prices")))
+    if kind:
+        out = [m for m in out if guess_kind(m) == kind]
+    return out
+
+
+def media_price_note(p, kind, seconds=0, model=""):
+    """费用预估一行；单价没填就明说不知道，别拍一个数字出来（坑 55 的延伸：不编数）。
+
+    单价**按模型**查 —— 同一家不同模型不同价、不同单位，按服务商查是这次改掉的那个错。
+    """
+    per, unit = price_of(p, model)
+    if per <= 0:
+        return ("模型「%s」的单价未填（设置 → 云端模型 → 成本预估算），"
+                "费用以服务商账单为准。" % model if model else
+                "单价未填（设置 → 云端模型 → 成本预估算），费用以服务商账单为准。")
+    if unit == "秒":
+        n = int(seconds or 0)
+        return "预估 %.2f 元/秒 × %d 秒 ≈ %.2f 元。" % (per, n, per * n)
+    if unit == "张":
         return "预估 %.2f 元/张。" % per
-    return "预估 %.2f 元/秒 × %d 秒 ≈ %.2f 元。" % (per, int(seconds or 0),
-                                                   per * int(seconds or 0))
+    return "预估 %.2f 元/条。" % per
 
 
 def supports_media(p, kind):
@@ -404,11 +486,11 @@ def normalize_provider(p):
     out["media_api"] = ma if ma in MEDIA_APIS else "auto"
     if not isinstance(out.get("media_extra_params"), dict):
         out["media_extra_params"] = {}
-    for k in ("price_per_image", "price_per_second"):
-        try:
-            out[k] = max(0.0, float(out.get(k) or 0))
-        except Exception:
-            out[k] = 0.0
+    out["media_prices"] = _norm_prices(out.get("media_prices"))
+    # 旧的"按服务商单价"两个字段直接作废、不迁移也不回退：一家多价、多种计费单位，
+    # 挂在服务商上给出的预估就是错价（W 定的口径，2026-10-01）
+    out.pop("price_per_image", None)
+    out.pop("price_per_second", None)
     return out
 
 
@@ -733,8 +815,8 @@ def validate_for_send(cfg):
     from . import secrets
     if k == KIND_TEXT:
         if not secrets.has_api_key(p["id"]):
-            return ("还没给「%s」填 API Key——设置 → 云端模型 → 服务商与密钥 → 密钥（存在 secrets.json，"
-                    "不进备份）。" % p["name"])
+            return ("还没给「%s」填 API Key——设置 → 云端模型 → 服务商与密钥 → 密钥"
+                    "（密钥单独存在 secrets.json，不会跟配置一起被复制走）。" % p["name"])
         return None
     # 生图 / 生视频走厂商**原生**协议（没有 OpenAI 兼容格式）：先确认这个 provider
     # 认得协议、有根地址、有密钥，否则拦在发送前，别掉进本地 sd-cli 分支
@@ -749,7 +831,8 @@ def validate_for_send(cfg):
                    "只有官方给了 API 的才接得进来；这家若官方没有生图/生视频接口，"
                    "就请在本地那一组里选模型"))
     if not secrets.has_api_key(p["id"]):
-        return ("还没给「%s」填 API Key——设置 → 云端模型 → 服务商与密钥 → 密钥（存在 secrets.json，不进备份）。"
+        return ("还没给「%s」填 API Key——设置 → 云端模型 → 服务商与密钥 → 密钥"
+                "（密钥单独存在 secrets.json，不会跟配置一起被复制走）。"
                 % p["name"])
     if not media_api_root(p):
         return ("provider「%s」推不出原生接口地址：请在 设置 → 云端模型 → 服务商与密钥 里填「原生接口地址」。"

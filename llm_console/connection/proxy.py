@@ -150,7 +150,13 @@ class _ProxyHandler(http.server.BaseHTTPRequestHandler):
             except Exception:
                 pass
         else:
-            data = resp.read()
+            try:
+                data = resp.read()
+            finally:
+                try:
+                    resp.close()      # 非流式分支原来不关响应：句柄留给 GC，显式收掉
+                except Exception:
+                    pass
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(data)))
@@ -183,7 +189,10 @@ class ProxyServer:
         httpd.ensure_model = self.ensure_model
         httpd.daemon_threads = True
         self.httpd = httpd
-        self.thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+        # poll_interval 默认 0.5 秒：`shutdown()` 要等它这一轮睡完才返回，实测让**关窗**
+        # 多花 505ms（stop() 走的是这条）。0.05 就把那半秒去掉，代价是空转时多几次唤醒
+        self.thread = threading.Thread(
+            target=lambda: httpd.serve_forever(poll_interval=0.05), daemon=True)
         self.thread.start()
         self.note("API 代理已启动：http://127.0.0.1:%d/v1" % port)
         return True

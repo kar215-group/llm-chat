@@ -9,7 +9,7 @@ import json
 import os
 import threading
 
-from .config import APP_DIR
+from .config import APP_DIR, atomic_write_json
 
 SECRETS_PATH = os.path.join(APP_DIR, "secrets.json")
 
@@ -30,14 +30,9 @@ def load_secrets():
 
 
 def save_secrets(data):
-    """写回密钥表；返回是否成功（失败不抛，由调用方提示）。"""
+    """写回密钥表；返回是否成功（失败不抛，由调用方提示）。原子写（见 config.atomic_write_json）。"""
     with _LOCK:
-        try:
-            with open(SECRETS_PATH, "w", encoding="utf-8") as f:
-                json.dump(data, f, ensure_ascii=False, indent=2)
-            return True
-        except Exception:
-            return False
+        return atomic_write_json(SECRETS_PATH, data)
 
 
 def get_api_key(provider_id):
@@ -45,15 +40,20 @@ def get_api_key(provider_id):
 
 
 def set_api_key(provider_id, key):
-    """写入（key 为空则删除该 provider 的条目）。"""
-    data = load_secrets()
-    data.setdefault("version", 1)
-    keys = data.setdefault("api_keys", {})
-    if str(key or "").strip():
-        keys[str(provider_id)] = str(key).strip()
-    else:
-        keys.pop(str(provider_id), None)
-    return save_secrets(data)
+    """写入（key 为空则删除该 provider 的条目）。
+
+    读-改-写全程持锁（RLock 可重入，内部的 load/save 不会再卡）：两个调用方并发时
+    后写者不能拿"改之前的快照"把先写者的条目覆盖掉。
+    """
+    with _LOCK:
+        data = load_secrets()
+        data.setdefault("version", 1)
+        keys = data.setdefault("api_keys", {})
+        if str(key or "").strip():
+            keys[str(provider_id)] = str(key).strip()
+        else:
+            keys.pop(str(provider_id), None)
+        return save_secrets(data)
 
 
 def has_api_key(provider_id):

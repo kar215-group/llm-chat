@@ -30,7 +30,7 @@ CONFIG_PATH = os.path.join(APP_DIR, "gui_config.json")
 
 # 版本号：发版时改这一处（--selfcheck / --version 会打印它）。
 # GitHub Release 的 tag 要与它一致（tag 去掉开头的 v），Actions 工作流会做一致性校验。
-APP_VERSION = "0.0.4beta"
+APP_VERSION = "1.0.0"
 
 CFG_VERSION = 2
 
@@ -159,9 +159,18 @@ DEFAULT_CONFIG = {
     # ---- 对话记录（仅文本语言模型；本期只存不读，见 core/chatlog.py）----
     "chat_log_save": True,           # 每轮结束 / 关窗 / 清空前自动写一份 JSON
     "chat_log_dir": "",              # 留空 = <程序目录>/chat_logs（不写死盘符，项目要分发）
+    # ---- 新设备排障与首次引导（见 core/crashlog.py、core/diagnose.py、ui/guide.py）----
+    # 崩溃日志"已经看过"的指纹（mtime:size）：同一条崩溃只提醒一次
+    "crashlog_seen": "",
+    # 看完/跳过新手引导时的版本号：升级不会自动重弹，只在 设置 → 关于 里留重看入口
+    "guide_done": "",
+    # 高分屏清晰度（DPI 感知）。**冷切换**：只在下次启动生效 —— Windows 允许一个进程
+    # 只标一次，窗口一建出来就再也改不了了。0 = 让系统按缩放位图拉伸（发虚但字大）
+    "dpi_aware": 1,
 }
 
 INT_KEYS = ("port", "ngl", "ctx", "threads", "reasoning_budget",
+            "dpi_aware",
             "max_tokens", "top_k", "seed", "img_steps", "img_seed",
             "proxy_port", "vid_frames", "vid_fps", "vid_steps", "vid_seed",
             "cloud_video_duration", "cloud_poll_seconds", "cloud_wait_minutes",
@@ -228,13 +237,46 @@ def load_config():
         pass
     return cfg
 
-def save_config(cfg):
-    with _CFG_LOCK:
+_LAST_WRITE = {"path": "", "reason": "", "n": 0}     # 最近一次"写不进去"的现场（给界面开口用）
+
+
+def atomic_write_json(path, data):
+    """原子写 JSON：先写 `<path>.tmp` 再 `os.replace` 落位；返回是否成功（不抛）。
+
+    为什么必须原子：本机每天 23:30 断电（交接文档多处以此为设计前提），直接
+    `open(path, "w")` 覆写时一次中途断电就把文件截成半份 —— 而读侧（load_config /
+    load_secrets / load_jobs）解析失败一律**静默回退空表/默认值**，表现成"设置全部
+    丢失"。chatlog / 云端下载 / 备份脚本早已是 `.part`+replace，这三份状态文件不能例外。
+
+    失败原因记在 `_LAST_WRITE` 里：不抛是这条链路的约定，但"静默"不是 —— 下载 exe 的
+    用户把程序放进 `C:\\Program Files\\` 这类只读目录时，症状是"每次启动都回到默认设置"，
+    没有任何一句话指着真正的原因（见 `write_error()` 与 App._status_loop 的开口）。
+    """
+    tmp = path + ".tmp"
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+        os.replace(tmp, path)           # 同目录改名，Windows 下也是原子的
+        _LAST_WRITE.update(path="", reason="")
+        return True
+    except Exception as e:
         try:
-            with open(CONFIG_PATH, "w", encoding="utf-8") as f:
-                json.dump(cfg, f, ensure_ascii=False, indent=2)
+            os.remove(tmp)
         except Exception:
             pass
+        _LAST_WRITE.update(path=path, reason="%s: %s" % (type(e).__name__, e),
+                           n=_LAST_WRITE["n"] + 1)
+        return False
+
+
+def write_error():
+    """最近一次状态文件写入失败 → (路径, 原因)；上一次是成功的话返回 ("", "")。"""
+    return (_LAST_WRITE["path"], _LAST_WRITE["reason"])
+
+
+def save_config(cfg):
+    with _CFG_LOCK:
+        return atomic_write_json(CONFIG_PATH, cfg)
 
 def base_url(cfg):
     return "http://%s:%s" % (cfg.get("host", "127.0.0.1"), cfg.get("port", 8080))

@@ -121,9 +121,14 @@ class VideoGenMixin:
 
         为什么只拦生视频不拦生图：一条十几秒的视频按秒计费可以到几十元，而且任务一旦
         进入运行态就取消不掉；生图是同步的、单次几分钱量级，每次都弹窗只会让人练成
-        不看内容直接按回车。
+        不看内容直接按回车（生图的费用改成就近打在对话流里，见 image_gen）。
+
+        **无论单价填没填都要问**：单价没填时这句改成"以服务商账单为准"，
+        不能因为算不出钱就省掉这次确认 —— 算不出钱恰恰是最该问的情况。
         """
         provider = providers.current_provider(self.cfg) or {}
+        sp = providers.split_cloud_id(self.cfg.get("model", ""))
+        model = sp[1] if sp else ""
         try:
             dur = int(self.cfg.get("cloud_video_duration", 5) or 5)
         except Exception:
@@ -132,12 +137,13 @@ class VideoGenMixin:
         return messagebox.askyesno(
             "云端生视频",
             "要提交一条云端视频任务吗？\n\n"
-            "  时长：%d 秒\n  分辨率：%s\n  费用：%s\n\n"
+            "  模型：%s\n  时长：%d 秒\n  分辨率：%s\n  费用：%s\n\n"
             "注意：任务开始运行后就取消不掉了，只能不再等它——"
             "结果之后仍可以在对话里点「取回」拿回来。\n"
-            "确认提交吗？" % (dur, res, providers.media_price_note(provider,
-                                                                   providers.KIND_VIDEO,
-                                                                   dur)))
+            "确认提交吗？" % (model or "（未选模型）",
+                             dur, res,
+                             providers.media_price_note(provider, providers.KIND_VIDEO,
+                                                        dur, model)))
 
     def _start_cloud_video(self, prompt):
         provider = providers.current_provider(self.cfg)

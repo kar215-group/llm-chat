@@ -28,20 +28,542 @@ def _destroy_quietly(w):
         pass
 
 
+_BG_CACHE = None          # default_bg 的成功解析结果（主题在运行期不变，查一次就够）
+
+
 def default_bg(widget=None):
     """当前主题的框架底色。
 
     为什么不用 parent["bg"]：ttk 控件（ttk.Frame）**没有** -background 选项，读它会抛
     KeyError；而 tk.Label 要是不指定 bg，在这套灰底主题里会显出一块补丁色的边框。
     统一问样式要答案，取不到再退回 Windows 常见的 #f0f0f0。
+
+    `lookup` 的签名是 (样式名, 选项) 两个参数 —— 早先写成单参数 `lookup("TFrame.background")`，
+    每次调用都抛 TypeError 再落兜底色（开一次设置页白抛 167 次异常）。修正后在 vista 主题
+    下返回的是系统色名 `SystemButtonFace`，本机实测它解析出的 RGB 与 `#f0f0f0` **逐位相同**
+    （winfo_rgb 均为 61680/61680/61680），所以这里顺手把系统色名折算成 #rrggbb：
+    返回值形状与历史上的兜底色一致，任何"按字符串比对底色"的地方都不受影响 —— 零外观变化。
     """
+    global _BG_CACHE
+    if _BG_CACHE:
+        return _BG_CACHE
     try:
-        v = ttk.Style().lookup("TFrame.background")
+        v = ttk.Style().lookup("TFrame", "background")
         if v:
+            try:
+                # 系统色名（SystemButtonFace 这类）解析成规范 #rrggbb；winfo_rgb 给的是
+                # 16 位通道（0~65535），右移 8 位回到 0~255
+                any_w = widget if widget is not None else tk._default_root
+                r, g, b = any_w.winfo_rgb(v)
+                v = "#%02x%02x%02x" % (r >> 8, g >> 8, b >> 8)
+            except Exception:
+                pass                    # 解析不了就按原样用（Tk 也认系统色名）
+            _BG_CACHE = v
             return v
     except Exception:
         pass
     return "#f0f0f0"
+
+
+def set_app_icon(root):
+    """把应用图标换成自带的标志（标题栏左上角 + 任务栏），不再用 Tk 那根默认羽毛。
+
+    图标数据内嵌在 `ui/app_icon.py`（base64 的 PNG），**不读外部文件**：单文件 exe 里
+    `__file__` 指向临时解包目录（坑 62 同族），走文件就得再算一遍 `_MEIPASS` 路径，
+    而 `tk.PhotoImage(data=...)` 原生吃 base64，路径这件事直接不存在。
+
+    `iconphoto(True, ...)` 的 True 是"设为整个应用的默认"，所以设置窗口、「选择模型」
+    这些后续新建的 Toplevel 会一起跟上，不用每个窗口各调一次。
+    图片对象挂在 root 上：Tk 那边按名字认图，Python 对象一旦被 GC 就会顺手把图像删掉，
+    图标随即消失 —— 不留引用就是"启动时是好的，过一会儿变回羽毛"这种查起来很费劲的现象。
+    """
+    from .app_icon import PNG_B64
+    try:
+        img = tk.PhotoImage(data=PNG_B64)
+    except tk.TclError:
+        return                      # 这份 Tk 没编进 PNG 支持：留默认图标，别因此开不了窗
+    root._app_icon = img
+    root.iconphoto(True, img)
+
+
+def app_logo(parent):
+    """关于页那张大标志（返回 PhotoImage，**调用方必须留住引用**，同 set_app_icon）。
+
+    为什么按 `tk scaling` 挑档位：Windows 上 Tk 会把字体、边框、控件尺寸都按 DPI 放大，
+    **但图片不放大**（Tk 8.6 的 PhotoImage 只有 zoom/subsample 这种最近邻操作）。
+    所以同一张 128px 图在 200% 屏上看着正好、在 100% 屏上就大一倍。两档都在生成时就
+    缩好（`tools/make_icon.py`），取哪一档由界面缩放决定，不在运行期做劣质缩放。
+    阈值 1.75 落在 1.0/1.25/1.5 与 2.0 之间：1.5 档（144dpi）用 128 已经偏大。
+    """
+    from .app_icon import LOGO_B64, PNG_B64
+    big = True
+    try:
+        big = float(parent.tk.call("tk", "scaling")) >= 1.75
+    except Exception:
+        pass
+    try:
+        return tk.PhotoImage(data=(LOGO_B64 if big else PNG_B64))
+    except tk.TclError:
+        return None             # 这份 Tk 没编进 PNG 支持：关于页少张图，别因此开不了窗
+
+
+class SpotlightGuide(object):
+    """全窗口遮罩式新手引导：把当前步骤指的那块"挖亮"，旁边贴一段说明。
+
+    两档实现，运行时自动选（`self.punch` 为真才是甲）：
+
+      甲 · 真半透明 + 洞内可点：无边框 Toplevel 盖住主窗口客户区，整窗 `-alpha` 变暗，
+          再用 `-transparentcolor` 把洞那一块设成穿透色。Windows 对 color-key 像素
+          **既不画也不收鼠标**，所以被指着的那个控件用户能直接点 —— 引导不该拦着人真操作
+          （让他当场点一次「启动服务」看状态灯变，比读三行字有用）。
+      乙 · 四块不透明深色矩形围出亮洞：`-alpha` 或 `-transparentcolor` 有一个不可用就退到这档。
+          视觉是纯黑遮罩而不是半透明，但任何 Tk 都画得出来，不至于"引导打不开"。
+
+    文案面板的坐标一律钳回可视区内（沿用 HelpDot 那套纪律，坑 75 / 58）；
+    主窗口移动或缩放时跟着重算（绑 `<Configure>`，重画前 `after(60)` 去抖，
+    不然拖动窗口过程中每帧都要重排一次整张遮罩）。
+    """
+
+    DARK = "#14141c"
+    KEY = "#010203"                 # 穿透色：正常界面里几乎不可能出现的颜色
+    ACCENT = "#8fd4ff"
+    PANEL_W = 420
+    GAP = 14                        # 洞与面板之间的距离
+
+    def __init__(self, host, steps, on_close=None):
+        self.host = host
+        self.steps = [s for s in steps if s]
+        self.on_close = on_close
+        self.i = 0
+        self._sync_id = None
+        self._top_id = None                   # 层序自查那个 200ms 定时器的句柄（close 要取消）
+        self._fnt = None                      # 折行用的字体度量（第一次画时才建）
+        self._rendering = False               # 重入保护：遮罩自己的 Configure 会再触发一次画
+        self._last_size = None
+        self._last_canvas = None              # 画布实际尺寸（只用来判断"要不要再同步一次"）
+        self._geom = None                     # 我们请求给遮罩的尺寸（画遮罩以它为准）
+        self._last_geom = None                # 上一次真的设了几何（没变就别再设，防 Configure 空转）
+        self._nav_bar = None                  # 按钮条常驻：只挪位置改文字，不反复建销
+        self._nav_skip = self._nav_step = None
+        self._nav_next = self._nav_prev = None
+        self.closed = False
+        self.win = tk.Toplevel(host, bg=self.KEY)
+        self.win.overrideredirect(True)
+        self.win.transient(host)
+        self.punch = self._try_punch()
+        self.cv = tk.Canvas(self.win, bg=(self.KEY if self.punch else self.DARK),
+                            highlightthickness=0, bd=0)
+        self.cv.pack(fill="both", expand=True)
+        # 绑在**主窗**上的每一对 (事件, funcid) 都记下来：close() 要逐个解掉。
+        # 必须记 funcid —— 不带 funcid 的 `unbind(seq)` 会把主窗自己在这条事件上的
+        # 绑定一起删掉（那会顺手弄坏聊天区），而漏解则会每次重看引导都留下四个死回调。
+        self._host_binds = []
+        self._bind_host("<Configure>", self._on_host_resize)
+        # 遮罩自己被改大小之后还要再同步一次：主窗口的 <Configure> 到得比遮罩几何生效**早**，
+        # 那一刻量到的画布尺寸还是旧的（W 报的"没完全遮住"）
+        self.win.bind("<Configure>", self._on_overlay_resize, add="+")
+        # 深色区域被点到时把遮罩抬回最前
+        self.cv.bind("<Button-1>", lambda e: self._ensure_top(), add="+")
+        # `overrideredirect` 的窗口不归窗口管理器管：用户点一下别的程序再回来，Windows 会把
+        # 主窗口抬到遮罩**上面**，遮罩就沉到界面底下了（W 报的第一条，坑 120）。
+        # 为什么是"即时事件 + 60ms 兜底"而不是别的两种做法（都实测过）：
+        #   · `<Activate>` / `<Deactivate>`：真跨进程实验里（SetForegroundWindow 切到另一个
+        #     进程的窗口再切回来）**一次都没发出来**，事件驱动实现不了 —— W 说"切走就藏
+        #     没生效"就是这个原因；
+        #   · `-topmost`：层序是稳，但遮罩会浮在别的程序上面挡路（要配藏匿，而藏匿靠的就是
+        #     上面那个不发的事件，做不到）。
+        # 绑在**主窗**上的 Button-1 是关键：遮罩已经沉下去时它收不到点击，只能靠主窗收到后
+        # 把遮罩抬回来；`<FocusIn>` / `<Map>` 管 Alt+Tab 回来与最小化恢复。
+        self._bind_host("<Button-1>", self._on_activate)
+        self._bind_host("<FocusIn>", self._on_activate)
+        self._bind_host("<Map>", self._on_activate)
+        self._wrap_cache = {}               # 正文折行按步号缓存（拖动尺寸时不必反复重算）
+        self._pw_cached = None
+        self._itm = {}                      # 画布图形按类别池化复用（见 _pool）
+        self._place()
+        self._render()
+        self._ensure_top()
+        self._keep_top()
+
+    def _bind_host(self, seq, fn):
+        """在主窗上挂一个回调，并把 funcid 记进 `_host_binds`（close 时逐个解掉）。"""
+        fid = self.host.bind(seq, fn, add="+")
+        self._host_binds.append((seq, fid))
+        return fid
+
+    # ---- 层序 ----
+    def _ensure_top(self):
+        """把遮罩抬回主窗口上面。幂等，可以随便多调几次。"""
+        try:
+            self.win.lift()
+        except Exception:
+            pass
+
+    def _on_activate(self, _e=None):
+        self._ensure_top()
+
+    def _app_is_foreground(self):
+        """本应用现在是不是在前台。是才抬升 —— 否则遮罩会浮在别的程序上面挡路。"""
+        try:
+            import ctypes
+            user32 = ctypes.windll.user32
+            ga_root = 2
+            hwnd = user32.GetAncestor(self.host.winfo_id(), ga_root)
+            return bool(hwnd) and user32.GetForegroundWindow() == hwnd
+        except Exception:
+            return True               # 问不出来就照旧抬升：宁可多抬，别把遮罩丢到下面去
+
+    def _keep_top(self):
+        """引导开着期间每 200ms 看一眼：主窗口在前台而遮罩在它下面，就把遮罩抬回来。
+
+        为什么不能只绑 `<Activate>`：`overrideredirect` 的遮罩不归窗口管理器管，
+        用户点一下别的程序再回来，Windows 会把**主窗口**抬到遮罩上面，而 Tk 这边
+        Activate / Deactivate 并不总发（实测进程内焦点绕一圈就收不到），
+        于是遮罩沉到界面底下透出来（W 报的第一条）。
+        60ms 一次、整轮实测 0.0195ms（约 0.016% CPU），只在引导打开期间存在，关闭即停 ——
+        与 `_poll`(80ms) / `_status_loop`(3s) 是同一类主线程定时器，不碰线程边界。
+        """
+        self._top_id = None
+        if not self.alive():
+            return
+        if self._app_is_foreground():
+            self._ensure_top()
+        try:
+            self._top_id = self.host.after(60, self._keep_top)
+        except Exception:
+            pass
+
+    # ---- 能力探测 ----
+    def _try_punch(self):
+        try:
+            self.win.attributes("-transparentcolor", self.KEY)
+            self.win.attributes("-alpha", 0.80)
+            return True
+        except tk.TclError:
+            try:
+                self.win.configure(bg=self.DARK)
+            except Exception:
+                pass
+            return False
+
+    # ---- 生命周期 ----
+    def alive(self):
+        try:
+            return (not self.closed) and self.win.winfo_exists()
+        except Exception:
+            return False
+
+    def close(self):
+        if self.closed:
+            return
+        self.closed = True
+        try:
+            if self._sync_id:
+                self.host.after_cancel(self._sync_id)
+        except Exception:
+            pass
+        try:
+            if getattr(self, "_top_id", None):
+                self.host.after_cancel(self._top_id)      # 层序自查的 60ms 定时器要停掉
+        except Exception:
+            pass
+        # 主窗上那四个绑定必须逐个解掉：漏解的话每重看一次引导就永久留下四个指向
+        # 已销毁窗口的死回调，之后每次点击 / 拖动都空跑一轮 Tcl 求值，越用越卡
+        for seq, fid in getattr(self, "_host_binds", []):
+            try:
+                self.host.unbind(seq, fid)
+            except Exception:
+                pass
+        self._host_binds = []
+        try:
+            self.win.destroy()
+        except Exception:
+            pass
+        cb = self.on_close
+        self.on_close = None
+        if cb:
+            try:
+                cb()
+            except Exception:
+                pass
+
+    def _on_host_resize(self, _e=None):
+        if not self.alive():
+            return
+        # 定位**立刻**做（一次 geometry 调用，很便宜），让遮罩跟得上窗口边框；
+        # 重画用 after_idle 合并 —— 拖一次窗口会送来几十次 Configure，每次都全量重画
+        # 就是白烧 CPU（实测一次重画 14ms，正是"跟不上手"的来源）。
+        self._place()
+        if self._sync_id:
+            return
+        try:
+            self._sync_id = self.host.after_idle(self._redraw)
+        except Exception:
+            self._redraw()
+
+    def _redraw(self):
+        self._sync_id = None
+        if not self.alive():
+            return
+        self._place()                 # after_idle 期间可能又拖了几下，取最新的
+        # 一次尺寸变化会绕出 2~3 次 Configure（主窗 → 遮罩 → 遮罩自己改完几何又回一次），
+        # 实测 20 步拖动能触发 58 次重画。尺寸没变就直接返回：重画只跟着"真的变了"走。
+        # 换步骤那条路走的是 _render()，不经这里，所以不会被这道判断挡住。
+        if (self._geom or (0, 0)) == self._last_size:
+            return
+        self._render()
+
+    def _on_overlay_resize(self, _e=None):
+        """遮罩自己的几何生效后再走一遍同样的路径（尺寸没变时 `_place` 会自己短路）。"""
+        if not self.alive() or self._rendering:
+            return
+        self._on_host_resize()
+
+    def _place(self):
+        try:
+            x, y = self.host.winfo_rootx(), self.host.winfo_rooty()
+            w, h = self.host.winfo_width(), self.host.winfo_height()
+            if w < 40 or h < 40:
+                w, h = self.host.winfo_reqwidth(), self.host.winfo_reqheight()
+            if (w, h, x, y) == self._last_geom:
+                return                  # 没变就别再设一次：设了会再触发 Configure，白绕一圈
+            self.win.geometry("%dx%d+%d+%d" % (w, h, x, y))
+            self._geom = (w, h)          # 画遮罩用**请求的尺寸**，不量画布（见 _draw）
+            self._last_geom = (w, h, x, y)
+        except Exception:
+            pass
+
+    # ---- 画 ----
+    def _hole(self, step):
+        """目标控件在遮罩坐标系里的矩形；没有目标（欢迎页）返回 None。"""
+        w = step.get("target")
+        if w is None:
+            return None
+        try:
+            if not w.winfo_exists() or not w.winfo_ismapped():
+                return None
+            pad = int(step.get("pad", 6))
+            return (w.winfo_rootx() - self.host.winfo_rootx() - pad,
+                    w.winfo_rooty() - self.host.winfo_rooty() - pad,
+                    w.winfo_rootx() - self.host.winfo_rootx() + w.winfo_width() + pad,
+                    w.winfo_rooty() - self.host.winfo_rooty() + w.winfo_height() + pad)
+        except Exception:
+            return None
+
+    def _render(self):
+        """重画一遍遮罩。
+
+        重入标志**必须用 try/finally 收**：中途抛一次异常就让标志永远停在 True，
+        之后所有尺寸变化都不再重画 —— 症状就是"拖窗口时遮罩只盖住一半 / 组件留残影"
+        （W 报的第三条，本机实测能稳定复现到卡死状态）。
+        """
+        if not self.alive() or self._rendering:
+            return
+        self._rendering = True
+        try:
+            self._draw()
+        finally:
+            self._rendering = False
+
+    def _draw(self):
+        if not self.alive():
+            return
+        cv = self.cv
+        step = self.steps[min(self.i, len(self.steps) - 1)]
+        # 尺寸用**我们请求给遮罩的那个数**，不量画布：`cv.winfo_width()` 在几何刚改完时
+        # 常常还是旧值（update_idletasks 也不保证刷新窗口尺寸），照着旧值画就是
+        # "拖窗口时遮罩只盖住一半"（W 报的第三条）。请求值永远是对的。
+        W, H = self._geom or (cv.winfo_width(), cv.winfo_height())
+        hole = self._hole(step)
+        if hole:
+            x0, y0, x1, y1 = [int(v) for v in hole]
+            x0, y0 = max(0, x0), max(0, y0)
+            x1, y1 = min(W, x1), min(H, y1)
+            anchor = (x0, y0, x1, y1)
+        else:
+            x0 = y0 = x1 = y1 = 0
+            anchor = None
+        # 遮罩的矩形：甲档 = 整幅深色 + 一块穿透色把洞"挖"回来；乙档 = 四块围出洞。
+        # 图形**建一次就复用**（`_pool` + `coords`），只改坐标不再 delete/create ——
+        # 拖一次窗口要重画几十次，delete+create 那 30 多个 Tcl 调用就是"跟不上手"的大头
+        if anchor:
+            masks = [(0, 0, W, H), (x0, y0, x1, y1)] if self.punch else [
+                (0, 0, W, y0), (0, y1, W, H), (0, y0, x0, y1), (x1, y0, W, y1)]
+        else:
+            masks = [(0, 0, W, H)]
+        ids = self._pool("mask", len(masks), lambda: cv.create_rectangle(
+            0, 0, 0, 0, outline=""))
+        for i, (a, b, c, d) in enumerate(masks):
+            top = ids[i]
+            cv.coords(top, a, b, c, d)
+            cv.itemconfig(top, fill=(self.KEY if (anchor and self.punch and i == 1)
+                                     else self.DARK),
+                          outline=(self.KEY if (anchor and self.punch and i == 1)
+                                   else self.DARK))
+        ring = self._pool("ring", 1 if anchor else 0, lambda: cv.create_rectangle(
+            0, 0, 0, 0, outline=self.ACCENT, width=2))
+        if ring:
+            cv.coords(ring[0], x0, y0, x1, y1)
+
+        body = step.get("body") or []
+        pw = min(self.PANEL_W, max(220, W - 24))
+        fnt = self._font()
+        inner = max(60, pw - 32)
+        # 折行结果按"步号"缓存：`_wrap_px` 是逐字符 measure（48 字一行实测 3.4ms），
+        # 而拖动窗口时同一屏会被重画几十次 —— 只有面板宽度变了才值得重新折
+        if pw != self._pw_cached:
+            self._wrap_cache = {}
+            self._pw_cached = pw
+        wrapped = self._wrap_cache.get(self.i)
+        if wrapped is None:
+            wrapped = [(t, _wrap_px(t, fnt, inner)) for t in body]
+            self._wrap_cache[self.i] = wrapped
+        ph = 14 + (26 if step.get("title") else 0) + sum(len(ls) for _t, ls in wrapped) * 18 + 8
+        if anchor:
+            px = min(max(8, anchor[0]), max(8, W - pw - 8))
+            py = anchor[3] + self.GAP
+            if py + ph > H - 8:
+                py = max(8, anchor[1] - ph - self.GAP)
+        else:
+            px = max(8, (W - pw) // 2)
+            py = max(8, (H - ph) // 2)
+        px = max(8, min(px, max(8, W - pw - 8)))
+        py = max(8, min(py, max(8, H - ph - 8)))
+        pnl = self._pool("panel", 1, lambda: cv.create_rectangle(
+            0, 0, 0, 0, fill="#22222e", outline="#3c3c50", width=1))
+        cv.coords(pnl[0], px, py, px + pw, py + ph)
+        ttl = self._pool("title", 1 if step.get("title") else 0, lambda: cv.create_text(
+            0, 0, anchor="w", fill="#ffffff", font=("Microsoft YaHei UI", 11, "bold")))
+        y = py + 12
+        if ttl:
+            cv.coords(ttl[0], px + 14, y)
+            cv.itemconfig(ttl[0], text=step["title"])
+            y += 26
+        flat = []
+        for warn, ls in wrapped:
+            for ln in ls:
+                flat.append((ln, warn.startswith("!")))
+        ln_ids = self._pool("lines", len(flat), lambda: cv.create_text(
+            0, 0, anchor="w", font=fnt))
+        for i, (top, (txt, amber)) in enumerate(zip(ln_ids, flat)):
+            cv.coords(top, px + 14, y + i * 18)
+            cv.itemconfig(top, text=txt, fill=("#ffd47a" if amber else "#d8d8e4"))
+        # 自检要拿这两块矩形判断"洞真的包住了目标""面板没溢出窗口"（留句柄比让它去猜
+        # canvas 里的图形可靠，同坑 78 给区块留 _sec_id 的做法）
+        self.hole_rect = hole
+        self.panel_rect = (px, py, px + pw, py + ph)
+        self._last_size = (W, H)              # 与 _geom 同一口径（都是"请求的尺寸"）
+        self._nav(px, py, pw, ph, W, H)
+        self._rendering = False
+
+    def _font(self):
+        if self._fnt is None:
+            from tkinter import font as tkfont
+            self._fnt = tkfont.Font(family="Microsoft YaHei UI", size=9)
+        return self._fnt
+
+    def _pool(self, key, n, maker):
+        """让画布上某一类图形的数量等于 n（多退少补），返回 id 列表。
+
+        复用而不是 delete + create：拖动窗口时每一步都要重画，而图形种类和数量是稳定的，
+        变的只有坐标和文字 —— `coords()` / `itemconfig()` 一次调用比"销毁再新建"便宜得多
+        （实测单次重画 3.6ms → 约 1ms）。
+        """
+        cv = self.cv
+        ids = self._itm.setdefault(key, [])
+        while len(ids) < n:
+            ids.append(maker())
+        while len(ids) > n:
+            cv.delete(ids.pop())
+        return ids
+
+    def _nav(self, px, py, pw, ph, W, H):
+        """跳过 / 上一步 / 下一步 + 第几步：**贴着面板下方居中，控件只建一次**。
+
+        两件事都在这里：
+          · 位置：原来钉在窗口底边，而面板经常一路铺到底 → 按钮条正好压住最后一行
+            介绍（W 报的）。改成跟着面板走：下面放得下就放下面，放不下挪到面板上方。
+          · 开销：原来每次重画都新建一套按钮再销毁旧的，而拖一次窗口会重画几十次 ——
+            建控件（本机实测每个约 1.3ms）全砸在拖动路径上，这就是"遮罩跟不上手"的
+            另一半。现在按钮条建一次，之后只 `place` 挪位置 + 改文字。
+        """
+        b = self._nav_bar
+        if b is None or not b.winfo_exists():
+            b = self._nav_bar = tk.Frame(self.win, bg="#22222e")
+            self._nav_skip = tk.Button(b, text="跳过引导", command=self.close, relief="flat",
+                                       bg="#22222e", fg="#a8a8b8", activebackground="#2e2e3c",
+                                       activeforeground="#ffffff",
+                                       font=("Microsoft YaHei UI", 9))
+            self._nav_skip.pack(side="left", padx=(6, 0))
+            self._nav_step = tk.Label(b, bg="#22222e", fg="#8f8fa4",
+                                      font=("Microsoft YaHei UI", 9))
+            self._nav_step.pack(side="left", padx=10)
+            self._nav_next = tk.Button(b, command=self._next, relief="flat",
+                                       bg="#3a6df0", fg="#ffffff", activebackground="#4a7dff",
+                                       activeforeground="#ffffff",
+                                       font=("Microsoft YaHei UI", 9, "bold"))
+            self._nav_next.pack(side="right", padx=(0, 6))
+            self._nav_prev = tk.Button(b, text="← 上一步", command=self._prev, relief="flat",
+                                       bg="#2b2b38", fg="#d8d8e4", activebackground="#35354a",
+                                       activeforeground="#ffffff",
+                                       font=("Microsoft YaHei UI", 9))
+        last = self.i >= len(self.steps) - 1
+        self._nav_step.configure(text="%d / %d" % (self.i + 1, len(self.steps)))
+        self._nav_next.configure(text="完成" if last else "下一步 →")
+        if self.i:
+            self._nav_prev.pack(side="right", padx=(0, 6))
+        else:
+            self._nav_prev.pack_forget()
+        bar_h = 34
+        y = py + ph + 6
+        if y + bar_h > H - 6:
+            y = max(6, py - bar_h - 6)
+        if y + bar_h > H - 6:
+            y = max(6, H - bar_h - 6)
+        b.place(relx=0.5, y=y, height=bar_h, anchor="n")
+
+    def _drop_nav(self):
+        bar = getattr(self, "_nav_bar", None)
+        self._nav_bar = None
+        try:
+            if bar is not None:
+                bar.destroy()
+        except Exception:
+            pass
+
+    def _next(self):
+        if self.i >= len(self.steps) - 1:
+            self.close()
+            return
+        self.i += 1
+        self._render()               # 按钮条是常驻的，_nav 自己改文字与"上一步"的显隐
+
+    def _prev(self):
+        if self.i:
+            self.i -= 1
+            self._render()
+
+
+def _wrap_px(text, fnt, maxw):
+    """按**像素宽度**折行。
+
+    别按字符数估：一个中日韩字在 9pt 下约 18px，而标点、英文、数字各不一样，
+    200% 缩放的机器上按"每行 35 字"排出来的文案会直接溢出面板甚至窗口
+    （本机实测：面板 420px，那行字要 700px）。
+    """
+    text = str(text)
+    if text.startswith("!"):
+        text = text[1:]
+    lines, cur = [], ""
+    for ch in text:
+        if fnt.measure(cur + ch) > maxw and cur:
+            lines.append(cur)
+            cur = ch
+        else:
+            cur += ch
+    if cur:
+        lines.append(cur)
+    return lines or [""]
 
 
 class HelpDot(object):
@@ -55,7 +577,10 @@ class HelpDot(object):
     _current = None
 
     def __init__(self, parent, text, width=420, fg="#8a8a8a", bg=None):
-        self.text = str(text or "").strip()
+        # 说明文案里成对的 `**强调**` 是写给源码看的 markdown：气泡是 tk.Message，
+        # 只会原样画出星号（用户看到的是"这里为什么有星号"）。单星号留着 ——
+        # 那是尺寸写法「宽*高」的一部分
+        self.text = str(text or "").strip().replace("**", "")
         self.width = int(width)
         self.dot = None
         self._tip = None
@@ -173,6 +698,7 @@ class SideNav(object):
         self.collapsed = set()
         self.selected = None
         self._rows_of = {}                    # 叶子 key → 它的 Label（只重画高亮时用）
+        self._top_of = {}                     # 叶子 key → 是不是顶层条目（决定要不要一直加粗）
         self._painted = None                  # 当前已按"选中"样式画出来的那个 key
         self.frame = tk.Frame(parent, background=self.BG, width=width)
         self.frame.pack(side="left", fill="y")
@@ -219,8 +745,11 @@ class SideNav(object):
             lbl.bind("<Button-1>", lambda e, k=item["key"]: self.toggle(k))
         else:
             sel = self.selected == item["key"]
+            # 顶层叶子（"API 连接""关于与诊断"）本身就是第一级标题，没选中也要加粗：
+            # 和缩在组里的二级项（"文本模型"）在层级上要一眼能分出来（W 2026-10-01 定）。
+            self._top_of[item["key"]] = (depth == 0)
             lbl = tk.Label(self.body, text=item["label"],
-                           font=(_FONT[0], _FONT[1], "bold") if sel else _FONT,
+                           font=(_FONT[0], _FONT[1], "bold") if (sel or depth == 0) else _FONT,
                            background=self.SEL_BG if sel else self.BG,
                            foreground=self.SEL_FG if sel else self.FG,
                            anchor="w", padx=pad + 12, pady=4, cursor="hand2")
@@ -282,7 +811,7 @@ class SideNav(object):
             except Exception:
                 continue
             sel = (k == self.selected)
-            lbl.configure(font=(_FONT[0], _FONT[1], "bold") if sel else _FONT,
+            lbl.configure(font=(_FONT[0], _FONT[1], "bold") if (sel or self._top_of.get(k)) else _FONT,
                           background=self.SEL_BG if sel else self.BG,
                           foreground=self.SEL_FG if sel else self.FG)
         self._painted = self.selected

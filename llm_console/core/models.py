@@ -194,6 +194,20 @@ def scan_models(cfg):
             chat.append(p)
     return d, chat, image
 
+def has_local_chat(cfg):
+    """有没有**能转发的本地文本模型** —— 这是 API 代理能用起来的前提。
+
+    没有本地聊天模型时这个代理就是个空壳：agent 连上来也拿不到回答，所以
+    「启用 API 代理」既默认关、也不给打开（判据只有这一处，界面与启动都问它）。
+    实测本机（5 个模型）`scan_models` 约 9~11ms，放在启动路径上付得起。
+    """
+    try:
+        _d, chat, _i = scan_models(cfg)
+    except Exception:
+        return False
+    return bool(chat)
+
+
 def _norm_model_name(s):
     """模型 / mmproj 文件名归一化：小写、非字母数字→连字符、
     并剥离连续结尾的量化/精度/格式后缀（如 -Q4_K_M.gguf / -F16.gguf）。"""

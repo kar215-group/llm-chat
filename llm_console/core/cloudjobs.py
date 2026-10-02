@@ -15,7 +15,7 @@ import os
 import threading
 import time
 
-from .config import APP_DIR
+from .config import APP_DIR, atomic_write_json
 
 JOBS_PATH = os.path.join(APP_DIR, "cloud_jobs.json")
 JOBS_VERSION = 1
@@ -47,31 +47,32 @@ def load_jobs():
 
 
 def save_jobs(data):
+    """原子写（见 config.atomic_write_json）：台账存在的意义就是扛断电，写盘自己更不能怕。"""
     with _LOCK:
-        try:
-            with open(JOBS_PATH, "w", encoding="utf-8") as f:
-                json.dump(data, f, ensure_ascii=False, indent=2)
-            return True
-        except Exception:
-            return False
+        return atomic_write_json(JOBS_PATH, data)
 
 
 def add_job(task_id, kind, provider_id, provider_name, model, prompt, dest,
             status="pending", resolution="", duration=0):
-    """提交成功后立刻登记；断电前至少留得下 task_id。"""
+    """提交成功后立刻登记；断电前至少留得下 task_id。
+
+    读-改-写全程持锁（RLock 可重入）：云端生图与生视频的 worker 是两条线程，
+    不锁的话并发 add/update 会拿"改之前的快照"互相覆盖，悄悄丢掉一条任务记录。
+    """
     task_id = str(task_id or "").strip()
     if not task_id:
         return None
-    data = load_jobs()
-    job = {"task_id": task_id, "kind": kind, "provider_id": provider_id,
-           "provider_name": provider_name, "model": model,
-           "prompt": str(prompt or "")[:500], "dest": dest,
-           "status": status, "created_at": time.time(), "updated_at": time.time(),
-           "resolution": resolution, "duration": duration,
-           "url": "", "paths": [], "error": "", "seconds": 0}
-    data["jobs"][task_id] = job
-    save_jobs(data)
-    return job
+    with _LOCK:
+        data = load_jobs()
+        job = {"task_id": task_id, "kind": kind, "provider_id": provider_id,
+               "provider_name": provider_name, "model": model,
+               "prompt": str(prompt or "")[:500], "dest": dest,
+               "status": status, "created_at": time.time(), "updated_at": time.time(),
+               "resolution": resolution, "duration": duration,
+               "url": "", "paths": [], "error": "", "seconds": 0}
+        data["jobs"][task_id] = job
+        save_jobs(data)
+        return job
 
 
 def get_job(task_id):
@@ -80,25 +81,27 @@ def get_job(task_id):
 
 def update_job(task_id, **patch):
     task_id = str(task_id or "").strip()
-    data = load_jobs()
-    job = data["jobs"].get(task_id)
-    if not isinstance(job, dict):
-        return None
-    job.update(patch)
-    job["updated_at"] = time.time()
-    data["jobs"][task_id] = job
-    save_jobs(data)
-    return job
+    with _LOCK:
+        data = load_jobs()
+        job = data["jobs"].get(task_id)
+        if not isinstance(job, dict):
+            return None
+        job.update(patch)
+        job["updated_at"] = time.time()
+        data["jobs"][task_id] = job
+        save_jobs(data)
+        return job
 
 
 def remove_job(task_id):
     task_id = str(task_id or "").strip()
-    data = load_jobs()
-    if task_id not in data["jobs"]:
-        return False
-    data["jobs"].pop(task_id, None)
-    save_jobs(data)
-    return True
+    with _LOCK:
+        data = load_jobs()
+        if task_id not in data["jobs"]:
+            return False
+        data["jobs"].pop(task_id, None)
+        save_jobs(data)
+        return True
 
 
 def mark_done(task_id, paths=(), urls=(), seconds=0, usage=None):
@@ -135,16 +138,17 @@ def expired(job, hours=None):
 
 def prune(keep_days=7):
     """清掉**已结束**且超过 keep_days 的记录；未完成的留着，由 expired() 判断能不能取。"""
-    data = load_jobs()
-    cut = time.time() - max(1, int(keep_days or 7)) * 86400
-    drop = [tid for tid, j in data["jobs"].items()
-            if isinstance(j, dict) and str(j.get("status")) not in OPEN_STATUS
-            and float(j.get("updated_at") or 0) < cut]
-    for tid in drop:
-        data["jobs"].pop(tid, None)
-    if drop:
-        save_jobs(data)
-    return len(drop)
+    with _LOCK:
+        data = load_jobs()
+        cut = time.time() - max(1, int(keep_days or 7)) * 86400
+        drop = [tid for tid, j in data["jobs"].items()
+                if isinstance(j, dict) and str(j.get("status")) not in OPEN_STATUS
+                and float(j.get("updated_at") or 0) < cut]
+        for tid in drop:
+            data["jobs"].pop(tid, None)
+        if drop:
+            save_jobs(data)
+        return len(drop)
 
 
 def describe(job):

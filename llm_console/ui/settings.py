@@ -5,14 +5,15 @@
 
 import os
 import subprocess
+import sys
 import threading
 import tkinter as tk
 from tkinter import ttk, scrolledtext, messagebox, filedialog, font as tkfont
 
 from ..core import capability, cloudjobs, providers, sdprofile, secrets, textfile
-from ..core.config import (CFG_VERSION, FLOAT_KEYS, INT_KEYS, STR_KEYS,
-                           cloud_media_dir, gen_api_key, save_config)
-from ..core.models import scan_models, scan_video_models
+from ..core.config import (APP_DIR, APP_VERSION, CFG_VERSION, CONFIG_PATH, FLOAT_KEYS,
+                           INT_KEYS, STR_KEYS, cloud_media_dir, gen_api_key, save_config)
+from ..core.models import has_local_chat, scan_models, scan_video_models
 from ..core.params import ctx_for, current_ngl
 from ..core.server import _query_serving_model, server_process_alive
 from ..connection import cloud
@@ -58,6 +59,13 @@ NAV_SPEC = [
          "help": "扫描模型目录、补全每个模型缺的层数 / 上下文 / 视觉投影器记录，"
                  "以及把散落的模型文件整理成「一个模型一个文件夹」。\n"
                  "整理是**先预览、后执行，只移动不删除**；判不出归属的文件保持原位。"},
+        {"key": "eng", "label": "获取引擎", "page": "files", "section": "eng",
+         "title": "获取引擎（llama.cpp 与 sd.cpp）",
+         "help": "这一屏只解决「还没装引擎」：告诉你现在缺哪一个、官方下载页在哪、"
+                 "该解压到哪儿。\n程序不代你下载 —— 一个预编译包 100~200MB，还要按 "
+                 "CUDA / CPU 分档，下坏了留下半个目录比没下更难收拾。"
+                 "所以这里给的是「打开下载页 / 复制链接 / 打开目标目录 / 重新检测」，"
+                 "动手的还是你自己。"},
     ]},
     {"key": "g_cloud", "label": "云端模型", "children": [
         {"key": "c_prov", "label": "服务商与密钥", "page": "cloud", "section": "prov",
@@ -65,7 +73,7 @@ NAV_SPEC = [
          "help": "内置服务商只内置名称与 base_url；添加服务商**不会**把它名下所有模型塞进"
                  "主页面菜单。流程是：填信息 → 填密钥 → 测试连接 → 通过后在独立的「选择模型」"
                  "窗口里勾选要用的模型。清单拉过一次就缓存，只有点「刷新清单」才重新请求。\n"
-                 "密钥单独存 secrets.json，**不进备份、不进仓库**。"},
+                 "密钥单独存 secrets.json，只留在你这台机器上，不会跟配置一起被复制走。"},
         {"key": "c_text", "label": "文本模型", "page": "cloud", "section": "ctext",
          "title": "云端文本模型",
          "help": "云端文本走通用 OpenAI 兼容协议。这里的设置只影响文本对话"
@@ -76,14 +84,25 @@ NAV_SPEC = [
          "help": "云端生图与生视频走服务商的**原生接口**，不会启动本地 sd.cpp："
                  "生图是同步请求（可以挂参考图），生视频是异步任务"
                  "（提交 → 轮询 → 下载），首帧仍要用本地链路。\n"
+                 "左列是生图、右列是生视频，各自的存放目录在本列底部；"
+                 "轮询间隔与等待上限两条链路共用，压在下面那条横栏里。\n"
                  "云端产物地址只活 24 小时，所以拿到就立刻下载到本地，不在云上留原图；"
-                 "没来得及下载的会记进任务台账，重启后对话开头给「取回」按钮。"},
+                 "没来得及下载的会记进任务台账，重启后对话开头给「取回」按钮。\n"
+                 "费用单价按模型填，点「成本预估算」开窗口。"},
     ]},
     {"key": "api", "label": "API 连接", "page": "api", "section": "api",
      "title": "API 连接（供 agent 调用）",
      "help": "把「当前选中的本地模型」暴露成一个 OpenAI 兼容的本机端点，给 agent 或其他"
              "软件直接调用。\n这个代理**只转本地模型**：云端对话在应用内直连服务商，"
              "生图 / 生视频不经这里。"},
+    {"key": "about", "label": "关于与诊断", "page": "about", "section": "about",
+     "title": "关于与诊断",
+     "help": "这一页认亲：这是什么软件、什么版本、怎么重看新手引导。\n"
+             "「诊断」按钮开次级页面，那里回答另一件事：我这份是哪来的（下载的 exe 还是"
+             "源码跑的）、这台机器上缺什么 —— 运行方式、程序与配置与密钥的位置、运行库、"
+             "错误日志、一键诊断都在那一页。\n"
+             "一键诊断只读本地信息：不联网、不启动推理引擎、不碰显卡。"
+             "结果可以复制成一段文字贴给别人求助，也可以存成文件。"},
 ]
 
 
@@ -127,6 +146,24 @@ def _open_outdir(path, what, setting=""):
 NEW_PROVIDER_LABEL = "＋ 新建服务商…"      # 下拉里"还没建起来"那一项的标签
 
 
+def _open_file(path, what):
+    """打开一个**文件**（错误日志这类）。
+
+    不能复用 `_open_outdir`：它会先 `makedirs(path)`，那正好把 `llm-chat-error.log`
+    变成一个同名的**空目录**，日志反而再也写不进去了。
+    """
+    p = str(path or "").strip()
+    if not p or not os.path.isfile(p):
+        messagebox.showinfo(what, "还没有这个文件：\n  %s\n\n没有过异常退出是好事。" % p)
+        return False
+    try:
+        os.startfile(p)                     # 交给系统默认程序（.log 一般是记事本）
+        return True
+    except Exception as e:
+        messagebox.showwarning(what, "打不开 %s：\n  %s" % (p, e))
+        return False
+
+
 def provider_labels(cfg):
     """服务商下拉的显示项 → `[(标签, pid)]`。
 
@@ -153,8 +190,312 @@ def provider_label_for(cfg, pid, fallback=""):
     return (providers.builtin(pid).get("name") or fallback or pid or "")
 
 
+def media_menu_models(cfg, p):
+    """这家**已勾进主页面菜单**的生图 / 生视频模型名（成本窗口只列这些，W 定的口径）。
+
+    媒体模型大多不在各家 `/models` 清单里（§12.1），只能靠「选择模型」窗口的「直接加入」
+    手填进菜单 —— 所以这里读的是菜单清单而不是清单缓存：没进菜单的模型本来也用不到。
+    """
+    out = []
+    for m in providers.models_in_menu(p):
+        if providers.model_kind_of(p, m) in (providers.KIND_IMAGE, providers.KIND_VIDEO):
+            out.append(m)
+    return out
+
+
 class SettingsMixin:
     """App 的设置窗口与 API 连接页职责（Mixin）；self._xxx 在运行时经 MRO 解析。"""
+
+    def open_cost_window(self, parent=None):
+        """「成本预估算」次级窗口：单价**按模型**填，点「写入单价」立即落盘。
+
+        为什么不跟设置窗口底部那个「保存」共用一次提交：单价是"给某一次生成估费用"的独立
+        事实，跟"这一页别的档位改不改"没关系（同坑 61 —— 声明与提交不是一件事）。这里点
+        「写入」就 save_config 落地，关窗不隐式保存任何东西，所以顶部那行话把这件事写明了。
+
+        为什么单价挂模型不挂服务商：同一家下 happyhorse-1.0 与 1.1 不同价，MiniMax 的 H3
+        按秒、Hailuo 按条 —— 连**计费单位**都是模型属性，挂在服务商上算出来的就是错价。
+
+        模型下拉只列**已勾进主页面菜单**的媒体模型（W 定的口径）：没进菜单的模型本来发不出去，
+        给它定价没有意义；媒体模型大多不在各家 /models 清单里，要先进 选择模型 → 直接加入。
+        """
+        host = parent or self.root
+        cfg = self.cfg
+        win = tk.Toplevel(host)
+        win.title("成本预估算")
+        win.geometry("620x470")
+        win.minsize(560, 420)
+        win.transient(host)
+
+        ttk.Label(win, text="单价按模型记，只用于提交前的费用预估。不填就在确认框与对话流里"
+                            "明说「以账单为准」，不编数字。点「写入单价」立即生效，"
+                            "不需要到底部「保存」。",
+                  wraplength=580, justify="left", font=("Microsoft YaHei UI", 9)).pack(
+            side="top", fill="x", padx=14, pady=(12, 4))
+        body = ttk.Frame(win)
+        body.pack(side="top", fill="both", expand=True, padx=14, pady=(4, 12))
+        rows = {"i": 0}
+
+        def lrow(label, widget, colspan=2):
+            i = rows["i"]
+            rows["i"] += 1
+            ttk.Label(body, text=label, width=12, anchor="w").grid(
+                row=i, column=0, sticky="nw", padx=(0, 8), pady=5)
+            widget.grid(row=i, column=1, columnspan=colspan, sticky="w", pady=5)
+
+        pid_var = tk.StringVar(value="")
+        model_var = tk.StringVar(value="")
+        price_var = tk.StringVar(value="")
+        unit_var = tk.StringVar(value="秒")
+        status_var = tk.StringVar(value="")
+        _pl = provider_labels(cfg)
+
+        combo_p = ttk.Combobox(body, state="readonly", width=30,
+                               values=[lb for lb, _p in _pl])
+        combo_m = ttk.Combobox(body, state="readonly", width=30,
+                               textvariable=model_var, values=[])
+        combo_u = ttk.Combobox(body, state="readonly", width=8, textvariable=unit_var,
+                               values=list(providers.PRICE_UNITS))
+        # 已填清单用 Text 而不是"拼全部模型名"的 Label（坑 92：状态类 Label 必须定长）
+        lst = tk.Text(body, height=8, width=46, font=("Microsoft YaHei UI", 9),
+                      state="disabled", wrap="none")
+
+        def refresh_list():
+            got = providers.price_table(providers.get_provider(cfg, pid_var.get()))
+            lst.configure(state="normal")
+            lst.delete("1.0", "end")
+            lst.insert("1.0", "（这家一个都没填）" if not got else "")
+            for m in sorted(got):
+                lst.insert("end", "%s    %g 元/%s\n" % (m, got[m]["price"], got[m]["unit"]))
+            lst.configure(state="disabled")
+
+        def load_price():
+            """选中模型就把已填的单价与单位顶上来；没填过按能力给个起始单位。"""
+            p = providers.get_provider(cfg, pid_var.get()) or {}
+            per, unit = providers.price_of(p, model_var.get())
+            if per > 0:
+                price_var.set("%g" % per)
+                unit_var.set(unit)
+            else:
+                price_var.set("")
+                unit_var.set(providers.default_unit(
+                    model_var.get(), providers.model_kind_of(p, model_var.get())))
+
+        def refresh_models():
+            ms = media_menu_models(cfg, providers.get_provider(cfg, pid_var.get()))
+            combo_m.configure(values=ms)
+            model_var.set(model_var.get() if model_var.get() in ms
+                          else (ms[0] if ms else ""))
+            load_price()
+            return ms
+
+        def pick_provider(*_a):
+            for lb, pid in _pl:
+                if lb == combo_p.get():
+                    pid_var.set(pid)
+                    break
+            else:
+                pid_var.set("")
+            if not refresh_models():
+                status_var.set("这家还没有勾进菜单的生图 / 生视频模型："
+                               "先去「选择模型」里加进来（媒体模型名要用「直接加入」）。")
+            else:
+                status_var.set("")
+            refresh_list()
+
+        def write_price(clear=False):
+            pid, model = pid_var.get(), model_var.get()
+            if not pid or not model:
+                status_var.set("先把服务商和模型都选上。")
+                return
+            per, unit = 0.0, ""
+            if not clear:
+                try:
+                    per = float(str(price_var.get()).strip())
+                except Exception:
+                    status_var.set("单价要填数字（元）。要清掉就点「清除该模型单价」。")
+                    return
+                if per <= 0:
+                    status_var.set("单价要大于 0。要清掉就点「清除该模型单价」。")
+                    return
+                unit = unit_var.get()
+            if not providers.set_price(cfg, pid, model, per, unit):
+                status_var.set("这个服务商不在了，没写进去。")
+                return
+            save_config(cfg)
+            refresh_list()
+            status_var.set("已清除「%s」的单价。" % model if per <= 0
+                           else "已写入「%s」%.4g 元/%s。" % (model, per, unit))
+
+        def pick_model(*_a):
+            load_price()
+            status_var.set("")
+
+        combo_p.bind("<<ComboboxSelected>>", pick_provider)
+        combo_m.bind("<<ComboboxSelected>>", pick_model)
+        lrow("服务商", combo_p)
+        lrow("模型", combo_m)
+        lrow("单价（元）", ttk.Entry(body, textvariable=price_var, width=10))
+        lrow("计费单位", combo_u)
+        lrow("已填的模型", lst)
+        btns = ttk.Frame(body)
+        lrow("", btns)
+        ttk.Button(btns, text="写入单价", width=12,
+                   command=lambda: write_price(False)).pack(side="left")
+        ttk.Button(btns, text="清除该模型单价", width=14,
+                   command=lambda: write_price(True)).pack(side="left", padx=(8, 0))
+        ttk.Label(btns, textvariable=status_var, foreground="#808080", wraplength=230,
+                  justify="left", font=("Microsoft YaHei UI", 9)).pack(side="left", padx=(10, 0))
+
+        if _pl:
+            combo_p.current(0)
+            pick_provider()
+        else:
+            status_var.set("还没有可用的服务商。")
+
+    def open_diag_window(self, parent=None):
+        """「诊断」次级页面：这份程序是哪来的、这台机器缺什么、报告怎么拿出去。
+
+        从「关于」页搬进来（W 2026-10-01 定）：关于页回答"这是什么软件"，这一页回答
+        "我这台机器怎么了"。前者是给所有人看的一屏，后者是一堆路径 + 一份能贴走的报告，
+        混在一起时真正要的「新手引导」按钮被挤到第十行下面。
+
+        窗口宽度按**实测**定：标签列 8 字（最长那项「程序所在文件夹」7 字）+ 结果框
+        52 字符 ≈ 572px，加两边 14 的边距要 685px 以上 —— 原来在 802px 的内容区里
+        用 14 字标签列，换到自己的窗口里不重算就会顶出右边界（坑 113 同族）。
+        """
+        from ..core import crashlog, diagnose
+        host = parent or self.root
+        if self._diag_win is not None:
+            try:
+                if self._diag_win.winfo_exists():
+                    self._diag_win.lift()
+                    return self._diag_win
+            except Exception:
+                self._diag_win = None
+
+        win = tk.Toplevel(host)
+        win.title("诊断")
+        # 6 行路径 + 16 行结果框 + 一排四个按钮：实测 660 高会把按钮那排裁掉半截
+        # （截图量出来的，不是估的），给到 740 才全露出来
+        win.geometry("760x740")
+        win.minsize(700, 560)
+        win.transient(host)
+        self._diag_win = win
+
+        body = ttk.Frame(win)
+        body.pack(side="top", fill="both", expand=True, padx=14, pady=(12, 12))
+        body.columnconfigure(2, weight=1)
+        rows = {"i": 0}
+
+        def infolab(label, value):
+            i = rows["i"]
+            rows["i"] += 1
+            ttk.Label(body, text=label, width=8, anchor="w").grid(
+                row=i, column=0, sticky="nw", padx=(0, 8), pady=3)
+            ttk.Label(body, text=str(value), wraplength=560, justify="left",
+                      foreground="#5a5a5a").grid(row=i, column=1, columnspan=2,
+                                                 sticky="w", pady=3)
+
+        frozen = bool(getattr(sys, "frozen", False))
+        infolab("运行方式", "下载的 exe（双击即用）" if frozen
+                else "源码运行（python / pythonw）")
+        infolab("程序位置", APP_DIR)
+        infolab("配置文件", CONFIG_PATH)
+        infolab("密钥文件", os.path.join(APP_DIR, "secrets.json"))
+        infolab("运行库", "%s%s · Tk %s" % ("自带 Python " if frozen else "Python ",
+                                            sys.version.split()[0], tk.TkVersion))
+        infolab("错误日志", crashlog.log_path() if os.path.isfile(crashlog.log_path())
+                else "还没有异常记录")
+
+        status = tk.StringVar(value="")
+        box = tk.Text(body, height=16, width=52, font=("Microsoft YaHei UI", 9),
+                      state="normal", wrap="word")
+        box.insert("1.0", "点「一键诊断」检查这台机器：引擎在不在、模型放对没有、"
+                          "目录能不能写、端口有没有被占。\n"
+                          "这一步只读本地信息 —— 不联网、不启动推理引擎、不碰显卡。")
+        box.configure(state="disabled")
+        i = rows["i"]
+        rows["i"] += 1
+        ttk.Label(body, text="诊断结果", width=8, anchor="w").grid(
+            row=i, column=0, sticky="nw", padx=(0, 8), pady=(10, 3))
+        box.grid(row=i, column=1, columnspan=2, sticky="w")
+
+        def show(text):
+            if not box.winfo_exists():
+                return                      # 窗口可能已经关了：结果没人接就丢掉
+            box.configure(state="normal")
+            box.delete("1.0", "end")
+            box.insert("1.0", text)
+            box.configure(state="disabled")
+
+        def do_diag():
+            """诊断放线程里跑（nvidia-smi 最坏会等 10 秒，不能冻住界面），
+            结果经 _ui_q 回主线程画 —— 子线程绝不碰控件（坑 54）。"""
+            status.set("正在检查…")
+            cfg = dict(self.cfg)
+            mine = bool(getattr(self, "proxy", None) and
+                        getattr(self.proxy, "httpd", None))
+            srv = bool(getattr(self, "_proc", None))
+
+            def merge_gpu():
+                """把这一趟探到的显卡信息**合并**回活的 cfg（只补空的那两项）。
+
+                不能在诊断线程里 `save_config(快照)`：快照是点击那一刻的，nvidia-smi
+                最坏 10 秒才回来，那期间用户保存的设置会被整份盖回去（P1 数据丢失）。
+                """
+                if not str(self.cfg.get("gpu_name", "") or "") and cfg.get("gpu_name"):
+                    self.cfg["gpu_name"] = cfg["gpu_name"]
+                    self.cfg["vram_gb"] = cfg.get("vram_gb", 0)
+                    save_config(self.cfg)
+
+            def work():
+                try:
+                    rs = diagnose.run_checks(cfg, proxy_running=mine, server_running=srv)
+                    f, w = diagnose.summary(rs)
+                    head = ("共 %d 项：%s\n\n" % (
+                        len(rs),
+                        "没发现阻塞问题（%d 项提醒）" % w if not f
+                        else "%d 项需要处理、%d 项提醒" % (f, w)))
+                    txt = head + diagnose.render_text(rs)
+                    self._ui_q.put(lambda: (show(txt), merge_gpu(), status.set(
+                        "有 %d 项需要处理" % f if f else "没发现阻塞问题")))
+                except Exception as e:
+                    msg = "诊断没跑完：%s: %s" % (type(e).__name__, e)
+                    self._ui_q.put(lambda: status.set(msg))
+            threading.Thread(target=work, daemon=True).start()
+
+        def copy_report():
+            body_txt = box.get("1.0", "end").strip()
+            try:
+                win.clipboard_clear()
+                win.clipboard_append(body_txt)
+                status.set("诊断报告已复制到剪贴板，贴给别人就能求助。")
+            except Exception as e:
+                status.set("复制失败（%s）——可以改用「保存诊断报告」。" % e)
+
+        def save_report():
+            body_txt = box.get("1.0", "end").strip()
+            path = os.path.join(APP_DIR, "diagnose.txt")
+            try:
+                with open(path, "w", encoding="utf-8") as f:
+                    f.write(body_txt + "\n")
+                status.set("已保存：%s" % path)
+            except Exception as e:
+                status.set("保存失败：%s: %s" % (type(e).__name__, e))
+
+        bf = ttk.Frame(body)
+        i = rows["i"]
+        rows["i"] += 1
+        bf.grid(row=i, column=1, columnspan=2, sticky="w", pady=(8, 0))
+        for text, fn in (("一键诊断", do_diag), ("复制诊断报告", copy_report),
+                         ("保存诊断报告", save_report),
+                         ("打开错误日志", lambda: _open_file(crashlog.log_path(), "错误日志"))):
+            ttk.Button(bf, text=text, command=fn).pack(side="left", padx=(0, 6))
+        ttk.Label(body, textvariable=status, foreground="#808080", wraplength=520,
+                  justify="left", font=("Microsoft YaHei UI", 9)).grid(
+            row=rows["i"], column=1, columnspan=2, sticky="w", pady=(6, 0))
+        return win
 
     def _api_base_url(self):
         return "http://127.0.0.1:%s/v1" % self.cfg.get("proxy_port", 8081)
@@ -195,14 +536,26 @@ class SettingsMixin:
 
     def _restart_proxy(self):
         self.proxy.stop()
+        if not has_local_chat(self.cfg):
+            self._proxy_usable = False
+            self._append("\n[API] 这台机器上还没有可转发的本地文本模型，代理不起 —— "
+                         "先在 设置 → 本地模型 备好引擎与模型。\n", "meta")
+            return
+        self._proxy_usable = True
         if self.cfg.get("proxy_enabled", True):
             self.proxy.start()
         else:
             self._append("\n[API] 代理已停用（设置中可重新启用并重启代理）。\n", "meta")
 
-    def open_settings(self):
+    def open_settings(self, jump=""):
+        """打开设置窗口。`jump` = 要直接定位到的导航叶子 key（输出栏那两个按钮用）。"""
         if self._settings_win is not None and self._settings_win.winfo_exists():
             self._settings_win.lift()
+            if jump and self._settings_nav is not None:
+                try:
+                    self._settings_nav.select(jump)
+                except Exception:
+                    pass
             return
         win = tk.Toplevel(self.root)
         self._settings_win = win
@@ -238,6 +591,7 @@ class SettingsMixin:
 
         nav = widgets.SideNav(main, NAV_SPEC, width=232,
                               on_select=lambda it: _nav_select(it))
+        self._settings_nav = nav            # 输出栏的按钮要能直接跳到某个叶子
         sp = widgets.ScrollPage(main)
 
         def section(page_id, sec_id):
@@ -253,30 +607,39 @@ class SettingsMixin:
                 return build
             return deco
 
-        def _row(parent, rows, label, widget, desc, hint=""):
-            """一行：标签 / 控件 / （短摘要 + "?" 悬停说明）。
+        def _row(parent, rows, label, widget, desc, hint="", lw=14):
+            """一行：标签（旁边挂 "?"）/ 控件 / 短摘要。
 
             v39 起灰色长说明**不再内联**（它把窗口撑到 1020 宽、还把版面切成三段），
             改成 "?" 悬停；只有真正要"填之前就知道"的约束留在外面（hint，≤14 字）。
+
+            "?" 挂在**标签**这一侧（2026-10-01 改）：它解释的是"这一行是什么"，跟着标签才
+            读得顺；留在填写栏右边看着像那栏的校验提示。红 / 黄警告与动态状态回显照旧内联
+            在控件那一侧 —— 那是"当前状态"不是"说明"（§5.2 第 14 条）。
+
+            `lw` 是标签列的字符宽：整页布局用 14（要容得下 repeat_penalty 这种长英文名），
+            云端那两列并排时只有 802/2 的横向预算，标签列收到 8（中文标签最长 5 个字）。
             """
             i = rows["i"]
             rows["i"] += 1
             bg = widgets.default_bg()
-            ttk.Label(parent, text=label, width=14, anchor="w").grid(
-                row=i, column=0, sticky="w", padx=(0, 8), pady=5)
+            lab = tk.Frame(parent, background=bg)
+            lab.grid(row=i, column=0, sticky="w", padx=(0, 8), pady=5)
+            ttk.Label(lab, text=label, width=lw, anchor="w").pack(side="left")
+            widgets.HelpDot(lab, desc).pack(side="left", padx=(2, 0))
             widget.grid(row=i, column=1, sticky="w", padx=(0, 10), pady=5)
-            cell = tk.Frame(parent, background=bg)
-            cell.grid(row=i, column=2, sticky="w", pady=5)
             if hint:
+                cell = tk.Frame(parent, background=bg)
+                cell.grid(row=i, column=2, sticky="w", pady=5)
                 ttk.Label(cell, text=hint, foreground="#5a5a5a",
-                          font=("Microsoft YaHei UI", 9)).pack(side="left", padx=(0, 4))
-            widgets.HelpDot(cell, desc).pack(side="left")
+                          font=("Microsoft YaHei UI", 9)).pack(side="left")
 
-        def row(parent, rows, label, widget, desc, hint=""):
-            return _row(parent, rows, label, widget, desc, hint)
+        def row(parent, rows, label, widget, desc, hint="", lw=14):
+            return _row(parent, rows, label, widget, desc, hint, lw)
 
-        def ent(parent, rows, key, label, desc, width=8, var=None, trace=None, hint=""):
-            """一行"标签 + 输入框 + ? 提示"。
+        def ent(parent, rows, key, label, desc, width=8, var=None, trace=None, hint="",
+                lw=14):
+            """一行"标签 + 输入框"，说明在标签旁的 "?" 里。
 
             key 非空时变量登记进 v（由 _apply_settings 统一写回 cfg）；
             传 var 则用外部变量（云端服务商那几项是结构化数据，自己管保存，
@@ -287,7 +650,7 @@ class SettingsMixin:
             e = ttk.Entry(parent, textvariable=var, width=width)
             if trace is not None:
                 var.trace_add("write", lambda *a: trace())
-            _row(parent, rows, label, e, desc, hint)
+            _row(parent, rows, label, e, desc, hint, lw)
 
         # ---- 区块 1：本地文本模型 / 生成参数 ----
         @section("local_text", "gen")
@@ -360,8 +723,8 @@ class SettingsMixin:
                 "CPU 线程数，0 = 自动。一般留 0。")
             ent(t2, r2, "port", "port",
                 "API 端口，默认 8080。")
-            ent(t2, r2, "api_key", "api_key",
-                "接口鉴权密钥；客户端调用需携带。留空则不鉴权。", width=16)
+            # 这里**不放 api_key**：那是「API 连接」那一页的事（生成 / 复制 / 撤销都在一处），
+            # 摆在服务参数里会让人以为改完要重启服务，也会和那页的只读回显对不上
             v["reasoning_mode"] = tk.StringVar(value=str(self.cfg.get("reasoning_mode", "default")))
             cb = ttk.Combobox(t2, textvariable=v["reasoning_mode"],
                               values=["default", "off", "budget"], width=8, state="readonly")
@@ -410,7 +773,7 @@ class SettingsMixin:
                 img_dir = str(self.cfg.get("image_model_dir", "") or "")
                 path = os.path.join(img_dir, str(self.cfg.get("img_model_file", "") or ""))
                 fid, basis, _ = sdprofile.detect_file(path, kind="image", forced=code)
-                tail = {"measure": "张量名实测过", "user": "你手动指定",
+                tail = {"measure": "认得准", "user": "你手动指定",
                         "hint": "按名字猜的", "none": "认不出，走通用"}.get(
                     basis, "")
                 img_note.set("识别为：%s（%s）" % (sdprofile.label_of(fid), tail or "自动"))
@@ -429,8 +792,8 @@ class SettingsMixin:
             ent(t3, r3, "img_t5_file", "T5-XXL",
                 "t5xxl_fp16.safetensors 之类（Flux / SD3 必需）。", width=30, hint="留空=自动")
             ent(t3, r3, "img_steps", "默认步数",
-                "默认采样步数（4~50）：Qwen-Image 在本机 8 步 ~1m20s、20 步 ~2m50s；"
-                "少=快，多=细节更多。别的模型族看各家文档。",
+                "默认采样步数（4~50）：少 = 快、多 = 细节更多，耗时大致与步数成正比"
+                "（8 步与 20 步差两倍多）。具体到某个模型族的推荐值，看它自己页面的说明。",
                 hint="8 步最快")
             ent(t3, r3, "img_size", "默认分辨率",
                 "宽x高，如 1024x1024。分辨率越高越慢。会自动补到本族要求的倍数"
@@ -509,7 +872,7 @@ class SettingsMixin:
                     except Exception:
                         path = ""
                 fid, basis, _ = sdprofile.detect_file(path, kind="video", forced=code)
-                tail = {"measure": "张量名实测过", "user": "你手动指定",
+                tail = {"measure": "认得准", "user": "你手动指定",
                         "hint": "按名字猜的", "none": "认不出，走通用"}.get(
                     basis, "")
                 vid_note.set("识别为：%s（%s）" % (sdprofile.label_of(fid), tail or "自动"))
@@ -526,20 +889,20 @@ class SettingsMixin:
                 "（--high-noise-diffusion-model）。5B 版与单文件模型留空即可。",
                 width=30, hint="MoE 才要")
             ent(t3b, r3b, "vid_audio_vae_file", "音频 VAE",
-                "想要有声视频才需要（本机没下过这个文件，缺了只出无声视频）。"
+                "只有想要**有声视频**才需要；没有它照样出片，只是没有声音。"
                 "留空 = 按文件名含 audio + vae 自动找。", width=30, hint="留空=自动")
             ent(t3b, r3b, "vid_size", "分辨率",
                 "宽x高，如 512x512。视频分辨率对显存和耗时都很敏感，先小后大。", width=12)
             ent(t3b, r3b, "vid_frames", "帧数",
                 "视频长度 = 帧数 ÷ 帧率。**不需要自己凑 4n+1**：引擎会自行对齐到合法帧数"
-                "（实测填 17 会提示 align video frames from 17 to 22），估算时长按对齐后的算。",
+                "（例如填 17 会按 22 帧出片），估算时长也按对齐之后的算。",
                 hint="引擎自动对齐")
             ent(t3b, r3b, "vid_fps", "帧率",
                 "每秒帧数。MiniMax-H3 的参考视频按 24fps 组织。")
             ent(t3b, r3b, "vid_steps", "采样步数",
                 "步数直接决定耗时；链路先通再逐步加大。")
             ent(t3b, r3b, "vid_cfg", "CFG",
-                "提示词服从度。MiniMax-H3 实测 5.0 可用；Wan 的文档区间是 3~6。"
+                "提示词服从度。MiniMax-H3 用 5.0 就行；Wan 的官方区间是 3~6。"
                 "大于 1 时引擎会去编码负向提示词，H3 那一族下面那栏就不能留空。")
             ent(t3b, r3b, "vid_neg_prompt", "负向提示词",
                 "MiniMax-H3 在 CFG>1 时**必须能编码出负向提示词**，留空会报 "
@@ -575,6 +938,9 @@ class SettingsMixin:
             self.api_hint_var = tk.StringVar(value="")
             api_key_var = tk.StringVar(value=str(self.cfg.get("api_key", "")))
             api_model_var = tk.StringVar(value=self._api_model_name() or "（暂无）")
+            # 没有本地可转发的文本模型 = 这个功能开不起来：默认关、复选框锁住、顶上说明原因
+            usable = has_local_chat(self.cfg)
+            self._proxy_usable = usable
 
             running = self.proxy.running()
             ttk.Label(t4, text=("代理运行中 · 端口 %s" % self.cfg.get("proxy_port", 8081))
@@ -583,6 +949,12 @@ class SettingsMixin:
                       font=("Microsoft YaHei UI", 10, "bold")).grid(
                 row=0, column=0, columnspan=3, sticky="w", pady=(0, 8))
             r4["i"] = 1
+            if not usable:
+                ttk.Label(t4, text="这个功能要有本地文本模型才能用：先在 设置 → 本地模型 备好引擎与模型。",
+                          foreground="#c01c28", wraplength=740, justify="left",
+                          font=("Microsoft YaHei UI", 9)).grid(
+                    row=r4["i"], column=0, columnspan=3, sticky="w", pady=(0, 8))
+                r4["i"] += 1
 
             fr = ttk.Frame(t4)
             ttk.Button(fr, text="启动 / 重启服务（agent 场景）", width=22,
@@ -638,9 +1010,12 @@ class SettingsMixin:
                 "agent 接入端口（默认 8081）；改动后点「重启代理」生效，"
                 "并且要同步改 agent 里填的端口——8080 是后端服务端口，不是给 agent 的。",
                 width=8, hint="重启生效")
-            v_px = tk.BooleanVar(value=bool(self.cfg.get("proxy_enabled", True)))
-            cb_px = ttk.Checkbutton(t4, text="启用 API 代理（随程序启动）", variable=v_px)
-            row(t4, r4, "启用代理", cb_px, "关闭后 agent 无法接入；改动后点「重启代理」生效。")
+            v_px = tk.BooleanVar(value=bool(self.cfg.get("proxy_enabled", True)) and usable)
+            cb_px = ttk.Checkbutton(t4, text="启用 API 代理（随程序启动）", variable=v_px,
+                                    state="normal" if usable else "disabled")
+            row(t4, r4, "启用代理", cb_px,
+                "关闭后 agent 无法接入；改动后点「重启代理」生效。" if usable else
+                "现在锁着：这台机器上还没有能转发的本地文本模型。")
             v["proxy_enabled"] = v_px
 
             ttk.Label(t4, textvariable=self.api_hint_var, foreground="#1a7f37",
@@ -654,18 +1029,13 @@ class SettingsMixin:
                       font=("Microsoft YaHei UI", 9)).grid(
                 row=r4["i"], column=0, columnspan=3, sticky="w", pady=(8, 2))
             r4["i"] += 1
-            ttk.Label(t4, text=("这个代理只转发**本地文本模型**：生图 / 生视频不经这里调用"
+            ttk.Label(t4, text=("这个代理只转发本地文本模型：生图 / 生视频不经这里调用"
                                 "（云端那两条在应用内直连服务商原生接口，"
                                 "本地那两条走 sd-cli；agent 用不到图像接口）。"),
                       foreground="#c01c28", wraplength=740, justify="left",
                       font=("Microsoft YaHei UI", 9)).grid(
                 row=r4["i"], column=0, columnspan=3, sticky="w", pady=(8, 2))
             r4["i"] += 1
-            ttk.Label(t4, text="远程连接（预留）：未来可经隧道（frp / Cloudflare Tunnel）+ 强鉴权 + IP 白名单"
-                               "对外提供极小规模服务；本页结构已按可扩展方式组织。",
-                      foreground="#999999", wraplength=740, justify="left",
-                      font=("Microsoft YaHei UI", 9)).grid(
-                row=r4["i"], column=0, columnspan=3, sticky="w", pady=(2, 6))
 
             # 底部「保存」在本页时的额外动作：端口/启停真的变了就把代理重启一次，
             # 否则"保存了却没生效"和"保存了却关窗"一样让人以为配好了
@@ -928,7 +1298,7 @@ class SettingsMixin:
                 ttk.Label(d, text="给「%s」填写 API Key" % pname,
                           font=("Microsoft YaHei UI", 10, "bold")).pack(
                     anchor="w", padx=14, pady=(12, 4))
-                ttk.Label(d, text="密钥只写进 secrets.json（不进备份）；界面与配置文件里都只显示掩码。",
+                ttk.Label(d, text="密钥只写进 secrets.json，留在你这台机器上；界面与配置文件里都只显示掩码。",
                           foreground="#808080", wraplength=420, justify="left",
                           font=("Microsoft YaHei UI", 9)).pack(anchor="w", padx=14)
                 e = ttk.Entry(d, width=40, show="●")
@@ -1784,116 +2154,268 @@ class SettingsMixin:
         # ---- 区块 7：云端 / 生图与生视频（服务商原生接口，与本地 sd.cpp 无关）----
         @section("cloud", "cmedia")
         def _t4c(t4c, r4c):
-            """云端生图 / 生视频的档位与落地目录（页面说明在标题旁的 "?" 里）。"""
+            """云端生图 / 生视频的档位与落地目录。
 
-            ent(t4c, r4c, "cloud_img_dir", "图片存放",
-                "云端生图的落地目录；留空 = 程序目录下的 cloud_out\\images。")
-            ent(t4c, r4c, "cloud_vid_dir", "视频存放",
-                "云端生视频的落地目录；留空 = 程序目录下的 cloud_out\\videos。")
-            fr_out = ttk.Frame(t4c)
-            ttk.Button(fr_out, text="打开图片文件夹", width=14,
+            **左右两列**：左列生图、右列生视频，各自的存放目录与「打开文件夹」放在**本列底部**
+            （原先目录两行夹在中间，扫一眼看不出哪条属于哪边）。
+            轮询间隔与等待上限是**两条链路共用**的（生图万一回的是 task_id 也会就地转轮询），
+            所以不属于任何一列，压在两列下面一条横栏里。
+            费用单价不在这里填：它按模型走，点「成本预估算」开次级窗口。
+            """
+            cols = ttk.Frame(t4c)
+            cols.grid(row=r4c["i"], column=0, columnspan=3, sticky="nw")
+            r4c["i"] += 1
+            col_l = ttk.Frame(cols)
+            col_l.grid(row=0, column=0, sticky="nw")
+            col_r = ttk.Frame(cols)
+            col_r.grid(row=0, column=1, sticky="nw", padx=(30, 0))
+            for f, name in ((col_l, "云端生图"), (col_r, "云端生视频")):
+                ttk.Label(f, text=name, font=("Microsoft YaHei UI", 10, "bold")).grid(
+                    row=0, column=0, columnspan=3, sticky="w", pady=(0, 4))
+            rl, rr = {"i": 1}, {"i": 1}
+
+            ent(col_l, rl, "cloud_img_size", "出图尺寸",
+                "填「宽x高」或「宽*高」都行，发出去前会按这一家的写法换算："
+                "阿里云 1024*1024、智谱与华为 1024x1024、MiniMax 换成比例（16:9）"
+                "或宽高两个整数。超出这一家允许的区间时，服务端会点名报错。"
+                "阿里云：qwen-image-3.0-pro 面积 512×512…2560×2560、"
+                "qwen-image-max 到 1664×1664、wan2.7-image 像素 589824…16777216。",
+                width=11, hint="宽x高", lw=8)
+            ent(col_l, rl, "cloud_img_negative", "生图负向词",
+                "选填。留空 = 不传该参数。", lw=8)
+            ent(col_l, rl, "cloud_img_dir", "图片存放",
+                "云端生图的落地目录；留空 = 程序目录下的 cloud_out\\images。", lw=8)
+            fl = ttk.Frame(col_l)
+            ttk.Button(fl, text="打开图片文件夹", width=14,
                        command=lambda: _open_outdir(
                            cloud_media_dir(self.cfg, "image"),
                            "云端生图的落地目录",
                            "云端模型 → 生图 / 生视频 → 图片存放")).pack(side="left")
-            ttk.Button(fr_out, text="打开视频文件夹", width=14,
+            row(col_l, rl, "输出目录", fl,
+                "产物一落地就在这里。云端地址只活 24 小时，本地这份是唯一的留存；"
+                "目录还没生成时点一下会先建出来再打开。", lw=8)
+
+            ent(col_r, rr, "cloud_video_resolution", "视频分辨率",
+                "各家档位不一样（阿里云/MiniMax 用 720P、1080P、768P、2K 这类标签，"
+                "智谱与华为用 1280x720 这种宽高）。"
+                "留空 = 不传这个参数，用服务端默认（阿里云 Token Plan 的 happyhorse "
+                "不传时按 1080P / 16:9 出）。不知道这一家允许什么时，留空最安全。",
+                hint="留空=默认", lw=8)
+            ent(col_r, rr, "cloud_video_duration", "视频时长",
+                "秒。各家允许区间不同（超范围会被服务端点名报错，原话会显示在对话里）："
+                "happyhorse-1.1-t2v 是 **3~15 秒**；MiniMax Hailuo 官方页是 6/10 秒、"
+                "智谱 cogvideox-3 是 5/10 秒。提交前一律弹一次确认，"
+                "单价填过就报金额、没填就说明以账单为准。", hint="各家不同", lw=8)
+            ent(col_r, rr, "cloud_video_ratio", "画面比例",
+                "例如 16:9 / 9:16 / 1:1；留空 = 不传（画面比例常由素材决定）。", lw=8)
+            ent(col_r, rr, "cloud_vid_dir", "视频存放",
+                "云端生视频的落地目录；留空 = 程序目录下的 cloud_out\\videos。", lw=8)
+            fr = ttk.Frame(col_r)
+            ttk.Button(fr, text="打开视频文件夹", width=14,
                        command=lambda: _open_outdir(
                            cloud_media_dir(self.cfg, "video"),
                            "云端生视频的落地目录",
-                           "云端模型 → 生图 / 生视频 → 视频存放")).pack(side="left", padx=(6, 0))
-            row(t4c, r4c, "输出目录", fr_out,
-                "产物一落地就在这里。云端地址只活 24 小时，本地这份是唯一的留存；"
-                "目录还没生成时点一下会先建出来再打开。")
-            ent(t4c, r4c, "cloud_img_size", "出图尺寸",
-                "填「宽x高」或「宽*高」都行，发出去前会按这一家的写法换算："
-                "阿里云 1024*1024、智谱与华为 1024x1024、MiniMax 换成比例（16:9）"
-                "或宽高两个整数。档位不对服务端会点名报错。"
-                "实测阿里云区间：qwen-image-3.0-pro 面积 512×512…2560×2560、"
-                "qwen-image-max 到 1664×1664、wan2.7-image 像素 589824…16777216。",
-                hint="宽x高")
-            ent(t4c, r4c, "cloud_video_resolution", "视频分辨率",
-                "各家档位不一样（阿里云/MiniMax 用 720P、1080P、768P、2K 这类标签，"
-                "智谱与华为用 1280x720 这种宽高）。"
-                "留空 = 不传这个参数，用服务端默认——实测 Token Plan 的 happyhorse "
-                "不传时给 1080P/16:9。不知道允许值时留空最安全。",
-                hint="留空=默认")
-            ent(t4c, r4c, "cloud_video_duration", "视频时长",
-                "秒。各家允许区间不同（超范围会被服务端点名报错，原话会显示在对话里）："
-                "实测 happyhorse-1.1-t2v 是 **3~15 秒**；官方页里 MiniMax Hailuo 是 6/10 秒、"
-                "智谱 cogvideox-3 是 5/10 秒。按秒计费的服务商，"
-                "提交前会先弹一次费用确认。", hint="各家区间不同")
-            ent(t4c, r4c, "cloud_video_ratio", "画面比例",
-                "例如 16:9 / 9:16 / 1:1；留空 = 不传（画面比例常由素材决定）。")
-            ent(t4c, r4c, "cloud_img_negative", "生图负向词",
-                "选填。留空 = 不传该参数。")
+                           "云端模型 → 生图 / 生视频 → 视频存放")).pack(side="left")
+            row(col_r, rr, "输出目录", fr,
+                "同上：这条链路下它是唯一留存，服务端地址 24 小时就失效。", lw=8)
+
+            ttk.Separator(t4c).grid(row=r4c["i"], column=0, columnspan=3,
+                                    sticky="we", pady=(12, 4))
+            r4c["i"] += 1
+            i = r4c["i"]
+            r4c["i"] += 1
+            tk.Label(t4c, text="生图与生视频共用", foreground="#5a5a5a",
+                     font=("Microsoft YaHei UI", 9, "bold"),
+                     background=widgets.default_bg()).grid(
+                row=i, column=0, columnspan=3, sticky="w")
             ent(t4c, r4c, "cloud_poll_seconds", "轮询间隔",
                 "秒。官方建议 15，且创建/查询/取消三个端点合计 20 QPS——"
-                "调小不会让任务更快完成，只会更早撞上限流。", hint="建议 15")
+                "调小不会让任务更快完成，只会更早撞上限流。", hint="建议 15", lw=8)
             ent(t4c, r4c, "cloud_wait_minutes", "等待上限",
-                "分钟。超了就不再干等，任务留在台账里，重启后对话开头会给「取回」按钮。")
+                "分钟。超了就不再干等，任务留在台账里，重启后对话开头会给「取回」按钮。",
+                lw=8)
+            fc = ttk.Frame(t4c)
+            ttk.Button(fc, text="成本预估算", width=14,
+                       command=self.open_cost_window).pack(side="left")
+            row(t4c, r4c, "费用单价", fc,
+                "单价按**模型**填（同一家不同模型不同价，计费单位还可能一个按秒、一个按条）。"
+                "填了就在提交前的确认框与对话流里报金额；没填就明说「以账单为准」，不编数字。"
+                "生视频无论有没有单价都会二次确认，生图不确认但把价格打在对话流里。", lw=8)
 
-            # ---- 费用单价（只在提交前显示预估用；不填就明说不知道，不编数字）----
-            cands = providers.list_providers(self.cfg)
-            ttk.Separator(t4c).grid(row=r4c["i"], column=0, columnspan=3,
-                                    sticky="we", pady=(12, 8))
-            r4c["i"] += 1
-            pi_var = tk.StringVar(value="0")
-            ps_var = tk.StringVar(value="0")
-            # 下拉里同样只显示名字（原来写的是「id — 名称」，第一眼看去全是英文代号）
-            _pp = [(lb, p) for lb, p in provider_labels(self.cfg)
-                   if p in {x["id"] for x in cands}]
-            _pp_back = {lb: p for lb, p in _pp}
-            price_combo = ttk.Combobox(
-                t4c, state="readonly", width=30,
-                values=[lb for lb, _p in _pp])
+        @section("about", "about")
+        def _t9(t9, r9):
+            """关于页：标志 + 名字 + 版本，加两个入口（新手引导 / 诊断）。
 
-            def _price_pid():
-                return _pp_back.get(price_combo.get(), "")
+            技术信息（运行方式、各种路径、运行库、错误日志）与诊断都搬进了
+            `SettingsMixin.open_diag_window` 那个次级页面：这一页只回答"这是什么软件"，
+            而且要保证**首屏就能点到「新手引导」**—— 它原来排在七行路径 + 一个大结果框
+            下面，第一次用的人翻不到（W 2026-10-01 提的）。
+            """
+            head = tk.Frame(t9, background=widgets.default_bg())
+            i = r9["i"]
+            r9["i"] += 1
+            head.grid(row=i, column=0, columnspan=3, sticky="w", pady=(2, 10))
+            logo = widgets.app_logo(t9)
+            if logo is not None:
+                lab = tk.Label(head, image=logo, background=widgets.default_bg())
+                lab._logo_img = logo    # 引用留在控件上：对象被 GC，图就没了（同 set_app_icon）
+                lab.pack(side="left", padx=(0, 16))
+            names = tk.Frame(head, background=widgets.default_bg())
+            names.pack(side="left")
+            for txt_, font, fg, pady in (
+                    ("LLM Chat", ("Microsoft YaHei UI", 16, "bold"), "#111111", (0, 2)),
+                    ("本地模型工作台 · 版本 %s" % APP_VERSION,
+                     ("Microsoft YaHei UI", 9), "#5a5a5a", (0, 2)),
+                    ("llama.cpp 对话 · sd.cpp 生图生视频 · 云端服务商",
+                     ("Microsoft YaHei UI", 9), "#808080", (0, 0))):
+                ttk.Label(names, text=txt_, foreground=fg, font=font,
+                          wraplength=420, justify="left").pack(anchor="w", pady=pady)
 
-            row(t4c, r4c, "服务商", price_combo,
-                "单价写进这个服务商的记录，只用于提交前的费用预估。")
-            ent(t4c, r4c, None, "元/张", "生图单价（元）。不知道就留 0，界面会明说"
-                                         "「单价未填，费用以账单为准」，不会编一个数出来。",
-                width=8, var=pi_var)
-            ent(t4c, r4c, None, "元/秒", "生视频按秒计费的单价（元/秒）。", width=8, var=ps_var)
-            price_lbl = tk.StringVar(value="")
+            bf = ttk.Frame(t9)
+            i = r9["i"]
+            r9["i"] += 1
+            bf.grid(row=i, column=0, columnspan=3, sticky="w", pady=(0, 6))
+            ttk.Button(bf, text="新手引导", width=12,
+                       command=self.start_guide).pack(side="left", padx=(0, 6))
+            ttk.Button(bf, text="诊断", width=12,
+                       command=self.open_diag_window).pack(side="left")
 
-            def pick_price_provider(*_a):
-                pid = _price_pid()
-                p = providers.get_provider(self.cfg, pid) or {}
-                pi_var.set(str(p.get("price_per_image") or 0))
-                ps_var.set(str(p.get("price_per_second") or 0))
-                price_lbl.set("读到了「%s」的单价。" % p.get("name") if p else "没找到这个服务商。")
+            # 高分屏清晰度（DPI 感知）。**冷切换**：Windows 只允许一个进程标一次，
+            # 窗口一建出来就改不动了，所以这里只能"记住 + 下次生效"，不能骗用户说立刻变。
+            # 判据用 diagnose 现查，而不是照抄配置：配置里写的是"想要哪档"，
+            # 真正跑起来是哪档只有 Windows 知道（清单里带了 dpiAware 时配置就不作数）。
+            from ..core import diagnose as _diag
+            now = _diag._dpi_aware()
+            dpi_var = tk.BooleanVar(value=bool(int(self.cfg.get("dpi_aware", 1) or 0)))
+            dpi_status = tk.StringVar(value="")
+            df = ttk.Frame(t9)
+            i = r9["i"]
+            r9["i"] += 1
+            df.grid(row=i, column=0, columnspan=3, sticky="w", pady=(8, 0))
 
-            price_combo.bind("<<ComboboxSelected>>", pick_price_provider)
+            def set_dpi():
+                self.cfg["dpi_aware"] = 1 if dpi_var.get() else 0
+                save_config(self.cfg)
+                dpi_status.set("已记住，重开程序后生效。")
 
-            def save_price():
-                pid = _price_pid()
-                if not pid:
-                    price_lbl.set("先选一个服务商。")
-                    return
-                try:
-                    a = max(0.0, float(str(pi_var.get()).strip() or 0))
-                    b = max(0.0, float(str(ps_var.get()).strip() or 0))
-                except Exception:
-                    price_lbl.set("单价要填数字（元），留 0 表示不知道。")
-                    return
-                if providers.update_provider(self.cfg, pid, {"price_per_image": a,
-                                                             "price_per_second": b}):
-                    save_config(self.cfg)
-                    price_lbl.set("已写入单价：%.3f 元/张、%.3f 元/秒。" % (a, b))
-                else:
-                    price_lbl.set("这个服务商不在了，没写进去。")
+            ttk.Checkbutton(df, text="高分屏清晰度", variable=dpi_var,
+                            command=set_dpi).pack(side="left")
+            ttk.Label(df, text="现在：%s" % ("已开" if now else "没开"),
+                      foreground="#808080", font=("Microsoft YaHei UI", 9)).pack(
+                side="left", padx=(10, 0))
+            widgets.HelpDot(df, "屏幕缩放不是 100% 时开的：开着 = 界面按显示器的真实像素画，"
+                                 "文字锐利，同一块屏幕上窗口看着比现在小一档；"
+                                 "关着 = 交给 Windows 拉伸，看着大但发虚。\n"
+                                 "改完要**重开程序**才生效（这一项只能冷切换）。"
+                                 "远程桌面里建议关着。").pack(side="left", padx=(6, 0))
+            ttk.Label(t9, textvariable=dpi_status, foreground="#808080", wraplength=360,
+                      justify="left", font=("Microsoft YaHei UI", 9)).grid(
+                row=r9["i"], column=0, columnspan=3, sticky="w")
 
-            pf = ttk.Frame(t4c)
-            pf.grid(row=r4c["i"], column=1, columnspan=2, sticky="w", pady=(2, 4))
-            r4c["i"] += 1
-            ttk.Button(pf, text="写入单价", width=12, command=save_price).pack(side="left")
-            ttk.Label(pf, textvariable=price_lbl, foreground="#808080", wraplength=380,
-                      justify="left", font=("Microsoft YaHei UI", 9)).pack(side="left", padx=8)
-            if cands:
-                price_combo.current(0)
-                pick_price_provider()
+        # ---- 区块 10：本地模型 / 获取引擎（与「模型文件管理」同一页，点叶子滚到这一屏）----
+        @section("files", "eng")
+        def _t10(t10, r10):
+            """本地引擎的获取入口：说清现状 + 把官方 Releases 页送到浏览器里打开。
+
+            为什么不做成「一键下载安装」：预编译包 100~200MB，还要按 CUDA/CPU 分档、
+            解压到指定目录、覆盖旧版本 —— 那等于把网络依赖和破坏性操作塞进一个按钮，
+            下载失败留下半个目录比什么都没下更难收拾。W 2026-10-01 的口径是
+            "实现较难只提供仓库链接也行"，所以这一页只负责**把人送到对的地方、
+            把该看的状态说清楚**；真要动文件的是那三个入口 + 服务参数里的指路。
+            """
+            import webbrowser
+            # (标题, 下载页, 用户在配置里填的那项, 真正要存在才行的文件, 该放哪儿, 目录怎么称呼, 指路在哪, 额外说明)
+            engines = [
+                ("llama.cpp（对话引擎）",
+                 "https://github.com/ggml-org/llama.cpp/releases",
+                 lambda: str((self.cfg.get("exe") or "").strip()),
+                 lambda: str((self.cfg.get("exe") or "").strip()),
+                 lambda: os.path.dirname(str((self.cfg.get("exe") or "").strip())) or APP_DIR,
+                 "llama-server 所在目录",
+                 "本地模型 → 服务参数",
+                 "CUDA 版还要把 cudart 包里的 dll 一起放进同一目录，否则启动时报缺 dll。"),
+                ("stable-diffusion.cpp（生图 / 生视频引擎）",
+                 "https://github.com/leejet/stable-diffusion.cpp/releases",
+                 lambda: str((self.cfg.get("sd_dir") or "").strip()),
+                 lambda: os.path.join(str((self.cfg.get("sd_dir") or "").strip()),
+                                      "sd-cli.exe"),
+                 lambda: str((self.cfg.get("sd_dir") or "").strip()),
+                 "sd.cpp 引擎目录",
+                 "本地模型 → 生图",
+                 "生图与生视频共用这一个可执行文件，只是参数不同；"
+                 "Windows 上文件名是 sd-cli.exe，同级还要有一堆 dll。"),
+            ]
+
+            def _state_of(cfg_of, exe_of):
+                # 判"没指路"要看**用户填的那一项**，不能拿拼出来的文件路径判空：
+                # sd 那项拼的是 os.path.join(sd_dir, "sd-cli.exe")，sd_dir 留空时得到
+                # 相对路径 "sd-cli.exe"，非空但也不存在 —— 报"指了路但找不到"就冤枉人了
+                # （和坑 42 里 `os.path.join("", "output")` 在 CWD 建目录是同一个根子）。
+                if not str(cfg_of() or "").strip():
+                    return "还没指路（「打开目标目录」会告诉你该放去哪儿）", "#b00020"
+                exe = str(exe_of() or "")
+                if os.path.isfile(exe):
+                    return "已就位：" + exe, "#1a7f37"
+                return "指了路但找不到这个文件：" + exe, "#b00020"
+
+            for title, url, cfg_of, exe_of, dir_of, what, setting, note in engines:
+                i = r10["i"]
+                r10["i"] += 1
+                th = tk.Frame(t10, background=widgets.default_bg())
+                th.grid(row=i, column=0, columnspan=3, sticky="w", pady=(10, 2))
+                tk.Label(th, text=title, font=("Microsoft YaHei UI", 10, "bold"),
+                         background=widgets.default_bg(), anchor="w").pack(side="left")
+                widgets.HelpDot(th, "把下载的压缩包**整包解压**到引擎目录（不要只放那一个 exe，"
+                                     "同目录的运行库 dll 都要）。\n" + note +
+                                "\n解压完再回 设置 → %s 把路径指过去。"
+                                "引擎本来就装在这台机器上、只是换了位置的，"
+                                "改指路就行，不用重新下载。" % setting).pack(
+                    side="left", padx=(6, 0))
+                st_var = tk.StringVar(value="")
+                st = ttk.Label(t10, textvariable=st_var, wraplength=600, justify="left",
+                               foreground="#5a5a5a", font=("Microsoft YaHei UI", 9))
+                st.grid(row=r10["i"], column=1, columnspan=2, sticky="w", pady=(0, 2))
+                r10["i"] += 1
+
+                # 循环里定义的回调一律把当轮的值绑成默认参数：不绑的话两个引擎的按钮
+                # 都会指到最后一个（闭包按变量名取，取到的是循环结束后的那一份）
+                def refresh(_e=None, co=cfg_of, so=exe_of, sv=st_var, stl=st):
+                    t_, color = _state_of(co, so)
+                    sv.set(t_)
+                    stl.configure(foreground=color)
+
+                bf = ttk.Frame(t10)
+                bf.grid(row=r10["i"], column=1, columnspan=2, sticky="w", pady=(0, 4))
+                r10["i"] += 1
+
+                def open_page(u=url):
+                    try:
+                        if not webbrowser.open(u):
+                            raise RuntimeError("浏览器没响应")
+                    except Exception as e:
+                        messagebox.showwarning(
+                            "打开下载页", "打不开浏览器（%s）。\n把这个地址复制到浏览器里就行：\n%s"
+                            % (e, u))
+
+                def copy_link(u=url, sv=st_var):
+                    try:
+                        t10.winfo_toplevel().clipboard_clear()
+                        t10.winfo_toplevel().clipboard_append(u)
+                        sv.set("下载页链接已复制，贴到浏览器地址栏就能打开。")
+                    except Exception as e:
+                        messagebox.showwarning("复制链接", "复制失败（%s），"
+                                               "可以直接点「打开下载页」。" % e)
+
+                ttk.Button(bf, text="打开下载页", width=12, command=open_page).pack(
+                    side="left", padx=(0, 6))
+                ttk.Button(bf, text="复制下载链接", width=13, command=copy_link).pack(
+                    side="left", padx=(0, 6))
+                ttk.Button(bf, text="打开目标目录", width=13,
+                           command=lambda d=dir_of, w=what, s=setting: _open_outdir(
+                               d(), w, s)).pack(
+                    side="left", padx=(0, 6))
+                ttk.Button(bf, text="重新检测", width=10, command=refresh).pack(side="left")
+                refresh()
 
         # ---- 区块 8：模型文件管理 ----
         @section("files", "files")
@@ -2050,7 +2572,9 @@ class SettingsMixin:
                    command=lambda: _global_save(restart=True)).pack(side="right", padx=4)
         ttk.Button(bar, text="保存", command=_global_save).pack(side="right")
 
-        nav.select(leaves[0]["key"])      # 首屏：本地模型 → 文本模型 → 生成参数
+        # 首屏默认落在第一个叶子（本地模型 → 文本模型 → 生成参数）；
+        # jump 由输出栏那两个按钮传进来，指到哪个叶子就滚到哪一段
+        nav.select(jump if (jump and nav.find(jump)) else leaves[0]["key"])
 
     def _apply_settings(self, v):
         c = self.cfg
