@@ -6,7 +6,7 @@ import os
 import re
 
 from . import sdprofile
-from .gguf import VIDEO_DIFFUSION_MARKERS, VIDEO_ENCODER_MARKERS, gguf_is_chat_capable, gguf_structure
+from .gguf import gguf_is_chat_capable, gguf_structure
 
 
 def make_alias(filename):

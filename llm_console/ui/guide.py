@@ -29,7 +29,7 @@ def steps(app, missing=None):
         body += ["· %s" % m["title"] for m in missing[:3]]
         if len(missing) > 3:
             body.append("· 另有 %d 项" % (len(missing) - 3))
-        body.append("补齐只要一处：设置 → 本地模型 → 获取引擎。")
+        body.append("补齐只要一处：设置 → 本地模型 → 模型文件与引擎。")
         title = "开始之前"
     else:
         body = ["这个工作台把本地大模型对话、生图生视频和给 agent 用的接口装进一个窗口。",

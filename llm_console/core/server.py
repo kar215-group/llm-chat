@@ -143,8 +143,8 @@ def server_process_alive():
 
     判活按成本递增的三级：
       1) 本程序启动过的句柄 -> poll()，无系统调用；
-      2) 1 秒内的缓存结果（进程状态不会瞬间变化）；
-      3) tasklist 实查一次并写缓存。
+      2) 4 秒内的缓存结果（_ALIVE_TTL；进程状态不会瞬间变化）；
+      3) 进程内 Toolhelp 快照实查一次并写缓存。
     """
     p = _SERVER_PROC
     if p is not None and p.poll() is None:

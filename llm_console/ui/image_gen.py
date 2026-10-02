@@ -7,7 +7,7 @@ import subprocess
 import threading
 import time
 import tkinter as tk
-from tkinter import ttk, scrolledtext, messagebox, filedialog
+from tkinter import ttk
 
 from ..core import cloudjobs, config, providers, sdprofile
 from ..core.models import scan_models
@@ -64,6 +64,10 @@ class ImageGenMixin:
         os.makedirs(outdir, exist_ok=True)
         out = os.path.join(outdir, time.strftime("img_%Y%m%d_%H%M%S") + ".png")
 
+        # 预检都过了才消费输入框与附件：清空摆在调用方（send_message）的话，
+        # "没找到引擎 / 缺配套件"这类失败会把提示词与参考图一起吃掉（坑 133）
+        self.input.delete("1.0", "end")
+        self.clear_attachment()
         self._append("\n【你】\n" + prompt + "\n", "user")
         if ref_img and os.path.isfile(ref_img):
             self._append_image(ref_img, max_w=320)
@@ -124,6 +128,9 @@ class ImageGenMixin:
                          "  目录可在 设置 → 云端模型 → 生图 / 生视频 里改。\n" % e, "error")
             return
         out = os.path.join(outdir, time.strftime("img_%Y%m%d_%H%M%S") + ".png")
+        # 预检（check + 建目录）都过了才消费输入框与附件（坑 133，同本地链路）
+        self.input.delete("1.0", "end")
+        self.clear_attachment()
         self._append("\n【你】\n" + prompt + "\n", "user")
         refs = []
         if ref_img and os.path.isfile(ref_img):
@@ -157,25 +164,49 @@ class ImageGenMixin:
 
     def _cloud_image_worker(self, provider, model, prompt, dest, gen, q, stop_flag,
                             tid="", refs=None):
-        """子线程：只往队列里投事件，绝不碰控件（坑 11/54 的铁律）。"""
+        """子线程：只往队列里投事件，绝不碰控件（坑 11/54 的铁律）。
+
+        `tid` 非空 = 从台账取回旧任务，**不再提交一次**（重复提交就是重复扣钱）。
+        """
+        cur = {"tid": str(tid or "")}      # 当前任务的 task_id（提交后才拿得到）
+
         def persist(status, raw=None):
-            cloudjobs.update_job(tid, status=status)
+            if cur["tid"]:
+                cloudjobs.update_job(cur["tid"], status=str(status))
+
+        def note_tid(t):
+            """一拿到 task_id 就落台账 —— **在轮询之前**。
+
+            异步化的生图（服务端回了 task_id）原来要等整轮轮询结束、worker 收尾时才
+            写台账，中间这段（可能几十分钟）只要断电 / 强杀，这条结果就再也取不回来
+            （产物地址只活 24 小时，本机 23:30 断电）。生视频那条链路一直是提交即登记，
+            这里补齐同一条纪律（坑 136）。
+            """
+            t = str(t or "").strip()
+            if not t or cur["tid"]:
+                return
+            cur["tid"] = t
+            if not cloudjobs.get_job(t):
+                cloudjobs.add_job(t, "image", provider["id"],
+                                  provider.get("name", ""), model, prompt, dest)
+
         try:
             seed = int(self.cfg.get("img_seed", -1) or -1)
         except Exception:
             seed = -1
-        if tid:
+        if cur["tid"]:
             # 取回旧任务：不再提交一次，只查 + 下载
-            res = cloud_media.wait_task(self.cfg, provider, tid, dest, kind="image",
+            res = cloud_media.wait_task(self.cfg, provider, cur["tid"], dest, kind="image",
                                         emit=q.put, stop_flag=stop_flag,
-                                        persist=persist if tid else None, model=model)
+                                        persist=persist, model=model)
         else:
             res = cloud_media.generate_image(
                 self.cfg, provider, model, prompt, dest, emit=q.put,
                 stop_flag=stop_flag,
                 negative=str(self.cfg.get("cloud_img_negative", "") or ""),
                 size=str(self.cfg.get("cloud_img_size", "") or ""), seed=seed,
-                ref_images=list(refs or []))
+                ref_images=list(refs or []),
+                on_task_id=note_tid, persist=persist)
         paths = list(res.get("paths") or [])
         # 真实落地路径可能与服务端给的扩展名一致而与我们的默认值不同（.png vs .jpg），
         # 所以把主图路径回写：_handle_img_exit 是拿 os.path.isfile(_img_out) 判成功的。
@@ -184,17 +215,19 @@ class ImageGenMixin:
             self._img_out = paths[0]
         # 多张产物：主图走原有的内嵌回显，其余的只列路径（一次塞四张进聊天区会把界面撑爆）
         self._img_extra_paths = paths[1:]
-        new_tid = str(res.get("task_id") or "")
+        new_tid = cur["tid"] or str(res.get("task_id") or "")
         if new_tid:
-            # 异步化的生图也要进台账：下载中断过 24 小时就再也拿不到了
-            if not cloudjobs.get_job(new_tid):
-                cloudjobs.add_job(new_tid, "image", provider["id"],
-                                  provider.get("name", ""), model, prompt, dest)
+            note_tid(new_tid)              # 兜底：上面没走到（同步路径直接给 url）就不补
             if paths:
                 cloudjobs.mark_done(new_tid, paths=paths, urls=res.get("urls"),
                                     seconds=res.get("seconds", 0))
             else:
-                cloudjobs.mark_failed(new_tid, res.get("error"), status="unknown")
+                # 保留"还在等 / 超时"这类真实状态（取回时按它决定显示"取回"还是"继续等"），
+                # 只把真出错的那种折成 unknown
+                st = str(res.get("status") or "")
+                cloudjobs.update_job(
+                    new_tid, status=st if st in cloudjobs.OPEN_STATUS else "unknown",
+                    error=str(res.get("error") or "")[:600])
         if not paths:
             q.put(("line", "[ERROR] %s" % (res.get("error") or "云端生图失败")))
         q.put(("exit", 0 if paths else 1, gen))
@@ -260,6 +293,9 @@ class ImageGenMixin:
         if gen != self._img_gen:
             return                      # 过期任务（已被取消并替换），忽略其回调
         elapsed = int(time.time() - self._t0) if getattr(self, "_t0", None) else 0
+        # 这一轮是不是云端，必须在 _cloud_reset 之前读走：那个函数会把标记清掉，
+        # 读晚了失败文案就会把云端的结果说成"引擎没有交付文件"（生视频那侧顺序是对的）
+        cloud = bool(getattr(self, "_cloud_img", False))
         self._img_busy = False
         self._img_proc = None
         self._cloud_reset("image")
@@ -285,14 +321,21 @@ class ImageGenMixin:
             # 布局：提示词行 → 进度行（原位替换）→ 图片独立成行，按钮在图片右侧同行
             self.chat.configure(state="normal")
             try:
-                img = tk.PhotoImage(file=out)
-                factor = max(1, round(img.width() / 500.0))
-                if factor > 1:
-                    img = img.subsample(factor, factor)
-                self._remember_photo(out, img)             # 持引用防 GC（按路径为键）
+                # 缩略图单独一层 try：Tk 只认 PNG / 静态 GIF，云端产物若是 .jpg 就画不出来
+                # ——那只是"没有预览"，**已保存 + 两个打开按钮照给**（坑 132）
+                thumb = None
+                try:
+                    img = tk.PhotoImage(file=out)
+                    factor = max(1, round(img.width() / 500.0))
+                    if factor > 1:
+                        img = img.subsample(factor, factor)
+                    thumb = self._remember_photo(out, img)     # 持引用防 GC（按路径为键）
+                except Exception:
+                    thumb = None
                 self.chat.insert("end", "\n", "meta")      # 图片前补换行：独立成行
-                self.chat.image_create("end", image=img)
-                self.chat.insert("end", "  ", "meta")      # 图片与按钮的间距
+                if thumb is not None:
+                    self.chat.image_create("end", image=thumb)
+                    self.chat.insert("end", "  ", "meta")      # 图片与按钮的间距
                 btn = ttk.Button(self.chat, text="打开原图",
                                  command=lambda p=out: os.startfile(p))
                 self.chat.window_create("end", window=btn)
@@ -314,7 +357,7 @@ class ImageGenMixin:
             self.chat.configure(state="disabled")
         else:
             # 与生视频同一套失败回显：本地是"退出码 + 引擎末几行"，云端是"服务端原话"
-            src = "云端" if getattr(self, "_cloud_img", False) else "引擎"
+            src = "云端" if cloud else "引擎"
             # 前导换行：进度行是 delete(mark,"end") 整行删掉的，连它自带的那个换行一起没了，
             # 不加回来这行就会粘在上一行尾巴上
             self._append("\n🎨 生成失败（%s）。\n"

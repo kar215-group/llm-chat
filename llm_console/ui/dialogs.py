@@ -8,7 +8,7 @@ import subprocess
 import threading
 import time
 import tkinter as tk
-from tkinter import ttk, scrolledtext, messagebox, filedialog
+from tkinter import ttk, messagebox
 
 from ..core.config import save_config
 from ..core.models import scan_models

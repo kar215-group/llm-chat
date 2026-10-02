@@ -9,7 +9,7 @@ import threading
 import time
 import traceback
 import tkinter as tk
-from tkinter import ttk, scrolledtext, messagebox, filedialog
+from tkinter import ttk, scrolledtext, messagebox
 
 from ..core.config import (load_config, DEFAULT_CONFIG, APP_DIR, APP_VERSION,
                            CONFIG_PATH)
@@ -24,11 +24,13 @@ from .chat import ChatMixin
 from .image_gen import ImageGenMixin
 from .video_gen import VideoGenMixin
 from .service import ServiceMixin
-from .models_ui import ModelsMixin
+from .models_ui import ModelsMixin, NO_MODEL_LABEL, model_missing
 from .settings import SettingsMixin
+from .subwindows import SubWindowMixin
 
 
-class App(ChatMixin, ImageGenMixin, VideoGenMixin, ServiceMixin, ModelsMixin, SettingsMixin):
+class App(ChatMixin, ImageGenMixin, VideoGenMixin, ServiceMixin, ModelsMixin, SettingsMixin,
+          SubWindowMixin):
     """主窗口外壳：布局、主轮询、状态灯、退出；其余职责分散在各 Mixin。"""
 
     def __init__(self, root, cfg, first_run=False):
@@ -304,9 +306,13 @@ class App(ChatMixin, ImageGenMixin, VideoGenMixin, ServiceMixin, ModelsMixin, Se
                                 font=("Microsoft YaHei UI", 9))
         # 启动时按当前模型类型给出引导：只说"这一步怎么用"，细节留给选模型时那一句
         # 与设置页 / README（W 的要求：字数变少，不逐条罗列细节）
-        name = display_name(self.cfg, self.cfg["model"])
+        # 「根本没选上模型」和「这是个纯文本模型」是两件事，判据与顶栏共用同一个
+        # （`model_missing`，坑 128）：原来这里无条件拼 display_name，空模型时打成
+        # 「当前模型：（语言模型）」这种半截话
+        missing = model_missing(self.cfg)
+        name = NO_MODEL_LABEL if missing else display_name(self.cfg, self.cfg["model"])
         kind = self.cfg.get("model_kind")
-        if kind in ("image", "video"):
+        if kind in ("image", "video") and not missing:
             # 附图在生图那边是参考图、在生视频这边是**首帧**（-i/--init-img，本机主体是
             # fl2va 变体，写成"参考图"是坑 42 的老错）；云端生视频没有首帧入参，所以那条不承诺
             extra = {"image": "和参考图（可选）",
@@ -317,12 +323,14 @@ class App(ChatMixin, ImageGenMixin, VideoGenMixin, ServiceMixin, ModelsMixin, Se
                          "生成中可点「停止生成」。\n"
                          "────────────────────\n" % (name, extra), "meta")
         else:
+            what = ("模型目录里放一个 .gguf，或在 设置 → 云端模型 填一家密钥，就能选上"
+                    if missing else "点「启动服务」加载，状态变 ● 运行中 后即可对话")
             self._append("本地对话台已就绪。\n"
-                         "当前模型：%s（语言模型）—— 点「启动服务」加载，"
-                         "状态变 ● 运行中 后即可对话。\n"
+                         "当前模型：%s —— %s。\n"
                          "点顶部模型名切换模型；回车发送，Shift+回车换行；"
                          "「停止生成」会保留已生成的内容。\n"
-                         "────────────────────\n" % name, "meta")
+                         "────────────────────\n"
+                         % (name if missing else name + "（语言模型）", what), "meta")
 
     def _build_inputbar(self):
         # 附件预览条（默认隐藏；有附图或文本文件时 pack 到输入区上方）
@@ -569,6 +577,7 @@ class App(ChatMixin, ImageGenMixin, VideoGenMixin, ServiceMixin, ModelsMixin, Se
     # ---- 状态线程 ----
     def _status_loop(self):
         probe_broken = False
+        was_ready = False
         while not self._closing:
             try:
                 # 先做毫秒级本地进程检查：进程不在则无需（也避免）等待 HTTP 超时
@@ -576,11 +585,20 @@ class App(ChatMixin, ImageGenMixin, VideoGenMixin, ServiceMixin, ModelsMixin, Se
                     alive, ready = False, False
                 else:
                     alive, ready = server_state(self.cfg)
-                    # 同步"服务实际加载的模型"（外部 vbs 启动等场景也能对上）
-                    if ready and self._serving_model is None:
+                    # 同步"服务实际加载的模型"：除了"还不知道"（外部 vbs 启动），
+                    # **服务从没就绪变成就绪的那一刻**也要重查一次。只看
+                    # `_serving_model is None` 会漏掉"服务被别人换过模型"——最典型的是
+                    # agent 经 8081 请求了另一个模型（代理会停旧服务、按它要的模型重载），
+                    # 那时界面仍记着旧模型，用户切回旧模型再发消息会被"看起来一致"骗过、
+                    # 实际由新模型回答（坑 134）。只在就绪边沿查一次，稳态不增加请求。
+                    if ready and (self._serving_model is None or not was_ready):
                         name = _query_serving_model(self.cfg)
-                        if name:
+                        if name and name != self._serving_model:
+                            changed = self._serving_model is not None
                             self._serving_model = name
+                            if changed:
+                                self._sq.put(("serving", name))
+                was_ready = ready
             except Exception as e:
                 # 判活现在是**硬抛**语义（进程表快照失败时不静默退回 tasklist，见
                 # core/server._probe_snapshot）：这里必须接住并说出来，否则常驻线程直接
@@ -772,6 +790,13 @@ class App(ChatMixin, ImageGenMixin, VideoGenMixin, ServiceMixin, ModelsMixin, Se
             self._server_alive_flag = item[1]
             self._server_ready_flag = item[2]
             self._render_status(item[1], item[2])
+        elif tag == "serving":
+            # 服务实际加载的模型变了（常见来源：agent 经 8081 让代理换了模型）。
+            # 顶栏跟着刷新 + 说一句，免得"顶栏写着 A、回答其实来自 B"（坑 134）
+            self._update_model_label()
+            self._append("\n[服务] 服务现在加载的是 %s"
+                         "（可能由 agent 经代理切换；再发消息会按当前选中的模型自动换载）。\n"
+                         % display_name(self.cfg, str(item[1])), "meta")
         elif tag == "svc_done":
             _, alive, ready, note, is_error, launched = item
             self._svc_busy = False

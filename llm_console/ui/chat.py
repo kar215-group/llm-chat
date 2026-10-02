@@ -6,9 +6,9 @@ import os
 import threading
 import time
 import tkinter as tk
-from tkinter import ttk, scrolledtext, messagebox, filedialog
+from tkinter import messagebox, filedialog
 
-from ..core import capability, chatlog, providers, textfile
+from ..core import capability, chatlog, history, providers, textfile
 from ..core.config import save_config
 from ..core.models import display_name
 from ..core.params import ctx_for, current_ngl
@@ -137,21 +137,39 @@ class ChatMixin:
             self.set_file_attachment(p)
 
     def set_attachment(self, path):
+        """挂一张待发送的图片。缩略图只影响"好不好看"，**不影响能不能发**。
+
+        Tk 8.6 的 PhotoImage 只认 PNG / 静态 GIF：JPEG / BMP / WEBP 一律报
+        "couldn't recognize data in image file"。而发送走的是**文件路径 / 原始字节**
+        （本地引擎的 `-i`、云端参考图的 data URL、聊天模型的 base64），这些格式都发得出去
+        —— 所以预览失败只降级成"没有缩略图"，绝不拦下（坑 132；以前是弹个警告就 return，
+        于是照片根本挂不上，而下游其实全都支持）。
+        """
+        if not os.path.isfile(path):
+            messagebox.showwarning("图片", "这个文件不在了：\n%s" % path)
+            return
+        thumb = None
         try:
             img = tk.PhotoImage(file=path)
             f = max(1, round(img.width() / 96.0))
             if f > 1:
                 img = img.subsample(f, f)
-        except Exception as e:
-            messagebox.showwarning("图片", "无法读取图片：%s" % e)
-            return
-        self._attach_photo = img
+            thumb = img
+        except Exception:
+            thumb = None                 # 画不出来而已，别拦（坑 132）
+        self._attach_photo = thumb
         self._attached_image = path
         self._attached_file = None
-        self.attach_thumb.configure(image=img)
-        self.attach_name.configure(text="%s（%d KB）"
+        self.attach_thumb.configure(image=thumb or "")
+        if thumb is not None:
+            self.attach_thumb.pack(side="left", padx=(0, 8), before=self.attach_name)
+        else:
+            self.attach_thumb.pack_forget()
+        self.attach_name.configure(text="%s（%d KB）%s"
                                    % (os.path.basename(path),
-                                      max(1, os.path.getsize(path) // 1024)))
+                                      max(1, os.path.getsize(path) // 1024),
+                                      "" if thumb is not None
+                                      else " · 这个格式在这里没有预览（不影响发送）"))
         self._show_attach_bar()
 
     def set_file_attachment(self, path):
@@ -223,8 +241,11 @@ class ChatMixin:
             self.chat.insert("end", "\n", "meta")
             self.chat.see("end")
             self.chat.configure(state="disabled")
-        except Exception as e:
-            self._append("［图片显示失败：%s］\n" % e, "error")
+        except Exception:
+            # 只是"这个格式画不出来"（Tk 只认 PNG/GIF），**不是发送失败**：
+            # 图已经按请求发出去了，所以这里用 meta 说一句，别标成红色错误（坑 132）
+            self._append("（这张图在对话里不显示预览：%s）\n" % os.path.basename(path),
+                         "meta")
 
     # ---- 文本渲染 ----
     def _append(self, text, tag):
@@ -277,8 +298,8 @@ class ChatMixin:
                 return
             if kind == "video" and not self._confirm_cloud_video_spend():
                 return
-            self.input.delete("1.0", "end")
-            self.clear_attachment()
+            # 输入框与附件的清空由 _start_cloud_* 在各自预检（check + 建目录）通过后做，
+            # 与本地链路同一条纪律（坑 133）
             if kind == "image":
                 self._start_chat_image(text, ref_img=ref or None)
             else:
@@ -292,12 +313,12 @@ class ChatMixin:
             choice = self._confirm_shared_vram("生图")
             if choice == "cancel":
                 return                          # 输入内容与附图原样保留，什么都没发生
-            self.input.delete("1.0", "end")
-            ref = self._attached_image
-            self.clear_attachment()
             if choice == "stop":
                 self._release_vram()
-            self._start_chat_image(text, ref_img=ref)
+            # 输入框与附件的清空挪进 _start_chat_image：**预检通过之后**才消费。
+            # 摆在这里先清的话，"没找到引擎 / 缺配套件"这类失败会把刚写的提示词和附图
+            # 一起吃掉，用户在界面上再也找不回来（坑 133）
+            self._start_chat_image(text, ref_img=self._attached_image)
             return
         if self.cfg.get("model_kind") == "video":
             # 与生图同一套形态：输入即提示词，进度原位刷新，结果行带回调按钮
@@ -306,12 +327,10 @@ class ChatMixin:
             choice = self._confirm_shared_vram("生视频")
             if choice == "cancel":
                 return
-            self.input.delete("1.0", "end")
-            ref = self._attached_image
-            self.clear_attachment()
             if choice == "stop":
                 self._release_vram()
-            self._start_chat_video(text, ref_img=ref)
+            # 同上：清空由 _start_chat_video 在预检通过后做（坑 133）
+            self._start_chat_video(text, ref_img=self._attached_image)
             return
         if providers.is_cloud(self.cfg):
             # 云端模型没有"启动服务 / 换载"概念：先做可操作校验，然后直接发。
@@ -416,11 +435,9 @@ class ChatMixin:
         if allow_image or used_file:
             self.clear_attachment()      # 云端不带图时保留附件，方便切回本地 VL 模型再发
 
-        msgs = []
-        if self.cfg.get("system_prompt"):
-            msgs.append({"role": "system", "content": self.cfg["system_prompt"]})
-        msgs += self.history
-        msgs.append(user_msg)
+        # 请求体里的消息一律经 core/history 拼（system 在最前、历史全量携带、最后是这一条）：
+        # 那是"哪些消息进请求体"的唯一出口，上下文压缩将来就插在那儿，别在别处再拼一份
+        msgs = history.request_messages(self.cfg, self.history, user_msg)
         self.history.append(user_msg)
         # 先把"问题"落盘再开线程：连点发送、生成中途强杀 / 断电，用户那句都不会丢。
         # 静默保存 —— "存在哪儿"那句话留到轮末再说，免得回答还没出来先刷一行日志
@@ -529,7 +546,9 @@ class ChatMixin:
         self.input.focus_set()
 
     def clear_chat(self):
-        if self._busy or self._svc_busy or self._img_busy:
+        # 四个忙碌标志一个都不能漏（生视频那条以前没拦：生成中清空会把进度行所在
+        # 的对话区清掉，结果行再贴到清空后的开头，看着像"任务丢了"）
+        if self._busy or self._svc_busy or self._img_busy or self._vid_busy:
             return
         if not messagebox.askyesno("清空对话", "确定清空当前对话记录？"):
             return

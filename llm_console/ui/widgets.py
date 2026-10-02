@@ -116,8 +116,9 @@ class SpotlightGuide(object):
           再用 `-transparentcolor` 把洞那一块设成穿透色。Windows 对 color-key 像素
           **既不画也不收鼠标**，所以被指着的那个控件用户能直接点 —— 引导不该拦着人真操作
           （让他当场点一次「启动服务」看状态灯变，比读三行字有用）。
-      乙 · 四块不透明深色矩形围出亮洞：`-alpha` 或 `-transparentcolor` 有一个不可用就退到这档。
-          视觉是纯黑遮罩而不是半透明，但任何 Tk 都画得出来，不至于"引导打不开"。
+      乙 · 四块不透明深色矩形**只围出洞的轮廓**：`-transparentcolor` 或 `-alpha` 有一个不可用就退到这档。
+          视觉是纯黑遮罩 + 一圈 ACCENT 描边 —— 目标控件**看不见也点不到**（不透明的窗口挡在上面），
+          所以它只是"引导还能打开"的兜底，别指望它和甲档一样能当场操作（Windows 10/11 上实测走的是甲档）。
 
     文案面板的坐标一律钳回可视区内（沿用 HelpDot 那套纪律，坑 75 / 58）；
     主窗口移动或缩放时跟着重算（绑 `<Configure>`，重画前 `after(60)` 去抖，
@@ -136,11 +137,10 @@ class SpotlightGuide(object):
         self.on_close = on_close
         self.i = 0
         self._sync_id = None
-        self._top_id = None                   # 层序自查那个 200ms 定时器的句柄（close 要取消）
+        self._top_id = None                   # 层序自查那个 60ms 定时器的句柄（close 要取消）
         self._fnt = None                      # 折行用的字体度量（第一次画时才建）
         self._rendering = False               # 重入保护：遮罩自己的 Configure 会再触发一次画
         self._last_size = None
-        self._last_canvas = None              # 画布实际尺寸（只用来判断"要不要再同步一次"）
         self._geom = None                     # 我们请求给遮罩的尺寸（画遮罩以它为准）
         self._last_geom = None                # 上一次真的设了几何（没变就别再设，防 Configure 空转）
         self._nav_bar = None                  # 按钮条常驻：只挪位置改文字，不反复建销
@@ -214,7 +214,7 @@ class SpotlightGuide(object):
             return True               # 问不出来就照旧抬升：宁可多抬，别把遮罩丢到下面去
 
     def _keep_top(self):
-        """引导开着期间每 200ms 看一眼：主窗口在前台而遮罩在它下面，就把遮罩抬回来。
+        """引导开着期间每 60ms 看一眼：主窗口在前台而遮罩在它下面，就把遮罩抬回来。
 
         为什么不能只绑 `<Activate>`：`overrideredirect` 的遮罩不归窗口管理器管，
         用户点一下别的程序再回来，Windows 会把**主窗口**抬到遮罩上面，而 Tk 这边
@@ -607,6 +607,10 @@ class HelpDot(object):
 
     # ---- 显示 / 隐藏 ----
     def _enter(self, _e=None):
+        # 先把"离开后延时关闭"那个定时器取消掉：指针在 "?" 上抖一下（离开又马上回来）时，
+        # 旧定时器会在 260ms 后命中 `self._tip` —— 那已经是**新**气泡了，于是刚弹出来的
+        # 说明被上一次的延时顺手销毁（表现为"气泡闪一下就没"）
+        self._cancel_leave()
         if self.dot is None or not self.dot.winfo_ismapped():
             return      # "?" 还没真正显示出来就别弹气泡（会贴在屏幕左上角）
         HelpDot._close_current()
@@ -684,6 +688,11 @@ class SideNav(object):
     不用 ttk.Treeview：那是"文件树"长相，行高/缩进/选中色在 Windows 主题下能调的余地
     很小，而且我们要的是"分组标题不导航、叶子导航"这套语义。自己画一共也就这几十行，
     还能被版式自检逐行量。
+
+    叶子可以带 `"nav_hide": <别的叶子 key>`：**这一项不在左栏成行**，但仍然是导航目标
+    （`find`/`select`/展开祖先都照旧认得它），选中它时高亮记在它写的那个"替身"行上。
+    给"一个左栏项指向同一页里的第二段内容"用 —— 页面由若干区块拼成（设置窗口按页懒建、
+    同页区块一次建齐），左栏不该逼着一页里的每一段都占一行。
     """
 
     BG = "#f6f6f6"
@@ -713,7 +722,10 @@ class SideNav(object):
 
     # ---- 内部 ----
     def _rows(self, items=None, depth=0):
-        """把树拍平成可见行：收起的组不输出其子项，但组本身保留（再点一次就展开）。"""
+        """把树拍平成可见行：收起的组不输出其子项，但组本身保留（再点一次就展开）。
+
+        `nav_hide` 的叶子不在这里出现（它由 `find`/`select` 那条路走，见类注释）。
+        """
         out = []
         for item in (items if items is not None else self.spec):
             kids = item.get("children")
@@ -722,7 +734,7 @@ class SideNav(object):
                 out.append(("group", item, opened, depth))
                 if opened:
                     out += self._rows(kids, depth + 1)
-            else:
+            elif not item.get("nav_hide"):
                 out.append(("leaf", item, None, depth))
         return out
 
@@ -777,14 +789,26 @@ class SideNav(object):
                 return it
         return None
 
+    def _hl_key(self, key):
+        """高亮该记在哪一行：`nav_hide` 的叶子自己不成行，交回它写的替身 key。
+
+        不这么做的话，跳到一个隐藏目标（输出栏的「去配置引擎」就是这么进的）之后
+        左栏一行都不亮，用户不知道自己在这儿的哪里。
+        """
+        it = self.find(key)
+        return (it or {}).get("nav_hide") or key
+
     # ---- 对外 ----
     def select(self, key):
         was = set(self.collapsed)
-        self.selected = key
-        # 选中的叶子若藏在某个收起的组里，先把它的**所有祖先组**展开，否则高亮根本看不见
+        self.selected = self._hl_key(key)
+        # 选中的叶子若藏在收起的组里，先把它的**所有祖先组**展开（三层导航里 g_local 也可能
+        # 是收着的），否则高亮根本看不见。判据要走 `_flatten`（含孙辈）：只比"直接子项"时
+        # 三层叶子会被静默漏掉 —— 页面照切、左栏没有任何一行亮着
         for path in self._paths():
             for grp in path:
-                if any((it.get("key") == key) for it in grp.get("children") or []):
+                kids = self._flatten(grp.get("children"))
+                if any(it.get("key") == key for it in kids):
                     self.collapsed.discard(grp["key"])
         if self.collapsed == was and self._rows_of:
             # 可见行没变、只是高亮在动：改两个 Label 的样式就够。
@@ -853,6 +877,16 @@ def attach_wheel(canvas, viewport=None, step=3):
             if not (hx <= x < hx + holder.winfo_width()
                     and hy <= y < hy + holder.winfo_height()):
                 return None                  # 指针不在可视区：把滚轮让出去
+            # 指针底下若是**自己会滚的控件**（设置页的多行 Text、勾选窗口的 Listbox），
+            # 让给它：抢过来的话两边会同时滚（页面 + 控件），看着像界面在乱动
+            under = canvas.winfo_containing(x, y)
+            while under is not None and under is not canvas:
+                try:
+                    if under.winfo_class() in ("Text", "Listbox"):
+                        return None
+                except Exception:
+                    break
+                under = getattr(under, "master", None)
             delta = getattr(event, "delta", 0) or 0
             if not delta:                     # Linux 走 Button-4/5
                 delta = -120 if getattr(event, "num", 4) == 5 else 120

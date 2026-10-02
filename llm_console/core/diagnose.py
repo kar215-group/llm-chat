@@ -19,7 +19,7 @@ import os
 import sys
 import time
 
-from . import config, gguf, hardware, models, params, secrets
+from . import config, hardware, models, params, secrets
 from .config import write_error          # 只读：本模块不写状态文件（判据见 run_checks 里那条注释）
 
 
@@ -191,7 +191,7 @@ def guide_missing(cfg):
     if q["local"] or q["cloud"]:
         return []
     out = [_c("guide_miss_%d" % i, GROUP_ENGINE, FAIL, t, "", "",
-              ("settings", "本地模型 → 获取引擎"))
+              ("settings", "本地模型 → 模型文件与引擎"))
            for i, t in enumerate(q["missing"])]
     out.append(_c("guide_cloud", GROUP_CLOUD, FAIL, "云端一家 API Key 都没填", "", "",
                   ("settings", "云端模型 → 服务商与密钥")))
@@ -247,7 +247,7 @@ def _apply_paths(out, cloud_ok):
                      % ("就绪" if local_ok else "未就绪",
                         "就绪" if cloud_ok else "未就绪"),
                      "" if (local_ok or cloud_ok) else
-                     "想走本地：在 设置 → 本地模型 → 获取引擎 打开下载页，模型放进模型目录；"
+                     "想走本地：在 设置 → 本地模型 → 模型文件与引擎 打开下载页，模型放进模型目录；"
                      "想走云端：在 设置 → 云端模型 → 服务商与密钥 填密钥，再到「选择模型」里勾上要用那几个。"
                      "两条只要挑通一条。", ("settings", "关于与诊断 → 诊断")))
     return out
@@ -360,7 +360,7 @@ def run_checks(cfg, proxy_running=False, server_running=False, probe_gpu=True):
     elif not os.path.isfile(exe):
         out.append(_c("server_exe", GROUP_ENGINE, FAIL, "找不到推理引擎 llama-server.exe",
                       exe,
-                      "引擎不随本程序分发（许可与体积原因）。在 设置 → 本地模型 → 获取引擎 "
+                      "引擎不随本程序分发（许可与体积原因）。在 设置 → 本地模型 → 模型文件与引擎 "
                       "打开 llama.cpp 的下载页，取 Windows 的 CUDA 包，整包解压到本程序同目录。",
                       ("open_dir", app_dir)))
     else:
@@ -405,8 +405,8 @@ def run_checks(cfg, proxy_running=False, server_running=False, probe_gpu=True):
     mdir = str(cfg.get("models_dir", "") or "")
     if not mdir or not os.path.isdir(mdir):
         out.append(_c("models_dir", GROUP_MODEL, FAIL, "模型目录不存在", mdir or "（未填）",
-                      "把你下载的 .gguf 模型放进这个文件夹，或在 设置 → 模型文件管理 里指到"
-                      "它们实际所在的位置。", ("settings", "模型文件管理")))
+                      "把你下载的 .gguf 模型放进这个文件夹，或在 设置 → 本地模型 → 模型文件与引擎 里指到"
+                      "它们实际所在的位置。", ("settings", "本地模型 → 模型文件与引擎")))
         _dir, chat, img = "", [], []
     else:
         _dir, chat, img = models.scan_models(cfg)
@@ -476,9 +476,9 @@ def run_checks(cfg, proxy_running=False, server_running=False, probe_gpu=True):
     if not sd or not os.path.isfile(cli):
         out.append(_c("sd_cli", GROUP_MEDIA, NA, "本地生图 / 生视频引擎",
                       "没装 stable-diffusion.cpp（只有想用本地生图或生视频时才需要）",
-                      "要用的话在 设置 → 本地模型 → 获取引擎 打开 sd.cpp 的下载页，"
+                      "要用的话在 设置 → 本地模型 → 模型文件与引擎 打开 sd.cpp 的下载页，"
                       "整包解压后到 设置 → 本地模型 → 生图 里指路。",
-                      ("settings", "本地模型 → 获取引擎")))
+                      ("settings", "本地模型 → 模型文件与引擎")))
     else:
         out.append(_c("sd_cli", GROUP_MEDIA, OK, "本地生图 / 生视频引擎", cli))
     _d2, _c2, img2 = ("", [], [])

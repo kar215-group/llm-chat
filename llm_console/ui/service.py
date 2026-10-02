@@ -4,7 +4,7 @@
 import os
 import threading
 import time
-from tkinter import ttk, scrolledtext, messagebox, filedialog
+from tkinter import messagebox
 
 from ..core.models import display_name
 from ..core.params import ctx_for, current_ngl, estimate_kv_gb

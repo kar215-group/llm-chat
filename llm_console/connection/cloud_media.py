@@ -728,11 +728,16 @@ def image_body(model, prompt, size="", negative="", seed=-1, extra=None,
 
 
 def generate_image(cfg, provider, model, prompt, dest, emit=None, stop_flag=None,
-                   negative="", size="", seed=-1, log=None, ref_images=None):
+                   negative="", size="", seed=-1, log=None, ref_images=None,
+                   on_task_id=None, persist=None):
     """云端生图：同步端点出 URL；万一服务端给了 task_id，就地转成轮询。
 
     `ref_images` 是本地参考图路径列表（图生图）。发送前先 `ref_images_error` 预检，
     不合格就地报错，**一次请求都不发**（预检在 UI 侧也做一遍，这里是最后一道）。
+
+    `on_task_id`：拿到 task_id 的那一刻回调一次（**在轮询之前**）—— 调用方靠它把
+    task_id 立刻落进台账，断电 / 强杀之后还能「取回」（产物地址只活 24 小时）。
+    `persist`：透传给 `wait_task`，让轮询过程中的状态也同步进台账。
 
     返回 dict(ok, paths, urls, error, seconds, log_path, raw)。产物 URL 只活 24 小时，
     所以成功判定 = **文件已经在本地**，而不是"服务端回了 200"。
@@ -780,8 +785,15 @@ def generate_image(cfg, provider, model, prompt, dest, emit=None, stop_flag=None
     if not urls and tid:
         # 少数模型即使请求同步也回 task_id：转轮询，别当成失败
         emit(("progress", "☁ 这个模型回了异步任务，改为轮询… task_id=%s" % tid))
+        if on_task_id is not None:
+            # 先把 task_id 交出去（调用方落台账）再开始轮询：这一步晚做，中间断电
+            # 就等于这条结果再也取不回来（坑 136）
+            try:
+                on_task_id(tid)
+            except Exception:
+                pass
         res = wait_task(cfg, provider, tid, dest, kind="image", emit=emit,
-                        stop_flag=stop_flag, log=log, model=model)
+                        stop_flag=stop_flag, log=log, persist=persist, model=model)
         res["seconds"] = round(time.time() - t0, 1)
         if own:
             log.close()

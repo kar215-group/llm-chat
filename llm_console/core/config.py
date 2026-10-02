@@ -30,7 +30,7 @@ CONFIG_PATH = os.path.join(APP_DIR, "gui_config.json")
 
 # 版本号：发版时改这一处（--selfcheck / --version 会打印它）。
 # GitHub Release 的 tag 要与它一致（tag 去掉开头的 v），Actions 工作流会做一致性校验。
-APP_VERSION = "1.0.0"
+APP_VERSION = "1.0.1"
 
 CFG_VERSION = 2
 
@@ -152,7 +152,7 @@ DEFAULT_CONFIG = {
     # ---- 模型别名（key = GGUF 文件名；value = 页面显示的简称）----
     # 一般无需手填：display_name 会用 make_alias() 从文件名自动生成
     "model_aliases": {},
-    # ---- 主菜单显示控制（管理入口：设置 → 模型文件管理 → 管理本地模型…）----
+    # ---- 主菜单显示控制（管理入口：设置 → 模型文件与引擎 →「管理本地模型…」）----
     # 名单里的文件名**只是不进顶部菜单**：设置页清单、扫描补全、8081 代理照旧认得它们。
     # 生图 / 生视频的配套文本编码器（能聊天的 .gguf 零件）常需要收在这里。
     "model_hidden": [],

@@ -795,6 +795,54 @@ def kind_of_current(cfg):
     return model_kind_of(p, sp[1]) if (p and sp) else KIND_TEXT
 
 
+# ---------------------------------------------------------------------------
+# 服务商 / 菜单清单的显示层（v41 从 ui/settings.py 搬进来）
+#
+# 这一层只把注册表翻成"给人看的字"：标签 ↔ pid、某家已进菜单的媒体模型名。
+# 放在 core 而不是留在某一个窗口里，理由与 short_labels / fold_groups 相同：
+# 显示与标识分离（坑 84 / 97），而且现在有**两个**窗口要用（「服务商与密钥」区
+# 与「成本预估算」窗口）—— 留在 UI 里就得让两个窗口互相 import。
+# ---------------------------------------------------------------------------
+
+def provider_labels(cfg):
+    """服务商下拉的显示项 → `[(标签, pid)]`。
+
+    界面上只摆人看得懂的名字（中文优先，DeepSeek / Kimi / MiniMax 这类品牌名保留英文），
+    **不再把 `deepseek`、`aliyun-token-plan` 这种代码 id 摊到屏幕上** —— 原来两处下拉
+    用的是 id 与「id — 名称」，用户看到的是英文代号，认不出哪家是哪家。
+    只有两个服务商重名时（自定义条目同名很常见）才在标签里补 id 区分，否则标签→pid
+    的反查会有歧义。
+    """
+    rows = list_providers(cfg, enabled_only=False)
+    names = [str(p.get("name") or p["id"]) for p in rows]
+    dup = {n for n in names if names.count(n) > 1}
+    out = []
+    for p, n in zip(rows, names):
+        out.append(("%s（%s）" % (n, p["id"]) if n in dup else n, p["id"]))
+    return out
+
+
+def provider_label_for(cfg, pid, fallback=""):
+    """某个服务商给用户看的名字（删除确认、状态回显这类单点场合用）。"""
+    for label, one in provider_labels(cfg):
+        if one == pid:
+            return label
+    return (builtin(pid).get("name") or fallback or pid or "")
+
+
+def media_menu_models(provider):
+    """这家**已勾进主页面菜单**的生图 / 生视频模型名（成本窗口只列这些，W 定的口径）。
+
+    媒体模型大多不在各家 `/models` 清单里（§12.1），只能靠「选择模型」窗口的「直接加入」
+    手填进菜单 —— 所以这里读的是菜单清单而不是清单缓存：没进菜单的模型本来也用不到。
+    """
+    out = []
+    for m in models_in_menu(provider):
+        if model_kind_of(provider, m) in (KIND_IMAGE, KIND_VIDEO):
+            out.append(m)
+    return out
+
+
 def validate_for_send(cfg):
     """发送前的可操作校验；返回 None 表示可以发，否则返回给用户看的原因。"""
     pid = cfg.get("model_provider")

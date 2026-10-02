@@ -4,14 +4,12 @@
 
 
 import os
-import subprocess
-import sys
 import threading
 import tkinter as tk
-from tkinter import ttk, scrolledtext, messagebox, filedialog, font as tkfont
+from tkinter import ttk, messagebox, font as tkfont
 
 from ..core import capability, cloudjobs, providers, sdprofile, secrets, textfile
-from ..core.config import (APP_DIR, APP_VERSION, CFG_VERSION, CONFIG_PATH, FLOAT_KEYS,
+from ..core.config import (APP_DIR, APP_VERSION, CFG_VERSION, FLOAT_KEYS,
                            INT_KEYS, STR_KEYS, cloud_media_dir, gen_api_key, save_config)
 from ..core.models import has_local_chat, scan_models, scan_video_models
 from ..core.params import ctx_for, current_ngl
@@ -25,6 +23,8 @@ from . import widgets
 # 为什么叶子比页面多：本地文本模型的「生成参数」和「服务参数」其实**在同一页里**
 # （两者都是 llama-server 的事，分两页只是来回跳），但服务参数那一段很长，
 # 左栏单列一项点过去就直接定位过去 —— 这也是给"以后配置项更多"留的位置。
+# 反过来也允许：一项管两段（「模型文件与引擎」= 同页的 files + eng），靠
+# widgets.SideNav 的 `nav_hide` 让后一段不在左栏成行，但区块仍被建、jump 仍定位得到。
 # title / help 是给页面用的：title 是区块大标题，help 是标题旁 "?" 里的那段说明。
 # ---------------------------------------------------------------------------
 NAV_SPEC = [
@@ -54,12 +54,16 @@ NAV_SPEC = [
                      "缺任一项在发送前就会点名说缺什么，不会让你白排队。\n"
                      "出片耗时取决于显卡与档位，生成中可随时点「停止生成」。"},
         ]},
-        {"key": "files", "label": "模型文件管理", "page": "files", "section": "files",
+        {"key": "files", "label": "模型文件与引擎", "page": "files", "section": "files",
          "title": "模型文件管理",
          "help": "扫描模型目录、补全每个模型缺的层数 / 上下文 / 视觉投影器记录，"
                  "以及把散落的模型文件整理成「一个模型一个文件夹」。\n"
                  "整理是**先预览、后执行，只移动不删除**；判不出归属的文件保持原位。"},
+        # 「模型文件管理」与「获取引擎」本来就同一页，左栏合成一项（W 2026-10-02：两项
+        # 各自一行是重复劳动）。`nav_hide` 让它不在左栏成行，但区块照旧建、jump="eng"
+        # 照旧滚得到（输出栏「去配置引擎」用的就是它），高亮记在「模型文件与引擎」那行。
         {"key": "eng", "label": "获取引擎", "page": "files", "section": "eng",
+         "nav_hide": "files",
          "title": "获取引擎（llama.cpp 与 sd.cpp）",
          "help": "这一屏只解决「还没装引擎」：告诉你现在缺哪一个、官方下载页在哪、"
                  "该解压到哪儿。\n程序不代你下载 —— 一个预编译包 100~200MB，还要按 "
@@ -118,6 +122,34 @@ def _nav_leaves(items=None, out=None):
     return out
 
 
+def _idle_fill(widget, fn, *args):
+    """把"开页时要读盘 / 读 GGUF 头"的**回显**计算挪到 after_idle。
+
+    为什么：设置页是按页建的，而几个回显值要经 scan_models / detect_file / 
+    scan_video_models（实测 10~20ms/页，模型库越大、放在网络盘上越贵）——
+    那笔钱不该算在"点一下左栏"这一下上。`fn` 只给已经建好的 Label / StringVar 填值，
+    所以延后一拍用户看不见。
+
+    ⚠ 回调里必须自己兜住异常与"控件已销毁"：`after_idle` 是挂在 Tcl 解释器上的，
+    窗口被销毁**不会**取消它，这时去 configure 已销毁的控件会抛 TclError ——
+    只会往崩溃日志里刷噪音（坑 135）。
+    """
+    def _run():
+        try:
+            if widget is not None and not widget.winfo_exists():
+                return
+        except Exception:
+            return
+        try:
+            fn(*args)
+        except Exception:
+            pass
+    try:
+        widget.after_idle(_run)
+    except Exception:
+        _run()
+
+
 def _open_outdir(path, what, setting=""):
     """打开一个输出目录：还没生成就先建，没配就点名该去哪儿配。
 
@@ -145,357 +177,67 @@ def _open_outdir(path, what, setting=""):
 
 NEW_PROVIDER_LABEL = "＋ 新建服务商…"      # 下拉里"还没建起来"那一项的标签
 
+# 数值键的**可接受区间**：只列"填错了会静默出事"的那些 —— 端口填 99999 = 服务起不来、
+# ctx 填十亿 = 启动即 OOM、步数 0 = 引擎报错。不在这张表里的键只查"是不是数字"。
+# 注意 0 的语义：ngl / threads / top_k / vram_gb / ram_gb 的 0 都是"自动 / 全 CPU"，
+# 必须留在区间内（别把 0 当非法值拦掉）。
+_NUM_RANGE = {
+    "port": (1, 65535), "proxy_port": (1, 65535),
+    "ctx": (512, 1048576), "ngl": (0, 999), "threads": (0, 512),
+    "max_tokens": (1, 1048576), "reasoning_budget": (0, 1048576),
+    "seed": (-1, 2147483647), "top_k": (0, 100000),
+    "img_steps": (1, 200), "img_seed": (-1, 2147483647),
+    "vid_steps": (1, 200), "vid_frames": (1, 2000), "vid_fps": (1, 240),
+    "vid_seed": (-1, 2147483647),
+    "cloud_poll_seconds": (5, 3600), "cloud_wait_minutes": (1, 1440),
+    "cloud_image_wait_seconds": (10, 3600), "cloud_submit_timeout": (10, 3600),
+    "cloud_download_seconds": (10, 3600), "cloud_video_duration": (1, 60),
+    "cloud_keep_days": (1, 365),
+}
+_FLOAT_RANGE = {
+    "temperature": (0.0, 10.0), "top_p": (0.0, 1.0), "repeat_penalty": (0.0, 10.0),
+    "vram_gb": (0.0, 4096.0), "ram_gb": (0.0, 4096.0),
+    "img_cfg": (0.0, 100.0), "img_strength": (0.0, 1.0), "vid_cfg": (0.0, 100.0),
+}
 
-def _open_file(path, what):
-    """打开一个**文件**（错误日志这类）。
 
-    不能复用 `_open_outdir`：它会先 `makedirs(path)`，那正好把 `llm-chat-error.log`
-    变成一个同名的**空目录**，日志反而再也写不进去了。
+def _num_error(v):
+    """数值键的预检 → "" 表示没问题，否则返回给用户看的一句话。
+
+    **先验后写**：写一半才发现某个键不合格，cfg 会停在"改了一半"的状态；
+    更要紧的是这些键填错了不是"界面难看"而是真出事（见 `_NUM_RANGE` 的注释），
+    而原来一律静默保留旧值 ——"静默"正是这个项目到处在消灭的东西。
+    报错点名**键名**（设置页里那几行的标签基本就是键名），并写清区间。
     """
-    p = str(path or "").strip()
-    if not p or not os.path.isfile(p):
-        messagebox.showinfo(what, "还没有这个文件：\n  %s\n\n没有过异常退出是好事。" % p)
-        return False
-    try:
-        os.startfile(p)                     # 交给系统默认程序（.log 一般是记事本）
-        return True
-    except Exception as e:
-        messagebox.showwarning(what, "打不开 %s：\n  %s" % (p, e))
-        return False
+    for k in INT_KEYS:
+        if k not in v:
+            continue
+        raw = str(v[k].get()).strip()
+        try:
+            n = int(raw)
+        except Exception:
+            return "「%s」要填整数（现在是 %r）。" % (k, raw[:20])
+        lo, hi = _NUM_RANGE.get(k, (None, None))
+        if lo is not None and not (lo <= n <= hi):
+            return "「%s」要填 %d ~ %d 之间的整数（现在是 %d）。" % (k, lo, hi, n)
+    for k in FLOAT_KEYS:
+        if k not in v:
+            continue
+        raw = str(v[k].get()).strip()
+        try:
+            f = float(raw)
+        except Exception:
+            return "「%s」要填数字（现在是 %r）。" % (k, raw[:20])
+        lo, hi = _FLOAT_RANGE.get(k, (None, None))
+        if lo is not None and not (lo <= f <= hi):
+            return "「%s」要填 %.4g ~ %.4g 之间的数字（现在是 %.4g）。" % (k, lo, hi, f)
+    return ""
 
 
-def provider_labels(cfg):
-    """服务商下拉的显示项 → `[(标签, pid)]`。
-
-    界面上只摆人看得懂的名字（中文优先，DeepSeek / Kimi / MiniMax 这类品牌名保留英文），
-    **不再把 `deepseek`、`aliyun-token-plan` 这种代码 id 摊到屏幕上**——原来两处下拉
-    用的是 id 与「id — 名称」，用户看到的是英文代号，认不出哪家是哪家。
-    只有两个服务商重名时（自定义条目同名很常见）才在标签里补 id 区分，否则标签→pid
-    的反查会有歧义。
-    """
-    rows = providers.list_providers(cfg, enabled_only=False)
-    names = [str(p.get("name") or p["id"]) for p in rows]
-    dup = {n for n in names if names.count(n) > 1}
-    out = []
-    for p, n in zip(rows, names):
-        out.append(("%s（%s）" % (n, p["id"]) if n in dup else n, p["id"]))
-    return out
-
-
-def provider_label_for(cfg, pid, fallback=""):
-    """某个服务商给用户看的名字（删除确认、状态回显这类单点场合用）。"""
-    for label, one in provider_labels(cfg):
-        if one == pid:
-            return label
-    return (providers.builtin(pid).get("name") or fallback or pid or "")
-
-
-def media_menu_models(cfg, p):
-    """这家**已勾进主页面菜单**的生图 / 生视频模型名（成本窗口只列这些，W 定的口径）。
-
-    媒体模型大多不在各家 `/models` 清单里（§12.1），只能靠「选择模型」窗口的「直接加入」
-    手填进菜单 —— 所以这里读的是菜单清单而不是清单缓存：没进菜单的模型本来也用不到。
-    """
-    out = []
-    for m in providers.models_in_menu(p):
-        if providers.model_kind_of(p, m) in (providers.KIND_IMAGE, providers.KIND_VIDEO):
-            out.append(m)
-    return out
 
 
 class SettingsMixin:
     """App 的设置窗口与 API 连接页职责（Mixin）；self._xxx 在运行时经 MRO 解析。"""
-
-    def open_cost_window(self, parent=None):
-        """「成本预估算」次级窗口：单价**按模型**填，点「写入单价」立即落盘。
-
-        为什么不跟设置窗口底部那个「保存」共用一次提交：单价是"给某一次生成估费用"的独立
-        事实，跟"这一页别的档位改不改"没关系（同坑 61 —— 声明与提交不是一件事）。这里点
-        「写入」就 save_config 落地，关窗不隐式保存任何东西，所以顶部那行话把这件事写明了。
-
-        为什么单价挂模型不挂服务商：同一家下 happyhorse-1.0 与 1.1 不同价，MiniMax 的 H3
-        按秒、Hailuo 按条 —— 连**计费单位**都是模型属性，挂在服务商上算出来的就是错价。
-
-        模型下拉只列**已勾进主页面菜单**的媒体模型（W 定的口径）：没进菜单的模型本来发不出去，
-        给它定价没有意义；媒体模型大多不在各家 /models 清单里，要先进 选择模型 → 直接加入。
-        """
-        host = parent or self.root
-        cfg = self.cfg
-        win = tk.Toplevel(host)
-        win.title("成本预估算")
-        win.geometry("620x470")
-        win.minsize(560, 420)
-        win.transient(host)
-
-        ttk.Label(win, text="单价按模型记，只用于提交前的费用预估。不填就在确认框与对话流里"
-                            "明说「以账单为准」，不编数字。点「写入单价」立即生效，"
-                            "不需要到底部「保存」。",
-                  wraplength=580, justify="left", font=("Microsoft YaHei UI", 9)).pack(
-            side="top", fill="x", padx=14, pady=(12, 4))
-        body = ttk.Frame(win)
-        body.pack(side="top", fill="both", expand=True, padx=14, pady=(4, 12))
-        rows = {"i": 0}
-
-        def lrow(label, widget, colspan=2):
-            i = rows["i"]
-            rows["i"] += 1
-            ttk.Label(body, text=label, width=12, anchor="w").grid(
-                row=i, column=0, sticky="nw", padx=(0, 8), pady=5)
-            widget.grid(row=i, column=1, columnspan=colspan, sticky="w", pady=5)
-
-        pid_var = tk.StringVar(value="")
-        model_var = tk.StringVar(value="")
-        price_var = tk.StringVar(value="")
-        unit_var = tk.StringVar(value="秒")
-        status_var = tk.StringVar(value="")
-        _pl = provider_labels(cfg)
-
-        combo_p = ttk.Combobox(body, state="readonly", width=30,
-                               values=[lb for lb, _p in _pl])
-        combo_m = ttk.Combobox(body, state="readonly", width=30,
-                               textvariable=model_var, values=[])
-        combo_u = ttk.Combobox(body, state="readonly", width=8, textvariable=unit_var,
-                               values=list(providers.PRICE_UNITS))
-        # 已填清单用 Text 而不是"拼全部模型名"的 Label（坑 92：状态类 Label 必须定长）
-        lst = tk.Text(body, height=8, width=46, font=("Microsoft YaHei UI", 9),
-                      state="disabled", wrap="none")
-
-        def refresh_list():
-            got = providers.price_table(providers.get_provider(cfg, pid_var.get()))
-            lst.configure(state="normal")
-            lst.delete("1.0", "end")
-            lst.insert("1.0", "（这家一个都没填）" if not got else "")
-            for m in sorted(got):
-                lst.insert("end", "%s    %g 元/%s\n" % (m, got[m]["price"], got[m]["unit"]))
-            lst.configure(state="disabled")
-
-        def load_price():
-            """选中模型就把已填的单价与单位顶上来；没填过按能力给个起始单位。"""
-            p = providers.get_provider(cfg, pid_var.get()) or {}
-            per, unit = providers.price_of(p, model_var.get())
-            if per > 0:
-                price_var.set("%g" % per)
-                unit_var.set(unit)
-            else:
-                price_var.set("")
-                unit_var.set(providers.default_unit(
-                    model_var.get(), providers.model_kind_of(p, model_var.get())))
-
-        def refresh_models():
-            ms = media_menu_models(cfg, providers.get_provider(cfg, pid_var.get()))
-            combo_m.configure(values=ms)
-            model_var.set(model_var.get() if model_var.get() in ms
-                          else (ms[0] if ms else ""))
-            load_price()
-            return ms
-
-        def pick_provider(*_a):
-            for lb, pid in _pl:
-                if lb == combo_p.get():
-                    pid_var.set(pid)
-                    break
-            else:
-                pid_var.set("")
-            if not refresh_models():
-                status_var.set("这家还没有勾进菜单的生图 / 生视频模型："
-                               "先去「选择模型」里加进来（媒体模型名要用「直接加入」）。")
-            else:
-                status_var.set("")
-            refresh_list()
-
-        def write_price(clear=False):
-            pid, model = pid_var.get(), model_var.get()
-            if not pid or not model:
-                status_var.set("先把服务商和模型都选上。")
-                return
-            per, unit = 0.0, ""
-            if not clear:
-                try:
-                    per = float(str(price_var.get()).strip())
-                except Exception:
-                    status_var.set("单价要填数字（元）。要清掉就点「清除该模型单价」。")
-                    return
-                if per <= 0:
-                    status_var.set("单价要大于 0。要清掉就点「清除该模型单价」。")
-                    return
-                unit = unit_var.get()
-            if not providers.set_price(cfg, pid, model, per, unit):
-                status_var.set("这个服务商不在了，没写进去。")
-                return
-            save_config(cfg)
-            refresh_list()
-            status_var.set("已清除「%s」的单价。" % model if per <= 0
-                           else "已写入「%s」%.4g 元/%s。" % (model, per, unit))
-
-        def pick_model(*_a):
-            load_price()
-            status_var.set("")
-
-        combo_p.bind("<<ComboboxSelected>>", pick_provider)
-        combo_m.bind("<<ComboboxSelected>>", pick_model)
-        lrow("服务商", combo_p)
-        lrow("模型", combo_m)
-        lrow("单价（元）", ttk.Entry(body, textvariable=price_var, width=10))
-        lrow("计费单位", combo_u)
-        lrow("已填的模型", lst)
-        btns = ttk.Frame(body)
-        lrow("", btns)
-        ttk.Button(btns, text="写入单价", width=12,
-                   command=lambda: write_price(False)).pack(side="left")
-        ttk.Button(btns, text="清除该模型单价", width=14,
-                   command=lambda: write_price(True)).pack(side="left", padx=(8, 0))
-        ttk.Label(btns, textvariable=status_var, foreground="#808080", wraplength=230,
-                  justify="left", font=("Microsoft YaHei UI", 9)).pack(side="left", padx=(10, 0))
-
-        if _pl:
-            combo_p.current(0)
-            pick_provider()
-        else:
-            status_var.set("还没有可用的服务商。")
-
-    def open_diag_window(self, parent=None):
-        """「诊断」次级页面：这份程序是哪来的、这台机器缺什么、报告怎么拿出去。
-
-        从「关于」页搬进来（W 2026-10-01 定）：关于页回答"这是什么软件"，这一页回答
-        "我这台机器怎么了"。前者是给所有人看的一屏，后者是一堆路径 + 一份能贴走的报告，
-        混在一起时真正要的「新手引导」按钮被挤到第十行下面。
-
-        窗口宽度按**实测**定：标签列 8 字（最长那项「程序所在文件夹」7 字）+ 结果框
-        52 字符 ≈ 572px，加两边 14 的边距要 685px 以上 —— 原来在 802px 的内容区里
-        用 14 字标签列，换到自己的窗口里不重算就会顶出右边界（坑 113 同族）。
-        """
-        from ..core import crashlog, diagnose
-        host = parent or self.root
-        if self._diag_win is not None:
-            try:
-                if self._diag_win.winfo_exists():
-                    self._diag_win.lift()
-                    return self._diag_win
-            except Exception:
-                self._diag_win = None
-
-        win = tk.Toplevel(host)
-        win.title("诊断")
-        # 6 行路径 + 16 行结果框 + 一排四个按钮：实测 660 高会把按钮那排裁掉半截
-        # （截图量出来的，不是估的），给到 740 才全露出来
-        win.geometry("760x740")
-        win.minsize(700, 560)
-        win.transient(host)
-        self._diag_win = win
-
-        body = ttk.Frame(win)
-        body.pack(side="top", fill="both", expand=True, padx=14, pady=(12, 12))
-        body.columnconfigure(2, weight=1)
-        rows = {"i": 0}
-
-        def infolab(label, value):
-            i = rows["i"]
-            rows["i"] += 1
-            ttk.Label(body, text=label, width=8, anchor="w").grid(
-                row=i, column=0, sticky="nw", padx=(0, 8), pady=3)
-            ttk.Label(body, text=str(value), wraplength=560, justify="left",
-                      foreground="#5a5a5a").grid(row=i, column=1, columnspan=2,
-                                                 sticky="w", pady=3)
-
-        frozen = bool(getattr(sys, "frozen", False))
-        infolab("运行方式", "下载的 exe（双击即用）" if frozen
-                else "源码运行（python / pythonw）")
-        infolab("程序位置", APP_DIR)
-        infolab("配置文件", CONFIG_PATH)
-        infolab("密钥文件", os.path.join(APP_DIR, "secrets.json"))
-        infolab("运行库", "%s%s · Tk %s" % ("自带 Python " if frozen else "Python ",
-                                            sys.version.split()[0], tk.TkVersion))
-        infolab("错误日志", crashlog.log_path() if os.path.isfile(crashlog.log_path())
-                else "还没有异常记录")
-
-        status = tk.StringVar(value="")
-        box = tk.Text(body, height=16, width=52, font=("Microsoft YaHei UI", 9),
-                      state="normal", wrap="word")
-        box.insert("1.0", "点「一键诊断」检查这台机器：引擎在不在、模型放对没有、"
-                          "目录能不能写、端口有没有被占。\n"
-                          "这一步只读本地信息 —— 不联网、不启动推理引擎、不碰显卡。")
-        box.configure(state="disabled")
-        i = rows["i"]
-        rows["i"] += 1
-        ttk.Label(body, text="诊断结果", width=8, anchor="w").grid(
-            row=i, column=0, sticky="nw", padx=(0, 8), pady=(10, 3))
-        box.grid(row=i, column=1, columnspan=2, sticky="w")
-
-        def show(text):
-            if not box.winfo_exists():
-                return                      # 窗口可能已经关了：结果没人接就丢掉
-            box.configure(state="normal")
-            box.delete("1.0", "end")
-            box.insert("1.0", text)
-            box.configure(state="disabled")
-
-        def do_diag():
-            """诊断放线程里跑（nvidia-smi 最坏会等 10 秒，不能冻住界面），
-            结果经 _ui_q 回主线程画 —— 子线程绝不碰控件（坑 54）。"""
-            status.set("正在检查…")
-            cfg = dict(self.cfg)
-            mine = bool(getattr(self, "proxy", None) and
-                        getattr(self.proxy, "httpd", None))
-            srv = bool(getattr(self, "_proc", None))
-
-            def merge_gpu():
-                """把这一趟探到的显卡信息**合并**回活的 cfg（只补空的那两项）。
-
-                不能在诊断线程里 `save_config(快照)`：快照是点击那一刻的，nvidia-smi
-                最坏 10 秒才回来，那期间用户保存的设置会被整份盖回去（P1 数据丢失）。
-                """
-                if not str(self.cfg.get("gpu_name", "") or "") and cfg.get("gpu_name"):
-                    self.cfg["gpu_name"] = cfg["gpu_name"]
-                    self.cfg["vram_gb"] = cfg.get("vram_gb", 0)
-                    save_config(self.cfg)
-
-            def work():
-                try:
-                    rs = diagnose.run_checks(cfg, proxy_running=mine, server_running=srv)
-                    f, w = diagnose.summary(rs)
-                    head = ("共 %d 项：%s\n\n" % (
-                        len(rs),
-                        "没发现阻塞问题（%d 项提醒）" % w if not f
-                        else "%d 项需要处理、%d 项提醒" % (f, w)))
-                    txt = head + diagnose.render_text(rs)
-                    self._ui_q.put(lambda: (show(txt), merge_gpu(), status.set(
-                        "有 %d 项需要处理" % f if f else "没发现阻塞问题")))
-                except Exception as e:
-                    msg = "诊断没跑完：%s: %s" % (type(e).__name__, e)
-                    self._ui_q.put(lambda: status.set(msg))
-            threading.Thread(target=work, daemon=True).start()
-
-        def copy_report():
-            body_txt = box.get("1.0", "end").strip()
-            try:
-                win.clipboard_clear()
-                win.clipboard_append(body_txt)
-                status.set("诊断报告已复制到剪贴板，贴给别人就能求助。")
-            except Exception as e:
-                status.set("复制失败（%s）——可以改用「保存诊断报告」。" % e)
-
-        def save_report():
-            body_txt = box.get("1.0", "end").strip()
-            path = os.path.join(APP_DIR, "diagnose.txt")
-            try:
-                with open(path, "w", encoding="utf-8") as f:
-                    f.write(body_txt + "\n")
-                status.set("已保存：%s" % path)
-            except Exception as e:
-                status.set("保存失败：%s: %s" % (type(e).__name__, e))
-
-        bf = ttk.Frame(body)
-        i = rows["i"]
-        rows["i"] += 1
-        bf.grid(row=i, column=1, columnspan=2, sticky="w", pady=(8, 0))
-        for text, fn in (("一键诊断", do_diag), ("复制诊断报告", copy_report),
-                         ("保存诊断报告", save_report),
-                         ("打开错误日志", lambda: _open_file(crashlog.log_path(), "错误日志"))):
-            ttk.Button(bf, text=text, command=fn).pack(side="left", padx=(0, 6))
-        ttk.Label(body, textvariable=status, foreground="#808080", wraplength=520,
-                  justify="left", font=("Microsoft YaHei UI", 9)).grid(
-            row=rows["i"], column=1, columnspan=2, sticky="w", pady=(6, 0))
-        return win
 
     def _api_base_url(self):
         return "http://127.0.0.1:%s/v1" % self.cfg.get("proxy_port", 8081)
@@ -713,12 +455,18 @@ class SettingsMixin:
             row(t2, r2, "n-gpu-layers", e_ngl,
                 "放进显存的层数（当前模型）。新模型会按显存与模型大小自动计算并按模型分别记忆；"
                 "此处修改仅对当前模型生效。0 = 全部放 CPU。")
-            ent(t2, r2, "ctx", "context (-c)",
-                "上下文长度（token）：容纳 系统提示 + 全部对话 + 工具定义 + 回答。"
-                "默认 65536（agent 应用请求较长，建议 ≥32768）；模型原生支持更高可继续上调。"
-                "注意 KV 成本：35B-A3B 约 2.5GB / 64K，而 27B（大 head_dim）约 16GB / 64K——"
-                "此类模型请适当降低，否则占用大量内存/显存（启动时界面会显示 KV 预估）。",
-                hint="按模型记忆")
+            # ctx：与 ngl 同一口径 —— 显示/修改的是"当前模型"的值（按模型记忆）。
+            # 原来这里预填的是全局兜底 cfg["ctx"]，而保存又无条件写进当前模型的记录，
+            # 于是"打开任意一页点保存"就会把该模型自动算出的 context 覆盖掉（坑 130）
+            v["ctx"] = tk.StringVar(value=str(ctx_for(self.cfg)))
+            e_ctx = ttk.Entry(t2, textvariable=v["ctx"], width=8)
+            _row(t2, r2, "context (-c)", e_ctx,
+                 "上下文长度（token）：容纳 系统提示 + 全部对话 + 工具定义 + 回答。"
+                 "按模型分别记忆，切换模型时自动带上各自的值；新模型会按显存与内存预算"
+                 "自动推算一个安全值。KV 成本差别很大：35B-A3B 约 2.5GB / 64K，"
+                 "而 27B（大 head_dim）约 16GB / 64K —— 后者请适当降低，"
+                 "否则占用大量内存/显存（启动时界面会显示 KV 预估）。",
+                 hint="按模型记忆")
             ent(t2, r2, "threads", "threads",
                 "CPU 线程数，0 = 自动。一般留 0。")
             ent(t2, r2, "port", "port",
@@ -779,6 +527,8 @@ class SettingsMixin:
                 img_note.set("识别为：%s（%s）" % (sdprofile.label_of(fid), tail or "自动"))
 
             v["img_family"].trace_add("write", refresh_img_note)
+            # 开页这次回显要读模型文件头，延到开页之后（_idle_fill）；下拉联动那次仍即时算
+            _idle_fill(t3, refresh_img_note)
             ent(t3, r3, "img_vae_file", "VAE 文件",
                 "留空 = 在本族要求的目录里自动找（按文件名含 vae / ae）。放了多个家族"
                 "的权重又挑错时，在这里指名。", width=30, hint="留空=自动")
@@ -929,7 +679,8 @@ class SettingsMixin:
                            "生视频输出目录", "生视频（sd.cpp） → 引擎目录")).pack(side="left")
             row(t3b, r3b, "输出目录", fr_v,
                 "生成结果写在 sd.cpp\\video\\vid_时间戳.webm；引擎每次按需拉起，进程退出即释放显存。")
-            refresh_vid_note()
+            # 开页这次回显可能要扫视频目录，延到开页之后（_idle_fill）；下拉联动那次仍即时算
+            _idle_fill(t3b, refresh_vid_note)
 
         # ---- 区块 5：API 连接（供 agent 调用） ----
         @section("api", "api")
@@ -937,7 +688,14 @@ class SettingsMixin:
 
             self.api_hint_var = tk.StringVar(value="")
             api_key_var = tk.StringVar(value=str(self.cfg.get("api_key", "")))
-            api_model_var = tk.StringVar(value=self._api_model_name() or "（暂无）")
+            # 模型名回显要读一次盘（服务没在跑时走 scan_models），延到开页之后填：
+            # 别挡在"点一下左栏"这一下上（_idle_fill）
+            api_model_var = tk.StringVar(value="（读取中…）")
+
+            def _fill_api_model(var=api_model_var):
+                var.set(self._api_model_name() or "（暂无）")
+
+            _idle_fill(t4, _fill_api_model)
             # 没有本地可转发的文本模型 = 这个功能开不起来：默认关、复选框锁住、顶上说明原因
             usable = has_local_chat(self.cfg)
             self._proxy_usable = usable
@@ -1024,7 +782,9 @@ class SettingsMixin:
             r4["i"] += 1
             ttk.Label(t4, text=("提示：agent 应用的请求通常包含系统提示与工具定义，上下文较长——"
                                 "当前 context=%s，建议 ≥ 16384（在 设置 → 服务参数 调整后重启服务）。"
-                                % self.cfg.get("ctx")),
+                                # 这一页是 agent 场景，显示 agent 那一份（与上面那个输入框同源）；
+                                # 原来显示全局兜底 cfg["ctx"]，与按模型记忆的实际值对不上（坑 130）
+                                % ctx_for(self.cfg, agent=True)),
                       foreground="#b58900", wraplength=740, justify="left",
                       font=("Microsoft YaHei UI", 9)).grid(
                 row=r4["i"], column=0, columnspan=3, sticky="w", pady=(8, 2))
@@ -1086,6 +846,10 @@ class SettingsMixin:
             cat_lbl = tk.StringVar(value="")
             msg_lbl = tk.StringVar(value="")
             menu_lbl = tk.StringVar(value="")
+            # 下面那个 Listbox 的"显示行 → 配置里的原名"对照表。列表里显示的是缩写名
+            # （short_labels），**配置里存的永远是原名** —— 「移出选中项」必须按这张表反查，
+            # 直接拿显示行去比原名会一个都删不掉却报成功（坑 131）
+            lb_map = {}
 
             def provider_snapshot():
                 """把页面上正在编辑的内容拼成 provider 结构（可能还没保存到配置里）。"""
@@ -1155,12 +919,15 @@ class SettingsMixin:
 
             def refresh_menu_list(_e=None):
                 lb.delete(0, "end")
+                lb_map.clear()
                 # 显示缩写（与主页面菜单同一个规则），配置里存的仍是原名
                 lab = providers.short_labels(st["models"])
                 for m in st["models"]:
-                    lb.insert("end", "%s · %s" % (providers.KIND_LABEL[
+                    row_label = "%s · %s" % (providers.KIND_LABEL[
                         providers.model_kind_of({"model_kinds": st["kinds"]}, m)],
-                        lab.get(m, m)))
+                        lab.get(m, m))
+                    lb.insert("end", row_label)
+                    lb_map[row_label] = m
                 menu_lbl.set("加入主页面的模型：%d 个（模型菜单里就出现这些）"
                              % len(st["models"]))
                 cat_lbl.set("该服务商已知模型：%d 个（勾选界面里可选，缓存着不重复请求）"
@@ -1269,8 +1036,8 @@ class SettingsMixin:
                     msg_lbl.set("没有选中要删除的服务商。")
                     return
                 tip = ("「%s」是内置服务商，删掉后下次启动会按内置定义重新出现。"
-                       % provider_label_for(self.cfg, pid)) if providers.is_builtin(pid) \
-                    else "删除「%s」？" % provider_label_for(self.cfg, pid, vars_["name"].get())
+                       % providers.provider_label_for(self.cfg, pid)) if providers.is_builtin(pid) \
+                    else "删除「%s」？" % providers.provider_label_for(self.cfg, pid, vars_["name"].get())
                 if not messagebox.askyesno("删除服务商",
                                            tip + "\n\n模型清单会一起删除，已存密钥也会被清掉。"):
                     return
@@ -1922,11 +1689,17 @@ class SettingsMixin:
                 if not sel:
                     msg_lbl.set("先在列表里选中要移出的模型。")
                     return
-                m = lb.get(sel[0]).split(" · ", 1)[1]
+                # 反查原名（列表里是缩写显示行，配置里是原名 —— 坑 131）
+                m = lb_map.get(lb.get(sel[0]))
+                if not m:
+                    msg_lbl.set("这条没能对上配置里的模型名（列表可能是旧的）："
+                                "重开一次设置窗口再试。")
+                    return
                 st["models"] = [x for x in st["models"] if x != m]
                 commit(silent=True)
                 refresh_menu_list()
-                msg_lbl.set("已从主页面菜单移出「%s」（它仍留在已知模型里，可随时再勾）。" % m)
+                msg_lbl.set("已从主页面菜单移出「%s」（它仍留在已知模型里，可随时再勾）。"
+                            % providers.short_of(m))
 
             # ---------------- 连通性 ----------------
             def do_test():
@@ -1959,7 +1732,7 @@ class SettingsMixin:
 
             def refresh_combo(keep=None):
                 """下拉只列显示名，pid 留在背后用（把代码 id 摆到界面上，用户认不出哪家）。"""
-                pairs = provider_labels(self.cfg)
+                pairs = providers.provider_labels(self.cfg)
                 combo["values"] = [lb for lb, _p in pairs] + [NEW_PROVIDER_LABEL]
                 by_pid = {p: lb for lb, p in pairs}
                 pid = keep if keep in by_pid else (pairs[0][1] if pairs else "")
@@ -1968,7 +1741,7 @@ class SettingsMixin:
 
             def on_pick(_e=None):
                 sel = combo.get()
-                pid = {lb: p for lb, p in provider_labels(self.cfg)}.get(sel, "")
+                pid = {lb: p for lb, p in providers.provider_labels(self.cfg)}.get(sel, "")
                 load(pid)          # 选中"＋ 新建服务商…"时 pid 为空 → 空白新条目
 
             bar = ttk.Frame(t4b)
@@ -2099,7 +1872,10 @@ class SettingsMixin:
                 以前只走 commit()，站在这页改了云端档位再点「保存本页」会被静默丢掉
                 （底部按钮才写回），是个说不通的差别。
                 """
-                self._apply_settings(v)
+                ok, why = self._apply_settings(v)
+                if not ok:
+                    msg_lbl.set(why)
+                    return
                 commit()
                 refresh_combo(keep=st["pid"])
 
@@ -2247,7 +2023,7 @@ class SettingsMixin:
             """关于页：标志 + 名字 + 版本，加两个入口（新手引导 / 诊断）。
 
             技术信息（运行方式、各种路径、运行库、错误日志）与诊断都搬进了
-            `SettingsMixin.open_diag_window` 那个次级页面：这一页只回答"这是什么软件"，
+            `SubWindowMixin.open_diag_window` 那个次级页面：这一页只回答"这是什么软件"，
             而且要保证**首屏就能点到「新手引导」**—— 它原来排在七行路径 + 一个大结果框
             下面，第一次用的人翻不到（W 2026-10-01 提的）。
             """
@@ -2312,7 +2088,8 @@ class SettingsMixin:
                       justify="left", font=("Microsoft YaHei UI", 9)).grid(
                 row=r9["i"], column=0, columnspan=3, sticky="w")
 
-        # ---- 区块 10：本地模型 / 获取引擎（与「模型文件管理」同一页，点叶子滚到这一屏）----
+        # ---- 区块 10：获取引擎（与「模型文件管理」同一页；左栏合成一项「模型文件与引擎」，
+         #      这一段的锚点靠 nav_hide 走 jump="eng" 定位）----
         @section("files", "eng")
         def _t10(t10, r10):
             """本地引擎的获取入口：说清现状 + 把官方 Releases 页送到浏览器里打开。
@@ -2417,21 +2194,32 @@ class SettingsMixin:
                 ttk.Button(bf, text="重新检测", width=10, command=refresh).pack(side="left")
                 refresh()
 
-        # ---- 区块 8：模型文件管理 ----
+        # ---- 区块 8：模型文件管理（左栏「模型文件与引擎」那一项指到这里）----
         @section("files", "files")
         def _t5(t5, r5):
-            _dd, _cc, _ii = scan_models(self.cfg)
             _n_rec = len(self.cfg.get("model_ngl") or {})
             _n_ctx = len(self.cfg.get("model_ctx") or {})
             _n_proj = len(self.cfg.get("model_mmproj") or {})
             _n_hid = len(self.cfg.get("model_hidden") or {})
-            ttk.Label(t5, text=("当前：模型 %d 个（含可看图）｜ 层数记录 %d ｜ context 记录 %d ｜ mmproj 记录 %d ｜ 未进菜单 %d\n"
-                                "打开软件时会自动补全缺失项；下方可手动触发，或整理文件结构。"
-                                % (len(_cc), _n_rec, _n_ctx, _n_proj, _n_hid)),
-                      foreground="#555555", wraplength=760, justify="left",
-                      font=("Microsoft YaHei UI", 9)).grid(
-                row=0, column=0, columnspan=3, sticky="w", pady=(0, 8))
+
+            def _files_head(n_models):
+                return ("当前：模型 %d 个（含可看图）｜ 层数记录 %d ｜ context 记录 %d ｜ "
+                        "mmproj 记录 %d ｜ 未进菜单 %d\n"
+                        "打开软件时会自动补全缺失项；下方可手动触发，或整理文件结构。"
+                        % (n_models, _n_rec, _n_ctx, _n_proj, _n_hid))
+
+            head_lbl = ttk.Label(t5, text="当前：正在读取模型目录…",
+                                 foreground="#555555", wraplength=760, justify="left",
+                                 font=("Microsoft YaHei UI", 9))
+            head_lbl.grid(row=0, column=0, columnspan=3, sticky="w", pady=(0, 8))
             r5["i"] = 1
+
+            def _fill_files_head(lbl=head_lbl):
+                # 这一行要扫一遍盘（每个 .gguf 都要读文件头判类型）：延到开页之后算（_idle_fill）
+                _d2, _chat2, _i2 = scan_models(self.cfg)
+                lbl.configure(text=_files_head(len(_chat2)))
+
+            _idle_fill(t5, _fill_files_head)
 
             frm = ttk.Frame(t5)
             ttk.Button(frm, text="管理本地模型…", width=18,
@@ -2547,7 +2335,10 @@ class SettingsMixin:
             文本 / 生图生视频三段），所以把**这一页已经建起来的**区块钩子按顺序都跑一遍，
             任一个不通过就不关窗 —— 保住"底部保存不会把自己刚填的东西丢掉"这条既有语义。
             """
-            self._apply_settings(v)
+            ok, why = self._apply_settings(v)
+            if not ok:
+                messagebox.showwarning("还没保存", why)
+                return                          # 一个键都没写，窗也不关：改好再来
             for it in (page_items.get(state["page"]) or []):
                 body = bodies.get((it["page"], it["section"]))
                 if body is None or not getattr(body, "_done", False):
@@ -2577,6 +2368,14 @@ class SettingsMixin:
         nav.select(jump if (jump and nav.find(jump)) else leaves[0]["key"])
 
     def _apply_settings(self, v):
+        """把这一页已建区块的输入写回 cfg → `(ok, 给用户看的一句话)`。
+
+        数值键先整份预检（`_num_error`），不合格就**一个键都不写**并回一句人话 ——
+        原来把坏值静默换成旧值，用户看到"保存了"其实没生效（这一轮改成开口）。
+        """
+        bad = _num_error(v)
+        if bad:
+            return False, bad
         c = self.cfg
         # 云端模型没有 ngl / context 概念：跳过按模型记忆，否则会把 "pid::model"
         # 这种复合 id 当文件名写进 model_ngl / model_ctx，污染配置
@@ -2587,8 +2386,11 @@ class SettingsMixin:
                     c[k] = int(str(v[k].get()).strip())
                 except Exception:
                     pass
-        # context 按模型记忆（主页面启动用）：写入当前模型的记录
-        if local and "ctx" in c:
+        # context / ngl 按模型记忆（主页面启动用）：**只有这一页真的建了、用户真的填过**
+        # 才写记录 —— 判据必须看 v（这一页的输入），不能看 c（配置里有没有这个键，恒为真）。
+        # 原来写成 `if local and "ctx" in c:`，于是随便在哪一页点「保存」都会把当前模型的
+        # 层数 / context 记录改写成全局兜底值，静默抹掉自动推算的结果（坑 130）
+        if local and "ctx" in v:
             try:
                 c.setdefault("model_ctx", {})[
                     os.path.basename(c.get("model", ""))] = int(c["ctx"])
@@ -2622,15 +2424,20 @@ class SettingsMixin:
             c["system_prompt"] = v["system_prompt"].get("1.0", "end").rstrip("\n")
         if "show_reasoning" in v:
             c["show_reasoning"] = bool(v["show_reasoning"].get())
-        if "proxy_enabled" in v:
+        # 代理开关：**只有这台机器真能转发时才回写**。没有本地文本模型时那个复选框是锁着的，
+        # 它的值是"偏好 and usable"= False —— 照原样回写就会把用户存过的偏好静默改成关，
+        # 等他后来装好模型也不会自己变回来（§5.6 的口径：锁住的那项默认关，但不吃配置）
+        if "proxy_enabled" in v and self._proxy_usable:
             c["proxy_enabled"] = bool(v["proxy_enabled"].get())
         if "show_usage" in v:
             c["show_usage"] = bool(v["show_usage"].get())
         if "cloud_file_model_decides" in v:
             c["cloud_file_model_decides"] = bool(v["cloud_file_model_decides"].get())
-        # ngl 按模型记忆：设置页改的是"当前模型"的层数（云端模型没有层数概念）
-        if local and isinstance(c.get("ngl"), int):
+        # ngl 按模型记忆：设置页改的是"当前模型"的层数（云端模型没有层数概念）。
+        # 判据同 ctx：看 v，不看 c（坑 130）
+        if local and "ngl" in v:
             c.setdefault("model_ngl", {})[os.path.basename(c["model"])] = c["ngl"]
         c["cfg_version"] = CFG_VERSION
         save_config(c)
         self._update_model_label()
+        return True, ""

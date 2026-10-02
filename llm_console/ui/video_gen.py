@@ -6,7 +6,7 @@ import re
 import subprocess
 import threading
 import time
-from tkinter import ttk, scrolledtext, messagebox, filedialog
+from tkinter import ttk, messagebox
 
 from ..core import cloudjobs, config, providers
 from ..core.media import build_video_cmd, resolve_video_files
@@ -64,6 +64,9 @@ class VideoGenMixin:
         os.makedirs(outdir, exist_ok=True)
         out = os.path.join(outdir, time.strftime("vid_%Y%m%d_%H%M%S") + "." + ext)
 
+        # 预检都过了才消费输入框与附件（坑 133，同生图链路）
+        self.input.delete("1.0", "end")
+        self.clear_attachment()
         self._append("\n【你】\n" + prompt + "\n", "user")
         if ref_img and os.path.isfile(ref_img):
             self._append_image(ref_img, max_w=320)
@@ -162,6 +165,9 @@ class VideoGenMixin:
             return
         # 扩展名只是默认值：真实落地名由产物 URL 决定（服务端给的是 MP4）
         out = os.path.join(outdir, time.strftime("vid_%Y%m%d_%H%M%S") + ".mp4")
+        # 预检（check + 建目录 + 费用确认已在调用方）都过了才消费输入框与附件（坑 133）
+        self.input.delete("1.0", "end")
+        self.clear_attachment()
         self._append("\n【你】\n" + prompt + "\n", "user")
         gen, q, stop = self._cloud_begin("video")
         self._cloud_pid = str(provider["id"])
