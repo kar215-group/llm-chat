@@ -583,7 +583,7 @@ class ChatMixin:
         self.chat.see("end")
         self.chat.configure(state="disabled")
 
-    # ---- API 连接（代理）辅助 ----
+    # ---- 本地模型 API（代理）辅助 ----
     def _copy_text(self, text, label):
         """复制到剪贴板并在 API 页给出轻提示。"""
         try:

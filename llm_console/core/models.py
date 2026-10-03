@@ -13,7 +13,11 @@ def make_alias(filename):
     """从 GGUF 文件名自动生成简短别名（纯代码规则，不询问模型）。
 
     例：Qwen3.8-27B-UD-Q3_K_XL.gguf -> qwen3.8-27b-q3
-        超长的社区微调名会按连字符截断到 30 字符以内。
+        超长的社区微调名按**连字符**截到 30 字符以内。
+
+    ⚠ 这个上限管的是**模型菜单**（点开后的列表），那里一行放得下 30 字。
+    **主页面顶栏**另有更严的上限（`TOPBAR_ALIAS_MAX`），走 `short_alias()` ——
+    别把顶栏的限长做到这里来，那会把菜单里的名字也一起砍短（W 2026-10-03）。
     """
     s = filename.strip()
     if s.lower().endswith(".gguf"):
@@ -29,11 +33,34 @@ def make_alias(filename):
     for w in ("ud-", "ggml-", "instruct", "-hf", "-i1", "-imatrix"):
         s = s.replace(w, "-")
     s = re.sub(r"-{2,}", "-", s).strip("-")
-    # 超长别名（社区微调名）：按连字符截到 30 字符内，避免顶栏被挤爆
+    # 超长别名（社区微调名）：按连字符截断，避免列表行被撑爆
     if len(s) > 30:
         cut = s[:30]
         s = cut[:cut.rfind("-")] if "-" in cut else cut
     return s or filename
+
+
+# 主页面顶栏的别名上限：顶栏左边是模型名、右边挤着 5 个按钮，预算只有这么多。
+# 实测（2026-10-03，DPI-aware 严格档）：顶栏右侧 5 个按钮各要 120px，左侧状态灯
+# 约 80px，模型名超过约 22 字就会开始挤右侧按钮。**只作用于顶栏**。
+TOPBAR_ALIAS_MAX = 22
+
+
+def short_alias(name, limit=TOPBAR_ALIAS_MAX):
+    """把显示名再压到 `limit` 字以内 —— **只给主页面顶栏用**。
+
+    与 `make_alias` 分开是刻意的：菜单里一行放得下 30 字，砍短了反而认不出模型
+    （W 2026-10-03）。截断规则同样是"切在连字符前"，实在切不动才加省略号。
+    """
+    s = str(name or "").strip()
+    if len(s) <= limit:
+        return s
+    cut = s[:limit]
+    if "-" in cut[8:]:                 # 中段还有连字符：保住"家族-规模-量化"三段
+        return cut[:cut.rfind("-")]
+    return cut.rstrip("-") + "…"
+
+
 
 def display_name(cfg, path):
     """页面显示名：显式别名 > 代码自动生成的简称。"""
@@ -220,7 +247,8 @@ def find_vl_pairs(cfg):
     """扫描模型目录（顶层 + 每个一级子目录），返回 {可看图模型完整路径: mmproj 完整路径}。
 
     配对规则：同目录内 mmproj-*.gguf 与模型文件名，去掉 mmproj 前缀与量化/精度后缀
-    归一化后相等或互为包含即视为配对。
+    归一化后相等或互为包含即视为配对；名字里不带模型信息的投影器（`mmproj-BF16.gguf`）
+    在同目录只有一个能聊天的模型时也认给它。
     """
     d = cfg.get("models_dir") or os.path.dirname(cfg.get("model", "")) or "."
     img_dir = cfg.get("image_model_dir") or os.path.join(d, IMAGE_SUBDIR)
@@ -242,24 +270,45 @@ def find_vl_pairs(cfg):
                            if n.lower().endswith(".gguf"))
         except Exception:
             continue
-        projs = [n for n in names if n.lower().startswith("mmproj")]
+
+        def _proj_tail(pj):
+            """投影器名字里"属于哪个模型"的那一段：剥掉 mmproj 前缀与量化/精度后缀。
+            剥完是空的 = 这个名字一点模型信息都没带（`mmproj-BF16.gguf` 就是这种）。"""
+            pn = _norm_model_name(pj)
+            if pn.startswith("mmproj"):
+                pn = pn[len("mmproj"):].strip("-")
+            return pn
+
+        # 同目录里"能当聊天模型"的文件。跳过 mmproj 与"真扩散主体"：必须用带结构判据的
+        # is_diffusion_file —— 纯名字的 is_image_diffusion 认不出 Qwen3VL 这类文本编码器
+        # （它没有元数据以外的特征），一旦把它跳掉，mmproj 配对就整条断掉 —— 生图的
+        # --llm_vision 和"能不能看图"都靠这张表（原来靠文件名写死才碰巧没出问题）。
+        chats = []
         for m in names:
-            # 跳过 mmproj 与"真扩散主体"。这里必须用带结构判据的 is_diffusion_file：
-            # 纯名字的 is_image_diffusion 认不出 Qwen3VL 这类文本编码器（它没有元数据以外
-            # 的特征），一旦把它跳掉，mmproj 配对就整条断掉 —— 生图的 --llm_vision
-            # 和"能不能看图"都靠这张表（原来靠文件名写死才碰巧没出问题）。
-            if m.lower().startswith("mmproj") or is_diffusion_file(os.path.join(folder, m)):
+            if m.lower().startswith("mmproj"):
                 continue
-            if not gguf_is_chat_capable(os.path.join(folder, m)):
+            fp = os.path.join(folder, m)
+            if is_diffusion_file(fp) or not gguf_is_chat_capable(fp):
                 continue
+            chats.append(m)
+
+        projs = [n for n in names if n.lower().startswith("mmproj")]
+        for m in chats:
             mn = _norm_model_name(m)
             for pj in projs:
-                pn = _norm_model_name(pj)
-                if pn.startswith("mmproj"):
-                    pn = pn[len("mmproj"):].strip("-")
+                pn = _proj_tail(pj)
                 if pn and (pn == mn or pn in mn or mn in pn):
                     pairs[os.path.join(folder, m)] = os.path.join(folder, pj)
                     break
+        # 名字里没有模型信息的投影器（`mmproj-BF16.gguf` 这种）无法按名字归属。只有当
+        # **整个目录里只有一个能聊天的模型**、且它还没配上投影器时，才认这个投影器是它的；
+        # 有多个候选就无从判断，宁可留空让人在设置页手工指定，也不能猜。
+        # （真机 W 的 Qwen3.8-27B 就是"模型名 + mmproj-BF16"这个形态，原来一律判成纯文本。）
+        unnamed = [pj for pj in projs if not _proj_tail(pj)]
+        if len(unnamed) == 1:
+            left = [m for m in chats if os.path.join(folder, m) not in pairs]
+            if len(left) == 1:
+                pairs[os.path.join(folder, left[0])] = os.path.join(folder, unnamed[0])
     return pairs
 
 def is_vl_model(cfg, path):

@@ -5,13 +5,13 @@ import os
 import threading
 import time
 import tkinter as tk
-from tkinter import ttk, messagebox
+from tkinter import ttk, messagebox, font as tkfont
 
 from ..core import capability, localmodels, providers, secrets
 from ..core.config import save_config
 from ..core.hardware import detect_gpu, detect_ram_gb
 from ..core.models import (apply_tidy, display_name, find_vl_pairs, plan_tidy,
-                           scan_models, scan_video_models)
+                          scan_models, scan_video_models, short_alias)
 from ..core.params import auto_ctx_for_model, compute_ngl, current_ngl
 from ..core.media import resolve_video_files
 from ..connection.stream import request_auto_alias
@@ -59,7 +59,9 @@ class ModelsMixin:
             v = capability.resolve(self.cfg)["verdict"]
             tag = {capability.YES: "", capability.NO: "（纯文本）",
                    capability.UNKNOWN: "（看图未确认）"}[v]
-        self.model_var.set(display_name(self.cfg, cur) + tag + "  ▾")
+        # 顶栏限长只在这一处生效（core.models.short_alias）：模型菜单那边仍用完整的
+        # display_name —— 菜单一行放得下 30 字，砍短反而认不出模型（W 2026-10-03）。
+        self.model_var.set(short_alias(display_name(self.cfg, cur)) + tag + "  ▾")
 
     # ---- 模型切换 ----
     def show_model_menu(self):
@@ -303,6 +305,7 @@ class ModelsMixin:
         hid = localmodels.hidden_set(self.cfg)
         cur_base = os.path.basename(os.path.normpath(str(self.cfg.get("model", "") or "")))
         win = tk.Toplevel(host)
+        win.withdraw()          # 先藏起来，摆正了再显示（否则左上角闪一下）
         win.title("管理本地模型")
         win.geometry("640x560")
         win.minsize(520, 400)
@@ -315,19 +318,16 @@ class ModelsMixin:
                 vars_[base] = tk.BooleanVar(value=base not in hid)
             return vars_[base]
 
-        def clip(s, n=34):
-            """行标签要短：勾选框 + 右侧说明挤在同一行里，横向不可滚（ScrollPage 只竖滚），
-            名字太长就会把说明推出窗口外（真机量到 909 > 640）。"""
-            return s if len(s) <= n else s[:n - 1] + "…"
-
-        # ---- 顶部说明（两行，定长：状态类 Label 拼长文案会引发整页重排，见坑 92）----
+        # ---- 顶部说明（定长：状态类 Label 拼长文案会引发整页重排，见坑 92）----
         head = ttk.Frame(win)
         head.pack(fill="x", padx=12, pady=(10, 2))
-        ttk.Label(head, wraplength=480, justify="left",
-                  text="取消勾选 = 不在顶部模型菜单里出现；文件不动，"
-                       "设置页清单与 8081 代理照旧认得它。").pack(anchor="w")
-        ttk.Label(head, text="模型目录：%s" % (inv["dir"] or "（未设置）"),
-                  foreground="#555555").pack(anchor="w")
+        ttk.Label(head, text="不勾选则不显示于主页面").pack(anchor="w")
+        dir_lbl = ttk.Label(head, text="模型目录：%s" % (inv["dir"] or "（未设置）"),
+                            foreground="#555555")
+        dir_lbl.pack(anchor="w", fill="x")
+        # 路径只占一行的话，长了就被窗口右沿硬切掉（无滚动条）：跟着可用宽度换行
+        head.bind("<Configure>",
+                  lambda e: dir_lbl.configure(wraplength=max(e.width - 24, 120)))
 
         # ---- 底部按钮：先 pack 到底部，中间内容再矮也只压列表 ----
         bot = ttk.Frame(win)
@@ -358,17 +358,84 @@ class ModelsMixin:
         body = ttk.Frame(page.inner)
         page.set_page(body)
 
+        # ---- 行标签按**窗口实际宽度**裁，不再是固定字数（坑 106 / 坑 92）----
+        # 勾选框那行的名字与右侧说明挤在同一行、横向不可滚（ScrollPage 只竖滚），只能从
+        # "显示"这一侧解决。原来一律 clip(34) 字：窗口拉大也照样是省略号 —— 现在量着可用
+        # 像素裁，窗口一宽就少截 / 不截（与设置页那份云端模型清单同一个做法）。
+        _font = tkfont.nametofont("TkDefaultFont")
+        _probe = ttk.Checkbutton(win, text="")
+        win.update_idletasks()
+        _CK_PAD = _probe.winfo_reqwidth()   # 勾选框本体（指示器 + 内边距），不含文字
+        _probe.destroy()
+        _PADX = 34                          # ScrollPage.set_page 给内容的左右留白 16 + 18
+        fits = []                           # [(控件, 完整文本, 右侧要留出的像素)]
+        _last_w = {"v": -1}                 # 上一次裁过的画布宽度（尺寸没变就不重画，坑 121）
+
+        def fit_text(s, avail):
+            if avail <= 24 or _font.measure(s) <= avail:
+                return s
+            lo, hi = 0, len(s)           # 最大的 k 使 s[:k] + "…" 放得下；0 = 一个都放不下
+            while lo < hi:
+                mid = (lo + hi + 1) // 2
+                if _font.measure(s[:mid] + "…") <= avail:
+                    lo = mid
+                else:
+                    hi = mid - 1
+            return (s[:lo] if lo else s[:1]) + "…"
+
+        def fit(w, full, reserved=0):
+            """登记一段文本：窗口拉宽时它跟着少截 / 不截。"""
+            if _last_w["v"] > 1:        # 已经量过宽度 → 后加进来的行当场就裁对
+                w.configure(text=fit_text(full, _last_w["v"] - reserved))
+            fits.append((w, full, reserved))
+
+        def fit_all():
+            avail = page.canvas.winfo_width()
+            if avail < 60:              # 还没量到真宽度（未映射时是 1）：等第一次 <Configure>
+                return
+            alive = []
+            for w, full, reserved in fits:
+                try:
+                    if not w.winfo_exists():
+                        continue
+                except Exception:
+                    continue
+                alive.append((w, full, reserved))
+                w.configure(text=fit_text(full, avail - reserved))
+            fits[:] = alive
+
+        def on_resize(_e=None):
+            w = page.canvas.winfo_width()
+            if w == _last_w["v"]:
+                return
+            _last_w["v"] = w
+            fit_all()
+
+        page.canvas.bind("<Configure>", on_resize, add="+")
+
         def row(parent, base, label, info, indent=0):
             """一行：勾选框 + 右侧短说明。返回那行的 Frame（折叠时按它 grid_remove）。"""
             f = ttk.Frame(parent)
-            ttk.Checkbutton(f, text=label, variable=var(base),
-                            command=lambda b=base: sync_note()).pack(
-                side="left", padx=(indent, 0))
+            cb = ttk.Checkbutton(f, text=label, variable=var(base),
+                                 command=lambda b=base: sync_note())
+            cb.pack(side="left", padx=(indent, 0))
+            reserved = _PADX + _CK_PAD + indent
             if info:
                 # 当前选中的模型单独标出来：它被移出菜单后顶栏仍显示它，得让人看出来
-                ttk.Label(f, text=("* 当前  " if base == cur_base else "") + info,
-                          foreground="#7a7a7a").pack(side="right")
+                txt = ("* 当前  " if base == cur_base else "") + info
+                ttk.Label(f, text=txt, foreground="#7a7a7a").pack(side="right")
+                reserved += _font.measure(txt) + 8
+            fit(cb, label, reserved)
             return f
+
+        def plain(parent, text, color, row_no, indent=18):
+            """没有勾选框的说明行（零件 / 可选件 / 缺件），同样按宽度裁。"""
+            f = ttk.Frame(parent)
+            lbl = ttk.Label(f, text=text, foreground=color)
+            lbl.pack(side="left", padx=(indent, 0))
+            fit(lbl, text, _PADX + indent + 6)
+            f.grid(row=row_no, column=0, sticky="w")
+            return row_no + 1
 
         def sync_note():
             n = sum(1 for v in vars_.values() if not v.get())
@@ -383,34 +450,22 @@ class ModelsMixin:
             不再多解释 —— 想知道为什么自己去看文件头，界面不是讲义（W 明确要求）。
             """
             for s in e["slots"]:
-                txt = "%s：%s" % (s["label"], clip(s["base"], 30))
+                txt = "%s：%s" % (s["label"], s["base"])
                 if s.get("menu"):
-                    f = row(parent, s["base"], clip(txt), "配套编码器", indent=18)
+                    f = row(parent, s["base"], txt, "配套编码器", indent=18)
                     f.grid(row=row_no, column=0, sticky="w")
                     row_no += 1
                     continue
                 if s.get("no_chat"):
                     txt += "（不可对话）"
-                f = ttk.Frame(parent)
-                ttk.Label(f, text="○ " + clip(txt, 46),
-                          foreground="#a15c00" if s.get("no_chat") else "#6a6a6a").pack(
-                    side="left", padx=(18, 0))
-                f.grid(row=row_no, column=0, sticky="w")
-                row_no += 1
+                row_no = plain(parent, "○ " + txt,
+                               "#a15c00" if s.get("no_chat") else "#6a6a6a", row_no)
             # 可选件缺失 = 不影响出图出片、只是少个功能：弱提示，不进主页面拦截
             for o in e.get("optional_missing") or []:
-                f = ttk.Frame(parent)
-                ttk.Label(f, text="○ 可选：%s" % clip(o["label"], 20),
-                          foreground="#8a8a8a").pack(side="left", padx=(18, 0))
-                f.grid(row=row_no, column=0, sticky="w")
-                row_no += 1
+                row_no = plain(parent, "○ 可选：%s" % o["label"], "#8a8a8a", row_no)
             # 必需件缺失 = 现在就用不了：主页面发提示词时也会拦下并点名，这里同步列出来
             for miss in e["missing"][:3]:
-                f = ttk.Frame(parent)
-                ttk.Label(f, text="○ 缺：%s" % clip(miss, 30),
-                          foreground="#c01c28").pack(side="left", padx=(18, 0))
-                f.grid(row=row_no, column=0, sticky="w")
-                row_no += 1
+                row_no = plain(parent, "○ 缺：%s" % miss, "#c01c28", row_no)
             return row_no
 
         def section(title, entries, kind):
@@ -451,7 +506,7 @@ class ModelsMixin:
                 """把一批条目画进 parent 的 grid（行号自己数：主体行 + 它的零件行）。"""
                 r = 0
                 for e in items:
-                    f = row(parent, e["base"], clip(e["name"]), _entry_info(e))
+                    f = row(parent, e["base"], e["name"], _entry_info(e))
                     f.grid(row=r, column=0, sticky="we")
                     r += 1
                     if kind != "chat":
@@ -506,10 +561,15 @@ class ModelsMixin:
                 bits.append("%.1f GB" % (e["size_mb"] / 1024.0)
                             if e["size_mb"] >= 1024 else "%d MB" % e["size_mb"])
             if e["kind"] == "chat":
-                bits.append("看图" if e["mmproj"] else "纯文本")
+                # 看图 / 纯文本走**统一判据**（与顶栏、模型菜单同一个入口），不再只看
+                # find_vl_pairs 的配对结果：投影器名字里不带模型名时（`mmproj-BF16.gguf`）
+                # 配对判据可能认不出来，而配置里那条 model_mmproj 是认得的 —— 两处说法
+                # 打架就是这么来的（坑 128）。真机 W 的 Qwen3.8-27B 原来在这里被写成纯文本。
+                verdict = capability.resolve_key(self.cfg, e["base"], kind="chat")["verdict"]
+                bits.append({capability.YES: "看图",
+                             capability.NO: "纯文本"}.get(verdict, "看图未确认"))
                 if e.get("companion_of"):
-                    bits.append("配套：%s" % "、".join(
-                        clip(x, 18) for x in e["companion_of"][:1]))
+                    bits.append("配套：%s" % "、".join(e["companion_of"][:1]))
             elif e["kind"] in ("image", "video"):
                 bits.append(e["family"] or "通用")
                 # 两类缺失分开写：必需件缺 = 现在就用不了；可选件缺 = 只是少个功能
@@ -523,6 +583,7 @@ class ModelsMixin:
         section("生图模型", inv["image"], "image")
         section("生视频模型", inv["video"], "video")
         sync_note()
+        widgets.center_on(win, host)   # 摆到触发它的窗口正中，别落在屏幕左上角
         return win
 
     # ---- 该机器硬件属性 + 新模型 GPU 层数自动计算 ----
@@ -658,6 +719,7 @@ class ModelsMixin:
                                 "顶层没有散落的模型（或它们已在各自文件夹内）。")
             return
         dlg = tk.Toplevel(self.root)
+        dlg.withdraw()          # 同上
         dlg.title("整理模型文件夹 - 预览")
         dlg.geometry("780x520")
         dlg.transient(self.root)
@@ -703,6 +765,7 @@ class ModelsMixin:
 
         ttk.Button(bar, text="执行", command=do_exec).pack(side="right", padx=4)
         ttk.Button(bar, text="取消", command=dlg.destroy).pack(side="right")
+        widgets.center_on(dlg, self.root)   # 摆到主窗口正中，别落在屏幕左上角
 
     # ---- 模型自动命名 ----
     def _auto_alias_thread(self, path):

@@ -170,7 +170,7 @@ class ServiceMixin:
         threading.Thread(target=work, daemon=True).start()
 
     def on_start_restart_agent(self):
-        """API 连接页的服务按钮：以 agent 场景的 context 启动/重启。"""
+        """本地模型 API 页的服务按钮：以 agent 场景的 context 启动/重启。"""
         if self._svc_busy or self.cfg.get("model_kind") == "image":
             return
         if self._server_alive_flag:

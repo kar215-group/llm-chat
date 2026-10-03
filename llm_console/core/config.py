@@ -30,7 +30,7 @@ CONFIG_PATH = os.path.join(APP_DIR, "gui_config.json")
 
 # 版本号：发版时改这一处（--selfcheck / --version 会打印它）。
 # GitHub Release 的 tag 要与它一致（tag 去掉开头的 v），Actions 工作流会做一致性校验。
-APP_VERSION = "1.0.3beta2"
+APP_VERSION = "1.0.3"
 
 CFG_VERSION = 2
 
@@ -58,7 +58,7 @@ DEFAULT_CONFIG = {
     "model_ngl": {},               # 每个模型各自的 GPU 层数（key = GGUF 文件名；由探测生成）
     "ctx": 10240,                  # 全局兜底 context（安全优先；正常由按模型自动匹配覆盖）
     "model_ctx": {},               # 按模型：主页面启动时使用的 context
-    "model_ctx_api": {},           # 按模型：agent（API 连接页/代理）启动时使用的 context
+    "model_ctx_api": {},           # 按模型：agent（本地模型 API 页/代理）启动时使用的 context
     "model_mmproj": {},            # 按模型：视觉投影器路径（有则模型可看图）
     "model_image_input": {},       # 按模型：图片输入能力人工声明 {"yes"/"no"}，无记录=自动判据
     "threads": 0,                  # CPU 线程数，0=自动
@@ -123,7 +123,7 @@ DEFAULT_CONFIG = {
     "vid_params_backend": "",      # 权重放置后端：留空=引擎自定；显存不足可填 diffusion=disk
     "vid_extra_args": "--vae-tiling --temporal-tiling",  # 分块解码，降显存占用
     "vid_seed": -1,
-    # ---- API 连接（OpenAI 兼容中转，供 agent 应用调用）----
+    # ---- 本地模型 API（OpenAI 兼容中转，供 agent 应用调用）----
     "proxy_enabled": True,
     "proxy_port": 8081,
     "proxy_last_model": "",        # 上次成功经代理加载的模型（回退用）

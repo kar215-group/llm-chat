@@ -757,7 +757,7 @@ class SideNav(object):
             lbl.bind("<Button-1>", lambda e, k=item["key"]: self.toggle(k))
         else:
             sel = self.selected == item["key"]
-            # 顶层叶子（"API 连接""关于与诊断"）本身就是第一级标题，没选中也要加粗：
+            # 顶层叶子（"本地模型 API""关于与诊断"）本身就是第一级标题，没选中也要加粗：
             # 和缩在组里的二级项（"文本模型"）在层级上要一眼能分出来（W 2026-10-01 定）。
             self._top_of[item["key"]] = (depth == 0)
             lbl = tk.Label(self.body, text=item["label"],
@@ -984,3 +984,44 @@ class ScrollPage(object):
         frac = (y - int(offset)) / float(total)
         # 末尾的区块要允许滚到底：moveto(1.0) 正好把最后一屏露出来
         self.canvas.yview_moveto(max(0.0, min(1.0, frac)))
+
+
+def center_on(win, host=None):
+    """把这个 Toplevel 摆到 `host`（默认它的父窗口）水平居中、垂直略偏上，然后显示它。
+
+    为什么需要：Tk 的 Toplevel **不给位置就摆在屏幕左上角**，于是「API Key」「选择模型」
+    「诊断」「成本预估算」「管理本地模型」这一排子窗口全叠在左上角，跟它们所属的设置页
+    分离。`dialogs.ExitDialog` 早就是自己算居中的，这里把那套算法收成一个地方。
+
+    **调用前先把窗口 `withdraw()` 掉**（见各处建窗的写法），否则会看到"先在左上角闪一下
+    再跳到中间"—— Tk 的 Toplevel 一创建就映射，`center_on` 是在控件建完之后才调到的，
+    那中间几十毫秒用户看得见（W 2026-10-03 报的"管理本地模型"按钮闪动就是这个）。
+
+    量尺寸前必须 `update_idletasks()`：还没布局过时 `winfo_width()` 是 1。
+    子窗口比宿主大时 `max(0, ...)` 把它顶到宿主左上角，不会算出负坐标把窗口甩出屏幕。
+    """
+    host = host or win.master
+    try:
+        win.update_idletasks()
+        # ⚠ `withdraw()` 状态下 `winfo_width()` 返回 **1**，直接退回 `winfo_reqwidth()`
+        # 会拿到"内容的自然尺寸"（一个标签只有几十 px），而不是我们显式设定的窗口大小 ——
+        # 那样居中算出来是错的。所以先试 winfo_width，不成（<=1）就从 geometry 串里
+        # 把显式设定的大小读回来；连 geometry 都没设（API Key 那种靠内容定尺寸的）
+        # 才用 reqwidth，那正是它该用的值。
+        w, h = win.winfo_width(), win.winfo_height()
+        if w <= 1 or h <= 1:
+            size = win.geometry().split("+")[0]          # "400x300"
+            if "x" in size:
+                sw, sh = size.split("x", 1)
+                w, h = int(sw), int(sh)
+            else:
+                w, h = win.winfo_reqwidth(), win.winfo_reqheight()
+        x = host.winfo_rootx() + max(0, (host.winfo_width() - w) // 2)
+        y = host.winfo_rooty() + max(0, (host.winfo_height() - h) // 3)
+        win.geometry("%dx%d+%d+%d" % (w, h, x, y))
+    except Exception:
+        pass               # 宿主已销毁 / 还没映射：位置摆不了就不摆，别为它炸出调用方
+    try:
+        win.deiconify()     # 摆好再显示：用户第一眼看到的就是最终位置
+    except Exception:
+        pass

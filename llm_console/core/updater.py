@@ -136,10 +136,11 @@ def fetch_releases(fetch=None, timeout=TIMEOUT, repo=REPO):
     try:
         data = json.loads(body.decode("utf-8") if isinstance(body, bytes) else body)
     except Exception:
-        raise UpdaterError("GitHub 返回的不是 JSON（可能被公司网关拦了或限流），"
-                           "换个网络环境或过一会儿再试。")
+        raise UpdaterError("检查更新失败：GitHub 返回的不是 JSON（可能被公司网关拦截），"
+                           "请换个网络环境后重试。%s" % _MANUAL)
     if not isinstance(data, list):
-        raise UpdaterError("GitHub 返回的 releases 格式不对（应是一个数组）。")
+        raise UpdaterError("检查更新失败：GitHub 返回的数据格式不对，"
+                           "请稍后重试。%s" % _MANUAL)
     return data
 
 
@@ -165,15 +166,27 @@ def pick_latest(items, channel=CHANNEL_STABLE):
 
 # ---------------------------------------------------------------- 错误翻人话
 
-_HTTP_HINT = {
-    403: "GitHub 拒绝了这次访问（多半是未认证请求被限流）",
-    404: "GitHub 上找不到这个仓库的 Release",
-    422: "GitHub 不认这个请求",
-    429: "请求太密，被 GitHub 限流了",
-    500: "GitHub 服务端出错",
-    502: "GitHub 网关无响应",
-    503: "GitHub 服务暂时不可用",
-}
+_MANUAL = "请手动前往仓库下载更新。"
+
+
+def _reason(code):
+    """HTTP 状态码 →（原因短语，下一步短语）。
+
+    统一句式（W 2026-10-03 定的口径）：**一句原因 + 一句下一步**，不把服务端原话、
+    接口地址、字段名往外倒 —— 用户要看到的是"我该做什么"。每条都以"手动去仓库下载"
+    收尾：客户端这条路失败时，手动那条永远走得通。
+    """
+    return {
+        403: ("GitHub 拒绝了此次访问",
+              "请几分钟后重试；若仍失败，可能是当前出口 IP 被 GitHub 限流"),
+        404: ("GitHub 上找不到该仓库的 Release",
+              "若仓库仍是私有则属预期，公开之后即可正常使用"),
+        422: ("GitHub 不认这个请求", "请稍后重试"),
+        429: ("请求太密，被 GitHub 限流了", "请过几分钟再点一次"),
+        500: ("GitHub 服务端出错", "请稍后重试"),
+        502: ("GitHub 网关无响应", "请稍后重试"),
+        503: ("GitHub 服务暂时不可用", "请稍后重试"),
+    }.get(int(code), ("GitHub 返回异常状态（HTTP %s）" % code, "请稍后重试"))
 
 
 def _safe_read(err, limit=400):
@@ -184,29 +197,22 @@ def _safe_read(err, limit=400):
 
 
 def humanize_http(code, body="", repo=REPO):
-    """HTTP 错误 → 可直接显示的一句话（含下一步该做什么）。"""
-    if int(code) == 404:
-        return ("在 GitHub 上找不到 %s 的 Release（404）。\n"
-                "仓库现在很可能还是私有的 —— 匿名访问查不到，这是预期内的；"
-                "等仓库转成 public 之后这个按钮就能正常用了。" % repo)
-    msg = "检查更新失败：%s。" % _HTTP_HINT.get(int(code), "HTTP %s" % code)
-    if int(code) in (403, 429):
-        msg += "\n过几分钟再点一次；若经常这样，多半是这条网络出口被 GitHub 限流了。"
-    said = (body or "").strip()
-    return msg + ("\n服务端原话：%s" % said[:200] if said else "")
+    """HTTP 错误 → 可直接显示的一句话（原因 + 下一步 + 手动兜底）。"""
+    why, how = _reason(code)
+    return "检查更新失败：%s，%s。%s" % (why, how, _MANUAL)
 
 
 def humanize_net(err, repo=REPO):
-    """网络层错误（DNS / 连不上 / 超时）→ 人话。"""
-    url = API_RELEASES % repo
+    """网络层错误（DNS / 连不上 / 超时）→ 同一句式。"""
     if isinstance(err, urllib.error.URLError):
         reason = getattr(err, "reason", err)
         if isinstance(reason, TimeoutError) or "timed out" in str(reason).lower():
-            return ("连 GitHub 超时了（%d 秒内没响应）：%s\n检查一下网络或代理设置。"
-                    % (TIMEOUT, url))
-        return ("连不上 GitHub：%s\n看一遍网络 / 代理 / 防火墙"
-                "（公司网络常把 api.github.com 拦掉）：%s" % (reason, url))
-    return "检查更新出错：%s" % err
+            return ("检查更新失败：连接 GitHub 超时（%d 秒内无响应），"
+                    "请检查网络或代理设置后重试。%s" % (TIMEOUT, _MANUAL))
+        return ("检查更新失败：连不上 GitHub（%s），"
+                "请检查网络 / 代理 / 防火墙（公司网络常拦 api.github.com）。%s"
+                % (reason, _MANUAL))
+    return "检查更新失败：%s。%s" % (err, _MANUAL)
 
 
 # ---------------------------------------------------------------- 主入口
@@ -243,8 +249,8 @@ def check_update(current, channel=CHANNEL_STABLE, fetch=None, timeout=TIMEOUT,
     if latest is None:
         return STATE_ERROR, {
             "channel": channel, "current": current,
-            "msg": "%s 上没找到可比的%s Release（版本号写法认不出来的条目已跳过）。"
-                   % (repo, channel_label(channel))}
+            "msg": "检查更新失败：%s 上没找到可比的%s Release，"
+                   "请稍后重试。%s" % (repo, channel_label(channel), _MANUAL)}
 
     tag = str(latest.get("tag_name") or "")
     info = {

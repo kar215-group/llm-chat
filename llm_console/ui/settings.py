@@ -95,11 +95,12 @@ NAV_SPEC = [
                  "没来得及下载的会记进任务台账，重启后对话开头给「取回」按钮。\n"
                  "费用单价按模型填，点「成本预估算」开窗口。"},
     ]},
-    {"key": "api", "label": "API 连接", "page": "api", "section": "api",
-     "title": "API 连接（供 agent 调用）",
-     "help": "把「当前选中的本地模型」暴露成一个 OpenAI 兼容的本地端点，给 agent 或其他"
-             "软件直接调用。\n这个代理**只转本地模型**：云端对话在应用内直连服务商，"
-             "生图 / 生视频不经这里。"},
+    {"key": "api", "label": "本地模型 API", "page": "api", "section": "api",
+     "title": "本地模型 API（给 agent 或其他软件调用）",
+     "help": "把**当前选中的本地模型**变成一个 OpenAI 兼容的本机地址，别的软件\n"
+             "（agent、脚本、外部工具）填这个地址就能直接用它。\n"
+             "只转本地模型：云端对话在应用内直连服务商，生图 / 生视频也不经这里。\n"
+             "要有本地文本模型才开得起 —— 没有时这一项默认关闭。"},
     {"key": "about", "label": "关于与诊断", "page": "about", "section": "about",
      "title": "关于与诊断",
      "help": "这一页认亲：这是什么软件、什么版本、怎么重看新手引导。\n"
@@ -259,7 +260,7 @@ def _num_error(v):
 
 
 class SettingsMixin:
-    """App 的设置窗口与 API 连接页职责（Mixin）；self._xxx 在运行时经 MRO 解析。"""
+    """App 的设置窗口与本地模型 API 页职责（Mixin）；self._xxx 在运行时经 MRO 解析。"""
 
     def _api_base_url(self):
         return "http://127.0.0.1:%s/v1" % self.cfg.get("proxy_port", 8081)
@@ -325,8 +326,12 @@ class SettingsMixin:
         self._settings_win = win
         win.title("设置")
         # 实测（DPI-aware，scaling≈2.0）滚动内容最宽一行需要 789px，左栏 232 + 边距
-        # → 默认与最小宽都取 1080：横向不能滚，缩一点就是"右边那半截永远看不见"
-        win.geometry("1080x740")
+        # → 最小宽取 1080：横向不能滚，缩一点就是"右边那半截永远看不见"
+        # 默认宽 1160（W 2026-10-03 要求"适当调大"）：1080 下实测内容最右到 1070、
+        # 只剩 10px 余量；「模型族」那类"下拉 + 右侧状态回显"同排的版式最怕这个余量
+        # （见 13坑 76）。**只加宽、不加高**：1366x768 扣任务栏约 728 可用，
+        # 740 的高度已经贴边，加高会把按钮那排挤出屏幕。
+        win.geometry("1160x740")
         win.minsize(1080, 600)
         win.transient(self.root)
 
@@ -341,6 +346,9 @@ class SettingsMixin:
         v = {}
         save_hooks = {}            # 区块 frame → callable()→(ok, 说明)：底部「保存」要一起跑
         registry = {}              # (page, section) → 构建函数
+        # page → [callable]：**切进这一页时**要跑的事（目前只有关于页「进页自动查更新」）。
+        # 区块是懒建的，回调在区块构建时才登记进来，所以执行放在 _nav_select 建完区块之后。
+        enter_hooks = {}
         bodies = {}                # (page, section) → 区块内容 frame（已建则复用）
         heads = {}                 # (page, section) → 区块标题 frame（锚点）
         page_frames = {}           # page → 页面 frame
@@ -582,7 +590,7 @@ class SettingsMixin:
                  hint="按模型记忆")
             ent(t2, r2, "port", "port",
                 "API 端口，默认 8080。")
-            # 这里**不放 api_key**：那是「API 连接」那一页的事（生成 / 复制 / 撤销都在一处），
+            # 这里**不放 api_key**：那是「本地模型 API」那一页的事（生成 / 复制 / 撤销都在一处），
             # 摆在服务参数里会让人以为改完要重启服务，也会和那页的只读回显对不上
             v["reasoning_mode"] = tk.StringVar(value=str(self.cfg.get("reasoning_mode", "default")))
             cb = ttk.Combobox(t2, textvariable=v["reasoning_mode"],
@@ -653,14 +661,14 @@ class SettingsMixin:
             fam_cb = ttk.Combobox(t3, textvariable=v["img_family"], state="readonly",
                                   width=24, values=[t for _c, t in _fam_opts])
             img_note = tk.StringVar(value="")
+            _fam_row = r3["i"]
             row(t3, r3, "模型族", fam_cb,
-                "程序会按权重文件里的张量名与文件名自动认这一族需要哪些配套件、该传什么参数。"
-                "认错了（比如社区改过名）就在这里手动指定；选「通用」= 只把扫到的文件喂给引擎，"
-                "不附加任何家族专属参数。", hint="一般用自动")
+                "按权重文件里的张量名与文件名自动认这一族；认错了在这里手动指定。")
+            # 「识别为…」与下拉同排、贴它右侧（W 2026-10-03）：状态回显归控件那一侧，
+            # 不另起一行占版心
             ttk.Label(t3, textvariable=img_note, foreground="#5a6a7a",
                       font=("Microsoft YaHei UI", 9)).grid(
-                row=r3["i"], column=1, columnspan=2, sticky="w", pady=(0, 4))
-            r3["i"] += 1
+                row=_fam_row, column=2, sticky="w", padx=(0, 10), pady=5)
 
             def refresh_img_note(*_a):
                 """回显识别结果。内容长度固定 —— 状态类 Label 拼长文案会引发整页重排（坑 92）。"""
@@ -668,11 +676,10 @@ class SettingsMixin:
                     v["img_family"].get(), sdprofile.AUTO)
                 img_dir = str(self.cfg.get("image_model_dir", "") or "")
                 path = os.path.join(img_dir, str(self.cfg.get("img_model_file", "") or ""))
-                fid, basis, _ = sdprofile.detect_file(path, kind="image", forced=code)
-                tail = {"measure": "认得准", "user": "你手动指定",
-                        "hint": "按名字猜的", "none": "认不出，走通用"}.get(
-                    basis, "")
-                img_note.set("识别为：%s（%s）" % (sdprofile.label_of(fid), tail or "自动"))
+                fid, _basis, _ = sdprofile.detect_file(path, kind="image", forced=code)
+                # 只留族名：「通用（只喂文件）」那半句是给下拉看的说明，贴进状态行
+                # 会把这一行顶出右边界（坑 76）
+                img_note.set("识别为：%s" % sdprofile.label_of(fid).split("（")[0])
 
             v["img_family"].trace_add("write", refresh_img_note)
             # 开页这次回显要读模型文件头，延到开页之后（_idle_fill）；下拉联动那次仍即时算
@@ -774,14 +781,12 @@ class SettingsMixin:
             vfile_cb = ttk.Combobox(t3b, textvariable=v["vid_family"], state="readonly",
                                     width=24, values=[t for _c, t in _vf_opts])
             vid_note = tk.StringVar(value="")
+            _vfam_row = r3b["i"]
             row(t3b, r3b, "模型族", vfile_cb,
-                "同一套 sd-cli 可以跑多个视频家族（MiniMax-H3 / Wan 2.1-2.2 / LTX / "
-                "HunyuanVideo）。认族决定「要哪些配套件、要不要负向提示词、尺寸对齐到几」。"
-                "认错了就在这里手动指定；选通用则只把找到的文件交给引擎。", hint="一般用自动")
+                "同一套 sd-cli 可以跑多个视频家族；认错了在这里手动指定。")
             ttk.Label(t3b, textvariable=vid_note, foreground="#5a6a7a",
                       font=("Microsoft YaHei UI", 9)).grid(
-                row=r3b["i"], column=1, columnspan=2, sticky="w", pady=(0, 4))
-            r3b["i"] += 1
+                row=_vfam_row, column=2, sticky="w", padx=(0, 10), pady=5)
 
             def refresh_vid_note(*_a):
                 """回显识别结果：一行、长度固定（长文案塞进 Label 会引发整页重排，坑 92）。"""
@@ -796,11 +801,8 @@ class SettingsMixin:
                         path = vids[0] if vids else ""
                     except Exception:
                         path = ""
-                fid, basis, _ = sdprofile.detect_file(path, kind="video", forced=code)
-                tail = {"measure": "认得准", "user": "你手动指定",
-                        "hint": "按名字猜的", "none": "认不出，走通用"}.get(
-                    basis, "")
-                vid_note.set("识别为：%s（%s）" % (sdprofile.label_of(fid), tail or "自动"))
+                fid, _basis, _ = sdprofile.detect_file(path, kind="video", forced=code)
+                vid_note.set("识别为：%s" % sdprofile.label_of(fid).split("（")[0])
 
             v["vid_family"].trace_add("write", refresh_vid_note)
             ent(t3b, r3b, "vid_size", "分辨率",
@@ -873,7 +875,7 @@ class SettingsMixin:
             # 开页这次回显可能要扫视频目录，延到开页之后（_idle_fill）；下拉联动那次仍即时算
             _idle_fill(t3b, refresh_vid_note)
 
-        # ---- 区块 5：API 连接（供 agent 调用） ----
+        # ---- 区块 5：本地模型 API（给 agent 调用） ----
         @section("api", "api")
         def _t4(t4, r4):
 
@@ -892,8 +894,8 @@ class SettingsMixin:
             self._proxy_usable = usable
 
             running = self.proxy.running()
-            ttk.Label(t4, text=("代理运行中 · 端口 %s" % self.cfg.get("proxy_port", 8081))
-                      if running else "代理未运行（可在此页启用并重启代理）",
+            ttk.Label(t4, text=("已启用 · 端口 %s" % self.cfg.get("proxy_port", 8081))
+                      if running else "未启用（在本页开启后，agent 才能连上）",
                       foreground="#1a7f37" if running else "#999999",
                       font=("Microsoft YaHei UI", 10, "bold")).grid(
                 row=0, column=0, columnspan=3, sticky="w", pady=(0, 8))
@@ -906,22 +908,22 @@ class SettingsMixin:
                 r4["i"] += 1
 
             fr = ttk.Frame(t4)
-            ttk.Button(fr, text="启动 / 重启服务（agent 场景）", width=22,
+            ttk.Button(fr, text="启动 / 重启服务（给 agent 用）", width=22,
                        command=self.on_start_restart_agent).pack(side="left", padx=(0, 6))
             ttk.Button(fr, text="停止服务", width=10,
                        command=self.stop_server_async).pack(side="left", padx=(0, 6))
             ttk.Button(fr, text="重启代理", width=10,
                        command=self._restart_proxy).pack(side="left")
             row(t4, r4, "服务控制", fr,
-                "与主页面是同一个服务，但以 agent 场景的 context 启动（见下）；"
-                "agent 请求的模型/context 与当前不符时会自动停止并重启服务。")
+                "与主页面是同一个服务，只是按下面那个 context 启动；"
+                "agent 要的模型或 context 与当前不一致时，会自动停掉再重启。")
 
             self.agent_ctx_var = tk.StringVar(
                 value=str(ctx_for(self.cfg, agent=True)))
-            row(t4, r4, "agent context",
+            row(t4, r4, "agent 上下文长度",
                 ttk.Entry(t4, textvariable=self.agent_ctx_var, width=10),
-                "本模型在 agent 场景（API 连接页/代理自动拉起）启动时使用的 context；"
-                "保存后对下次启动生效（默认：35B=131072，27B=32768）。")
+                "agent 通过下面那个地址调用时，服务用这个上下文长度启动"
+                "（默认 35B=131072、27B=32768；改完对下次启动生效）。")
             v["agent_ctx"] = self.agent_ctx_var
 
             fr = ttk.Frame(t4)
@@ -929,7 +931,9 @@ class SettingsMixin:
             ttk.Entry(fr, textvariable=v_bu, width=25, state="readonly").pack(side="left", padx=(0, 6))
             ttk.Button(fr, text="复制", width=6,
                        command=lambda: self._copy_text(v_bu.get(), "Base URL")).pack(side="left")
-            row(t4, r4, "Base URL", fr, "agent 应用填写此地址（本代理）；不要填 8080（那是后端服务）。")
+            row(t4, r4, "地址与 Key", fr,
+                "别的软件（agent / 脚本）填这一行：地址是本机的 OpenAI 兼容入口，"
+                "Key 一起给它。不要填 8080 —— 那个是后端服务，填了会连不上。")
 
             fr = ttk.Frame(t4)
             ttk.Entry(fr, textvariable=api_key_var, width=20, state="readonly").pack(
@@ -1060,11 +1064,11 @@ class SettingsMixin:
 
             def refresh_url(*_a):
                 if st["builtin"] and not providers.builtin_base_editable(st["pid"]):
-                    url_lbl.set("内置请求地址：%s（不可改）"
+                    url_lbl.set("请求地址：%s"
                                 % providers.chat_completions_url(
                                     providers.builtin(st["pid"])))
                 else:
-                    url_lbl.set("实际请求地址：%s"
+                    url_lbl.set("请求地址：%s"
                                 % providers.chat_completions_url(
                                     {"base_url": vars_["base_url"].get()}))
 
@@ -1080,19 +1084,16 @@ class SettingsMixin:
                 """
                 p = provider_snapshot()
                 api, root = providers.media_api(p), providers.media_api_root(p)
+                # 只在"这条接不了 / 要你手填"时才占一行（W 2026-10-03）；认出来了不说话
                 if str(p.get("media_api") or "auto") == "none":
-                    media_lbl.set("云端生图/生视频：按这里的设置这条不接（这个服务商只用文本对话）。")
+                    media_lbl.set("云端生图 / 生视频：这条不接（服务商只用文本对话）。")
                 elif not api:
-                    media_lbl.set("云端生图/生视频：认不出这个域名的原生接口。目前接了 %s；"
-                                  "自建网关/代理可以在下面手动选协议，或填「原生接口地址」。"
-                                  % "、".join(providers.MEDIA_LABEL[a]
-                                             for a in providers.MEDIA_APIS
-                                             if a not in ("auto", "none")))
+                    media_lbl.set("云端生图 / 生视频：这条不接原生接口；"
+                                  "自建网关可手动选协议或填「原生接口地址」。")
                 elif not root:
-                    media_lbl.set("云端生图/生视频：原生接口地址推不出来，请在下面填一项。")
+                    media_lbl.set("云端生图 / 生视频：请填「原生接口地址」。")
                 else:
-                    media_lbl.set("云端生图/生视频：走 %s，根地址 %s"
-                                  % (providers.MEDIA_LABEL.get(api, api), root))
+                    media_lbl.set("")
 
             def refresh_jobs(*_a):
                 """任务台账一行的现状：产物只活 24 小时，积压要看得见。"""
@@ -1144,14 +1145,16 @@ class SettingsMixin:
                 # 内置服务商：名称一律不开放；地址只在"按量百炼"这类**因账号而异**的条目上
                 # 开放（grid_remove 记住原位，切回别的服务商时原样还回来）
                 if st["builtin"]:
-                    built_note.configure(
-                        text=("名称：内置。这一条的 base_url 预置的是公共域名；如果你的密钥属于"
-                              "某个业务空间，把下面 base_url 换成形如 "
-                              "https://你的WorkspaceId.cn-beijing.maas.aliyuncs.com/"
-                              "compatible-mode/v1 的专属域名（key 与域名不可混用）。")
-                        if editable else
-                        "名称与 base_url：内置（只需填密钥、选模型）。")
-                    built_note.grid()
+                    # 只在"这一条能改地址"这个特殊情况下留一行说明（W 2026-10-03）：
+                    # 字段本来已经收起，"名称与 base_url：内置"纯属重复
+                    if editable:
+                        built_note.configure(
+                            text="这一条能改成你自己账号的专属域名：把 base_url 换成 "
+                                 "https://你的WorkspaceId.cn-beijing.maas.aliyuncs.com/"
+                                 "compatible-mode/v1（密钥与域名配套，不能混用）。")
+                        built_note.grid()
+                    else:
+                        built_note.grid_remove()
                     fields.grid_remove()
                     if editable:
                         fields2.grid()
@@ -1249,6 +1252,7 @@ class SettingsMixin:
             # ---------------- 密钥 ----------------
             def do_key_dialog():
                 d = tk.Toplevel(win)
+                d.withdraw()          # 先藏起来，摆正了再显示（否则左上角闪一下）
                 d.title("API Key")
                 d.transient(win)
                 pname = (providers.builtin(st["pid"]).get("name")
@@ -1296,10 +1300,7 @@ class SettingsMixin:
                 ttk.Button(bf, text="取消", width=8, command=d.destroy).pack(side="left", padx=4)
                 ttk.Button(bf, text="保存密钥", width=10, command=save).pack(side="left")
                 e.focus_set()
-
-            def do_local_api():
-                """本页的密钥是给云端用的；本地 API 地址在「API 连接」区块配。"""
-                nav.select("api")
+                widgets.center_on(d, win)   # 摆到设置页正中，别落在屏幕左上角
 
             # ---------------- 模型选择界面 ----------------
             def open_picker(fetch=None, explain=""):
@@ -1314,9 +1315,10 @@ class SettingsMixin:
                     # W 定的规矩：拉过就缓存，除非用户点「刷新清单」，否则不重复请求
                     fetch = not known
                 d = tk.Toplevel(win)
+                d.withdraw()          # 先藏起来，摆正了再显示（否则左上角闪一下）
                 d.title("选择模型 · %s"
                         % (providers.get_provider(self.cfg, pid) or {}).get("name", pid))
-                d.geometry("560x520+140+140")
+                d.geometry("560x520")
                 d.minsize(500, 380)
                 d.transient(win)
                 HDR = ("Microsoft YaHei UI", 9, "bold")
@@ -1337,14 +1339,12 @@ class SettingsMixin:
                 # 顶部只放说明文字，按钮一律挪到底部：窄窗口里左右对撞会互相盖住
                 head = ttk.Frame(d)
                 head.pack(side="top", fill="x", padx=12, pady=(10, 2))
-                hint_lbl = ttk.Label(head, text="勾中并点「确定」才进主页面菜单；「图片输入」一改即生效。"
-                                     "手填名字后按回车＝直接加入；「试一试」只对对话模型有意义",
+                hint_lbl = ttk.Label(head, text="勾中并点「确定」才进主页面菜单。",
                                      foreground="#808080", wraplength=520, justify="left",
                                      font=("Microsoft YaHei UI", 9))
                 hint_lbl.pack(side="left")
                 status = tk.StringVar(value=explain or
                                       ("表里是已知的 %d 个模型；点「刷新清单」可向接口重新索取。"
-                                       "模型多时按名字前缀收成折叠组，点组名展开。"
                                        % len(known)))
                 st_lbl = ttk.Label(d, textvariable=status, foreground="#808080",
                                    wraplength=600, justify="left",
@@ -1696,7 +1696,7 @@ class SettingsMixin:
                     if not d.winfo_exists():
                         return
                     if not okk:
-                        status.set("没能取到清单：%s\n也可以在下面填模型名，用「试一试并加入」验证。"
+                        status.set("没能取到清单：%s\n也可以在下面填模型名，用「测试连接并加入」验证。"
                                    % text)
                         return
                     added = 0
@@ -1784,7 +1784,7 @@ class SettingsMixin:
                 # 看起来就是"加不进去"（W 实测报的那条）。
                 e_new.bind("<Return>", lambda _e: manual_add())
                 e_new.bind("<KP_Enter>", lambda _e: manual_add())
-                ttk.Button(botf, text="试一试并加入", width=12,
+                ttk.Button(botf, text="测试连接并加入", width=14,
                            command=try_add).pack(side="left", padx=(6, 0))
                 ttk.Button(botf, text="直接加入", width=10,
                            command=lambda: manual_add()).pack(side="left", padx=(6, 0))
@@ -1869,6 +1869,7 @@ class SettingsMixin:
                     status.set("验证结果：" + "；".join(lines)
                                + "。改完点「确定」才写入。")
 
+                widgets.center_on(d, win)   # 摆到设置页正中（控件都建完了，尺寸才量得准）
                 if fetch:
                     pull()
 
@@ -1912,11 +1913,14 @@ class SettingsMixin:
                         if not win.winfo_exists():
                             return          # 设置窗口已关：别弹孤立的对话框
                         msg_lbl.set(("✅ " if ok else "❌ ") + text)
-                        if ok and messagebox.askyesno(
-                                "连接可用", "连通正常。\n\n现在选择要加入主页面的模型吗？"
-                                "（没勾的不会出现在模型菜单里）"):
-                            open_picker(explain="连接测试通过。下面用缓存的清单；要重新向接口取，点「刷新清单」。")
-                        elif not ok:
+                        if ok:
+                            # 2026-10-03（W）：服务商填完、连接测通就自动开「选择模型」，
+                            # 不再问一句「现在要选模型吗」—— 顺带把清单重拉一次，
+                            # 免得刚填好的服务商配着上一家留下的旧缓存清单。
+                            open_picker(
+                                fetch=True,
+                                explain="连接测试通过，下面是刚从接口取到的清单。")
+                        else:
                             messagebox.showwarning("连不上", text)
                     self._ui_q.put(after)
                 threading.Thread(target=work, daemon=True).start()
@@ -1950,8 +1954,9 @@ class SettingsMixin:
             r4b["i"] += 1
             ttk.Button(kr, text="填该服务商 API Key", width=20,
                        command=do_key_dialog).pack(side="left")
-            ttk.Button(kr, text="配置本地 API 地址", width=18,
-                       command=do_local_api).pack(side="left", padx=6)
+            # 原先这里还有一个「配置本地 API 地址」按钮跳去API 页（W 2026-10-03 要求移除）：
+            # 云端这一页只管密钥与模型，混一个"去改本地端口"的入口只会让人以为两者相关。
+            # 本地端口在左栏「本地模型 API」那一页。
             # 密钥状态单独一行：它跟着按钮排在同一行时，掩码文本会把这行撑得比
             # 可视区宽（横向不可滚 = 后面的内容看不见）
             ttk.Label(t4b, textvariable=key_lbl, foreground="#808080", wraplength=560,
@@ -1959,7 +1964,9 @@ class SettingsMixin:
                 row=r4b["i"], column=0, columnspan=3, sticky="w", pady=(0, 6))
             r4b["i"] += 1
 
-            built_note = ttk.Label(t4b, text="名称与 base_url：内置（只需填密钥、选模型）。",
+            # 初始文本只占位：open_picker/load() 一进来就会按"能不能改地址"重写它，
+            # 收起来时整行 grid_remove（2026-10-03 W：不再常驻一句"名称与 base_url：内置"）
+            built_note = ttk.Label(t4b, text="",
                                    foreground="#808080", wraplength=640, justify="left",
                                    font=("Microsoft YaHei UI", 9))
             built_note.grid(row=r4b["i"], column=0, columnspan=3, sticky="w", pady=(0, 6))
@@ -2275,17 +2282,25 @@ class SettingsMixin:
                         "打开下载页", "打不开浏览器（%s）。\n把这个地址复制到浏览器里就行：\n%s"
                         % (e, url))
 
-            def _do_check():
-                # 主线程取快照（通道 + 本机版本），子线程只用这份数据、不读 Tk 变量（坑 54）
-                ch_code = updater.channel_of_label(ch_var.get())
-                ch_text = ch_var.get()
+            checking = {"v": False}     # 已经有一个在查（进页那次还没回来 / 连点）
+
+            def _do_check(channel=None, notify=True):
+                if checking["v"]:       # 不叠第二个请求：状态与按钮都由前一个负责收尾
+                    return
+                # 主线程取快照（通道 + 本机版本），子线程只用这份数据、不读 Tk 变量（坑 54）。
+                # `channel` 显式给出时按它查（进页自动查「正式版」就是走这条），**不去读也
+                # 不去改**上面那个下拉的选中值 —— 用户选了测试版，进来一次不该被悄悄改回去。
+                ch_code = channel or updater.channel_of_label(ch_var.get())
+                ch_text = updater.CHANNEL_LABEL.get(ch_code, ch_var.get())
                 cur = updater.display_version(APP_VERSION)
+                checking["v"] = True
                 btn_chk.configure(state="disabled")     # 防连点：一次只发一个请求
                 btn_open.configure(state="disabled")
                 up_url["v"] = ""
                 _say("正在向 GitHub 查询%s的最新版本…（本机 %s）" % (ch_text, cur))
 
                 def done(state, info):
+                    checking["v"] = False
                     if not ust_lab.winfo_exists():       # 窗口/控件已销毁（坑 135）
                         return
                     btn_chk.configure(state="normal")
@@ -2296,11 +2311,12 @@ class SettingsMixin:
                              % (info.get("name") or info["tag"],
                                 info["tag"], cur, info.get("published") or "日期未知"),
                              "#1a7f37")
-                        messagebox.showinfo(
-                            "有新版本", "发现新版本：%s（%s）\n本机：%s\n发布于 %s\n\n%s"
-                            % (info.get("name") or info["tag"], info["tag"], cur,
-                               info.get("published") or "日期未知",
-                               info.get("notes") or "（这个 Release 没写说明）"))
+                        if notify:      # 进页自动查那一次不弹窗：每次进设置都弹一个框会烦人
+                            messagebox.showinfo(
+                                "有新版本", "发现新版本：%s（%s）\n本机：%s\n发布于 %s\n\n%s"
+                                % (info.get("name") or info["tag"], info["tag"], cur,
+                                   info.get("published") or "日期未知",
+                                   info.get("notes") or "（这个 Release 没写说明）"))
                     elif state == updater.STATE_LATEST:
                         _say("已是最新：%s（%s）。"
                              % (updater.display_version(info.get("tag") or cur), ch_text),
@@ -2311,9 +2327,11 @@ class SettingsMixin:
                              % (cur, updater.display_version(info.get("tag") or "？"),
                                 ch_text), "#b06000")
                     else:
-                        _say("没查到：%s" % (info.get("msg") or "原因未知"), "#b00020")
-                        messagebox.showwarning("检查更新",
-                                               info.get("msg") or "原因未知。")
+                        # msg 自带"检查更新失败："前缀，这里不再叠一层（2026-10-03）
+                        _say(info.get("msg") or "检查更新失败：原因未知。", "#b00020")
+                        if notify:
+                            messagebox.showwarning(
+                                "检查更新", info.get("msg") or "检查更新失败：原因未知。")
 
                 def work():
                     try:
@@ -2324,21 +2342,35 @@ class SettingsMixin:
 
                 threading.Thread(target=work, daemon=True).start()
 
-            # 控件放在回调之后建：`command=名字` 是建控件那一刻就要绑定的（坑 115）
+            # 控件放在回调之后建：`command=名字` 是建控件那一刻就要绑定的（坑 115）。
+            # 顺序按 W 2026-10-04 的要求：检查更新 → 正式版/测试版 → 打开下载页 → "?"，
+            # 并且**删掉左边的「版本类型」标签** —— 那一行的内容自解释，不需要一个名词占位。
             uf = ttk.Frame(t9)
+            btn_chk = ttk.Button(uf, text="检查更新", width=12, command=_do_check)
+            btn_chk.pack(side="left", padx=(0, 6))
             ch_cb = ttk.Combobox(uf, textvariable=ch_var, state="readonly", width=10,
                                  values=[lab for _c, lab in updater.CHANNELS])
             ch_cb.pack(side="left", padx=(0, 6))
-            btn_chk = ttk.Button(uf, text="检查更新", width=12, command=_do_check)
-            btn_chk.pack(side="left", padx=(0, 6))
             btn_open = ttk.Button(uf, text="打开下载页", width=12,
                                   command=lambda: _open_page(up_url["v"]),
                                   state="disabled")
-            btn_open.pack(side="left")
-            row(t9, r9, "版本类型", uf,
-                "正式版 = 只看正式发布的 Release；测试版 = 把预发布一起算，给最新的那个。")
-            ust_lab.grid(row=r9["i"], column=0, columnspan=3, sticky="w", pady=(0, 6))
+            btn_open.pack(side="left", padx=(0, 6))
+            widgets.HelpDot(
+                uf, "检查更新：按右边选的通道向 GitHub 查最新 Release。\n"
+                    "正式版 = 只看正式发布的 Release；测试版 = 把预发布一起算，给最新的那个。\n"
+                    "打开下载页 = 查到新版本时跳到它的下载页。\n"
+                    "进入本页时会自动按「正式版」查一次（只更新这行状态，不改右边选的通道）。"
+            ).pack(side="left")
+            uf.grid(row=r9["i"], column=0, columnspan=3, sticky="w", pady=(4, 0))
             r9["i"] += 1
+            ust_lab.grid(row=r9["i"], column=0, columnspan=3, sticky="w", pady=(2, 6))
+            r9["i"] += 1
+
+            # 进页就自动查一次「正式版」（W 2026-10-04）。次数=进页次数，GitHub 匿名接口
+            # 每 IP 每小时 60 次，正常用远够；正在查的时候 _do_check 里那对禁用按钮会挡住
+            # 重复请求，所以连点也不会叠。`notify=False`：不弹窗，只把这行状态写出来。
+            enter_hooks.setdefault("about", []).append(
+                lambda: _do_check(channel=updater.CHANNEL_STABLE, notify=False))
 
             # 高分屏清晰度（DPI 感知）。**冷切换**：Windows 只允许一个进程标一次，
             # 窗口一建出来就改不动了，所以这里只能"记住 + 下次生效"，不能骗用户说立刻变。
@@ -2481,16 +2513,13 @@ class SettingsMixin:
         # ---- 区块 8：模型文件管理（左栏「模型文件与引擎」那一项指到这里）----
         @section("files", "files")
         def _t5(t5, r5):
-            _n_rec = len(self.cfg.get("model_ngl") or {})
-            _n_ctx = len(self.cfg.get("model_ctx") or {})
-            _n_proj = len(self.cfg.get("model_mmproj") or {})
-            _n_hid = len(self.cfg.get("model_hidden") or {})
-
             def _files_head(n_models):
-                return ("当前：模型 %d 个（含可看图）｜ 层数记录 %d ｜ context 记录 %d ｜ "
-                        "mmproj 记录 %d ｜ 未进菜单 %d\n"
+                # 只留"有多少个模型"：原来把层数 / context / mmproj / 未进菜单四个计数
+                # 也拼在这一行里（5 段用 ｜ 隔开），760px 的换行宽度根本兜不住，
+                # 必然折成两行、第一行尾巴还参差不齐（W 2026-10-04：删掉这些冗余计数）。
+                return ("当前：模型 %d 个（含可看图）\n"
                         "打开软件时会自动补全缺失项；下方可手动触发，或整理文件结构。"
-                        % (n_models, _n_rec, _n_ctx, _n_proj, _n_hid))
+                        % n_models)
 
             head_lbl = ttk.Label(t5, text="当前：正在读取模型目录…",
                                  foreground="#555555", wraplength=760, justify="left",
@@ -2622,8 +2651,13 @@ class SettingsMixin:
 
         def _nav_select(item):
             page_id, sec_id = item["page"], item["section"]
+            # 连点左栏**当前这一项**时不再重闪（W 2026-10-03 报的"管理本地模型"按钮闪烁）：
+            # 那一项下面紧跟着的就是这个区块的标题，黄底每 1200ms 重画一轮，
+            # 看着就像按钮在闪。页面与目标都没动，只有滚动照做。
+            same = (state["page"] == page_id and state["section"] == sec_id)
+            entered = state["page"] != page_id        # 真的从别的页切过来了（不是连点）
             f = _make_page(page_id)
-            if state["page"] != page_id:
+            if entered:
                 sp.set_page(f)
                 state["page"] = page_id
             # 同一页的区块**一次建齐**（W：懒加载不能只建点中的那个小标题）：
@@ -2637,7 +2671,15 @@ class SettingsMixin:
             # 再来一次纯属白付 —— 实测一次全树重算 ~17ms。
             head = heads.get((page_id, sec_id))
             sp.goto(head)
-            _flash(head)
+            if not same:
+                _flash(head)
+            # 进页要做的事放最后：回调是区块里登记的，上面不先建区块它就还不存在。
+            if entered:
+                for fn in enter_hooks.get(page_id) or []:
+                    try:
+                        fn()
+                    except Exception:
+                        pass
 
         def _global_save(restart=False):
             """底部「保存」= 通用参数 + **当前这一页里已建区块各自的保存逻辑**，都成功才关窗。

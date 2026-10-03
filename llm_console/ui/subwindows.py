@@ -28,6 +28,7 @@ from tkinter import ttk, messagebox
 
 from ..core import crashlog, diagnose, providers
 from ..core.config import APP_DIR, CONFIG_PATH, save_config
+from . import widgets
 
 
 def open_file(path, what):
@@ -67,11 +68,11 @@ class SubWindowMixin:
         host = parent or self.root
         cfg = self.cfg
         win = tk.Toplevel(host)
+        win.withdraw()          # 先藏起来，摆正了再显示（否则左上角闪一下）
         win.title("成本预估算")
         win.geometry("620x470")
         win.minsize(560, 420)
         win.transient(host)
-
         ttk.Label(win, text="单价按模型记，只用于提交前的费用预估。不填就在确认框与对话流里"
                             "明说「以账单为准」，不编数字。点「写入单价」立即生效，"
                             "不需要到底部「保存」。",
@@ -197,6 +198,7 @@ class SubWindowMixin:
             pick_provider()
         else:
             status_var.set("还没有可用的服务商。")
+        widgets.center_on(win, host)   # 摆到触发它的设置页正中，别落在屏幕左上角
         return win
 
     def open_diag_window(self, parent=None):
@@ -220,6 +222,7 @@ class SubWindowMixin:
                 self._diag_win = None
 
         win = tk.Toplevel(host)
+        win.withdraw()          # 先藏起来，摆正了再显示（否则左上角闪一下）
         win.title("诊断")
         # 6 行路径 + 16 行结果框 + 一排四个按钮：实测 660 高会把按钮那排裁掉半截
         # （截图量出来的，不是估的），给到 740 才全露出来
@@ -340,4 +343,5 @@ class SubWindowMixin:
         ttk.Label(body, textvariable=status, foreground="#808080", wraplength=520,
                   justify="left", font=("Microsoft YaHei UI", 9)).grid(
             row=rows["i"], column=1, columnspan=2, sticky="w", pady=(6, 0))
+        widgets.center_on(win, host)   # 摆到触发它的设置页正中，别落在屏幕左上角
         return win

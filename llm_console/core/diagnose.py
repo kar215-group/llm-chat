@@ -520,8 +520,8 @@ def run_checks(cfg, proxy_running=False, server_running=False, probe_gpu=True):
     else:
         out.append(_c("port_proxy", GROUP_PORT, WARN, "代理端口 %d 已被别的程序占用" % p2,
                       "本程序没在监听这个端口",
-                      "agent 接入会失败。在 设置 → API 连接 里换一个端口并重启代理。",
-                      ("settings", "API 连接")))
+                      "agent 接入会失败。在 设置 → 本地模型 API 里换一个端口并重启代理。",
+                      ("settings", "本地模型 API")))
 
     # ---------------- 配置与云端 ----------------
     st, detail = _config_state()

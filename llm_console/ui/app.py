@@ -106,7 +106,7 @@ class App(ChatMixin, ImageGenMixin, VideoGenMixin, ServiceMixin, ModelsMixin, Se
         self._cur_content = []
         self._reasoning_started = False
         self._content_started = False
-        self.api_hint_var = None     # API 连接页的"已复制"提示
+        self.api_hint_var = None     # 本地模型 API 页的"已复制"提示
         self._last_usage = None      # 本轮云端/本地返回的 token 用量（收尾时显示）
 
         root.option_add("*Font", ("Microsoft YaHei UI", 10))
@@ -128,7 +128,7 @@ class App(ChatMixin, ImageGenMixin, VideoGenMixin, ServiceMixin, ModelsMixin, Se
         elif cfg.get("proxy_enabled", True):
             # 不起代理必须说一声：否则 agent 那边是"连不上"，用户在这儿什么线索都没有
             self._sq.put(("note", "API 代理没有启动：这台机器上还没有可转发的本地文本模型。"
-                                  "备好引擎与模型后在 设置 → API 连接 里启用。"))
+                                  "备好引擎与模型后在 设置 → 本地模型 API 里启用。"))
 
         threading.Thread(target=self._status_loop, daemon=True).start()
         threading.Thread(target=self._precompute_ngl, daemon=True).start()
@@ -265,6 +265,10 @@ class App(ChatMixin, ImageGenMixin, VideoGenMixin, ServiceMixin, ModelsMixin, Se
             bg="SystemButtonFace", fg="#0b57d0",
             activebackground="SystemButtonFace", activeforeground="#0b57d0",
             cursor="hand2", font=("Microsoft YaHei UI", 10, "bold"))
+        # ⚠ 这里**不要**给模型名按钮加固定 width：试过 width=30，顶栏需求从 904 涨到
+        # 1120，右侧「清空对话」被压到 1px 直接消失（2026-10-03 实测）。
+        # 顶栏宽度是按「模型名不超过 models.TOPBAR_ALIAS_MAX 字」来保证的，
+        # 限长在 models.short_alias() 里做，不在这里钉死宽度。
         self.model_btn.pack(side="left", padx=(4, 6))
         self._update_model_label()
 
@@ -957,7 +961,13 @@ def main():
             cfg["model_provider"] = providers.LOCAL
     root = tk.Tk()
     root.title("LLM 本地对话台 - llama.cpp")
-    root.geometry("880x660")
+    # 1080x700 是量出来的，不是拍的（DPI-aware 严格档实测，含"模型名占满 22 字"的情况）：
+    # 顶栏右侧 5 个按钮各要 120px，左侧状态灯 + 模型名合计要 904px。
+    # 880 宽时客户区只剩 860 →「清空对话」被压扁到 76px、「设置」右缘超出 3px；
+    # 1000 宽能全露但只剩 76px 余量，而状态灯文字会变长（如"● 运行中 · 已加载…"），
+    # 余量太窄仍会被挤。1080 给顶栏 1060，留 156px。
+    # 高度 700 照顾 1366x768 的本：扣掉任务栏约 728 可用高度，700 刚好放得下。
+    root.geometry("1080x700")
     root.minsize(720, 520)
     widgets.set_app_icon(root)
     app = App(root, cfg, first_run=first_run)
