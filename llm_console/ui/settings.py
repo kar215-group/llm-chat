@@ -2254,7 +2254,7 @@ class SettingsMixin:
             ttk.Button(bf, text="诊断", width=12,
                        command=self.open_diag_window).pack(side="left")
 
-            # 检查更新（为将来仓库转 public 而备）：联网在子线程、结果回主线程走 _ui_q
+            # 检查更新：联网在子线程、结果回主线程走 _ui_q
             # （坑 54），通道与本机版本在主线程取快照；查不到就报查不到（见 core/updater.py）
             import webbrowser
 

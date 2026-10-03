@@ -8,8 +8,8 @@
 排在正式版之下；判据取"tag 与 GitHub 的 prerelease 勾选**都**说正式才算正式"—— 宁可少报
 一次"有新版"，也不把作者还没敢标正式的构建推给正式版用户。
 
-⚠ **仓库现在是私有的**，匿名访问 releases 会 404 —— 这是预期（按钮为将来转 public 而备），
-所以 404 必须报人话，不能静默、更不能假装"已是最新"。
+⚠ **404 必须报人话**：仓库不可见 / 该版本已撤下 / 出口被网关拦时，匿名查 releases 都会 404；
+不能静默，更不能假装"已是最新"。
 """
 
 import json
@@ -19,7 +19,7 @@ import urllib.request
 
 from .config import USER_AGENT
 
-# 对外仓库（转 public 后这条不用改）
+# 对外仓库坐标（公开仓库，匿名 API 可读）
 REPO = "kar215-group/llm-chat"
 API_RELEASES = "https://api.github.com/repos/%s/releases?per_page=30"
 PAGE_RELEASES = "https://github.com/%s/releases"
@@ -180,7 +180,7 @@ def _reason(code):
         403: ("GitHub 拒绝了此次访问",
               "请几分钟后重试；若仍失败，可能是当前出口 IP 被 GitHub 限流"),
         404: ("GitHub 上找不到该仓库的 Release",
-              "若仓库仍是私有则属预期，公开之后即可正常使用"),
+              "请稍后重试；若一直如此，可能是仓库地址变了或该版本已撤下"),
         422: ("GitHub 不认这个请求", "请稍后重试"),
         429: ("请求太密，被 GitHub 限流了", "请过几分钟再点一次"),
         500: ("GitHub 服务端出错", "请稍后重试"),
