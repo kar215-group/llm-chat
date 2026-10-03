@@ -18,7 +18,7 @@ from ..core.models import display_name, has_local_chat
 from ..core.server import _query_serving_model, server_process_alive, server_state, stop_server
 from ..connection import cloud_media
 from ..connection.proxy import ProxyServer
-from .dialogs import ExitDialog, ImageDialog
+from .dialogs import ExitDialog
 from . import guide, widgets
 from .chat import ChatMixin
 from .image_gen import ImageGenMixin
@@ -269,8 +269,9 @@ class App(ChatMixin, ImageGenMixin, VideoGenMixin, ServiceMixin, ModelsMixin, Se
         self._update_model_label()
 
         # 右侧按钮组（pack side=right 自右向左排列）
-        # （「🎨 生图」独立窗口已废弃：生图统一在主聊天流进行，见 model_kind=image 分支；
-        #   ImageDialog / open_image_dialog 代码保留备用，不再有入口调用）
+        # （原「🎨 生图」独立窗口已废弃：生图统一在主聊天流进行，见 model_kind=image 分支；
+        #   ImageDialog / open_image_dialog 已于 2026-10-03 作为死代码从仓库版本移除，
+        #   原实现本地留存于 D:\tmp\deadcode_ImageDialog_20261003.py.txt）
         self.btn_settings = ttk.Button(top, text="设置", command=self.open_settings)
         self.btn_settings.pack(side="right", padx=3)
         self.stop_svc_btn = ttk.Button(top, text="停止服务",
@@ -854,14 +855,6 @@ class App(ChatMixin, ImageGenMixin, VideoGenMixin, ServiceMixin, ModelsMixin, Se
             if os.path.basename(self.cfg["model"]) == key:
                 self._update_model_label()
             self._append("\n[服务] 模型别名已生成：%s\n" % alias, "meta")
-
-    # ---- 设置窗口 ----
-    def open_image_dialog(self):
-        win = getattr(self, "_img_win", None)
-        if win is not None and win.winfo_exists():
-            win.lift()
-            return
-        self._img_win = ImageDialog(self.root, self.cfg)
 
     def on_close(self):
         # 遮罩引导先关掉：它是 overrideredirect 的无边框窗，留着会在退出流程里挡住鼠标

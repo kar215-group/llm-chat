@@ -8,7 +8,7 @@ import threading
 import tkinter as tk
 from tkinter import ttk, messagebox, font as tkfont
 
-from ..core import capability, cloudjobs, providers, sdprofile, secrets, textfile
+from ..core import capability, cloudjobs, providers, sdprofile, secrets, textfile, updater
 from ..core.config import (APP_DIR, APP_VERSION, CFG_VERSION, DEFAULT_CONFIG,
                            FLOAT_KEYS, INT_KEYS, STR_KEYS, cloud_media_dir,
                            gen_api_key, save_config)
@@ -109,6 +109,27 @@ NAV_SPEC = [
              "一键诊断只读本地信息：不联网、不启动推理引擎、不碰显卡。"
              "结果可以复制成一段文字贴给别人求助，也可以存成文件。"},
 ]
+
+
+def _local_model_shown(cfg):
+    """"服务参数 → model"只回显本地路径。该键是本地路径与云端复合 id `"pid::model"`
+    共用的（坑 146），原样回显会把云端内部 id 摆到本地参数里。"""
+    return "" if providers.is_cloud(cfg) else str(cfg.get("model", "") or "")
+
+
+def _kind_of_local_model(cfg, path):
+    """按扫描结果定 chat / image；扫不到返回 None，调用方保持原值（猜错类别比留错更糟）。"""
+    try:
+        probe = dict(cfg)
+        probe["model"] = str(path or "")
+        _d, chat, image = scan_models(probe)
+    except Exception:
+        return None
+    p = os.path.normpath(str(path or ""))
+    for lst, kind in ((image, "image"), (chat, "chat")):
+        if any(os.path.normpath(x) == p for x in lst):
+            return kind
+    return None
 
 
 def _nav_leaves(items=None, out=None):
@@ -533,8 +554,12 @@ class SettingsMixin:
         @section("local_text", "svc")
         def _t2(t2, r2):
 
+            # 「model」只回显本地路径：cfg["model"] 是本地路径与云端复合 id 共用的键（坑 146），
+            # 原样回显会让本地参数里出现云端模型；写回语义见 _apply_settings。
+            v["model"] = tk.StringVar(value=_local_model_shown(self.cfg))
             ent(t2, r2, "model", "model",
-                "当前模型 GGUF 完整路径（也可直接点主页模型名切换）。", width=30)
+                "当前**本地**模型 GGUF 完整路径（也可直接点主页模型名切换）。"
+                "选中云端模型时这一栏留空；填了并保存即切回本地。", width=30)
             ent(t2, r2, "models_dir", "models_dir",
                 "模型文件夹：主页模型下拉列表扫描此目录下所有 .gguf 文件。", width=30)
             # ngl：显示/修改的是"当前模型"的值（按模型分别记忆）
@@ -2222,6 +2247,99 @@ class SettingsMixin:
             ttk.Button(bf, text="诊断", width=12,
                        command=self.open_diag_window).pack(side="left")
 
+            # 检查更新（为将来仓库转 public 而备）：联网在子线程、结果回主线程走 _ui_q
+            # （坑 54），通道与本机版本在主线程取快照；查不到就报查不到（见 core/updater.py）
+            import webbrowser
+
+            up_url = {"v": ""}          # 有新版本时才填上，"打开下载页"才可点
+            ch_var = tk.StringVar(value=updater.CHANNEL_LABEL[updater.CHANNEL_STABLE])
+            ustate = tk.StringVar(value="还没检查过。")
+
+            ust_lab = ttk.Label(t9, textvariable=ustate, foreground="#5a6a7a",
+                                wraplength=560, justify="left",
+                                font=("Microsoft YaHei UI", 9))
+
+            def _say(text, color="#5a6a7a"):
+                ustate.set(text)
+                ust_lab.configure(foreground=color)
+
+            def _open_page(url):
+                if not url:
+                    messagebox.showinfo("打开下载页", "还没有可打开的地址：先点「检查更新」。")
+                    return
+                try:
+                    if not webbrowser.open(url):
+                        raise RuntimeError("浏览器没响应")
+                except Exception as e:
+                    messagebox.showwarning(
+                        "打开下载页", "打不开浏览器（%s）。\n把这个地址复制到浏览器里就行：\n%s"
+                        % (e, url))
+
+            def _do_check():
+                # 主线程取快照（通道 + 本机版本），子线程只用这份数据、不读 Tk 变量（坑 54）
+                ch_code = updater.channel_of_label(ch_var.get())
+                ch_text = ch_var.get()
+                cur = updater.display_version(APP_VERSION)
+                btn_chk.configure(state="disabled")     # 防连点：一次只发一个请求
+                btn_open.configure(state="disabled")
+                up_url["v"] = ""
+                _say("正在向 GitHub 查询%s的最新版本…（本机 %s）" % (ch_text, cur))
+
+                def done(state, info):
+                    if not ust_lab.winfo_exists():       # 窗口/控件已销毁（坑 135）
+                        return
+                    btn_chk.configure(state="normal")
+                    if state == updater.STATE_UPDATE:
+                        up_url["v"] = info.get("url") or ""
+                        btn_open.configure(state="normal")
+                        _say("发现新版本：%s（%s）　本机：%s　发布于 %s"
+                             % (info.get("name") or info["tag"],
+                                info["tag"], cur, info.get("published") or "日期未知"),
+                             "#1a7f37")
+                        messagebox.showinfo(
+                            "有新版本", "发现新版本：%s（%s）\n本机：%s\n发布于 %s\n\n%s"
+                            % (info.get("name") or info["tag"], info["tag"], cur,
+                               info.get("published") or "日期未知",
+                               info.get("notes") or "（这个 Release 没写说明）"))
+                    elif state == updater.STATE_LATEST:
+                        _say("已是最新：%s（%s）。"
+                             % (updater.display_version(info.get("tag") or cur), ch_text),
+                             "#1a7f37")
+                    elif state == updater.STATE_AHEAD:
+                        # 报实话：不并进「已是最新」（多半是自己编的版本还没打 tag）
+                        _say("本机 %s 比线上最新的 %s 还新（%s）。"
+                             % (cur, updater.display_version(info.get("tag") or "？"),
+                                ch_text), "#b06000")
+                    else:
+                        _say("没查到：%s" % (info.get("msg") or "原因未知"), "#b00020")
+                        messagebox.showwarning("检查更新",
+                                               info.get("msg") or "原因未知。")
+
+                def work():
+                    try:
+                        st, info = updater.check_update(cur, ch_code)
+                    except Exception as e:          # 兜底：异常不许穿回 UI 线程
+                        st, info = updater.STATE_ERROR, {"msg": "检查更新时出错：%s" % e}
+                    self._ui_q.put(lambda: done(st, info))
+
+                threading.Thread(target=work, daemon=True).start()
+
+            # 控件放在回调之后建：`command=名字` 是建控件那一刻就要绑定的（坑 115）
+            uf = ttk.Frame(t9)
+            ch_cb = ttk.Combobox(uf, textvariable=ch_var, state="readonly", width=10,
+                                 values=[lab for _c, lab in updater.CHANNELS])
+            ch_cb.pack(side="left", padx=(0, 6))
+            btn_chk = ttk.Button(uf, text="检查更新", width=12, command=_do_check)
+            btn_chk.pack(side="left", padx=(0, 6))
+            btn_open = ttk.Button(uf, text="打开下载页", width=12,
+                                  command=lambda: _open_page(up_url["v"]),
+                                  state="disabled")
+            btn_open.pack(side="left")
+            row(t9, r9, "版本类型", uf,
+                "正式版 = 只看正式发布的 Release；测试版 = 把预发布一起算，给最新的那个。")
+            ust_lab.grid(row=r9["i"], column=0, columnspan=3, sticky="w", pady=(0, 6))
+            r9["i"] += 1
+
             # 高分屏清晰度（DPI 感知）。**冷切换**：Windows 只允许一个进程标一次，
             # 窗口一建出来就改不动了，所以这里只能"记住 + 下次生效"，不能骗用户说立刻变。
             # 判据用 diagnose 现查，而不是照抄配置：配置里写的是"想要哪档"，
@@ -2619,6 +2737,18 @@ class SettingsMixin:
         for k in STR_KEYS:
             if k in v:
                 c[k] = str(v[k].get()).strip()
+        # 「model」不在 STR_KEYS 里，这里单独处理：留空 = 不动当前选择（否则选着云端模型时
+        # 会被抹成切回本地）；非空 = 明确切到该本地模型，连带复位 model_provider（坑 146）。
+        if "model" in v:
+            _m = str(v["model"].get()).strip()
+            if _m:
+                c["model"] = _m
+                c["model_provider"] = providers.LOCAL
+                _k = _kind_of_local_model(c, _m)
+                if _k:
+                    c["model_kind"] = _k
+            elif not providers.is_cloud(c):
+                c["model"] = ""          # 本地选中且被清空 = 用户不要这个模型了
         # 模型族下拉显示的是中文标签，配置里要存回 sdprofile 的家族代码；
         # 选"自动判断"存空串——别让界面文案跑到配置里去。
         for k, kind in (("img_family", "image"), ("vid_family", "video")):

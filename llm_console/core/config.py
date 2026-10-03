@@ -30,7 +30,7 @@ CONFIG_PATH = os.path.join(APP_DIR, "gui_config.json")
 
 # 版本号：发版时改这一处（--selfcheck / --version 会打印它）。
 # GitHub Release 的 tag 要与它一致（tag 去掉开头的 v），Actions 工作流会做一致性校验。
-APP_VERSION = "1.0.3beta1"
+APP_VERSION = "1.0.3beta2"
 
 CFG_VERSION = 2
 
@@ -180,7 +180,8 @@ INT_KEYS = ("port", "ngl", "ctx", "threads", "reasoning_budget",
 FLOAT_KEYS = ("temperature", "top_p", "repeat_penalty", "vram_gb", "ram_gb",
               "img_cfg", "img_strength", "vid_cfg")
 
-STR_KEYS = ("model", "models_dir", "host", "api_key", "reasoning_mode",
+# 「model」故意不在这里：它与云端复合 id 共用（坑 146），写回另有分支（settings._apply_settings）
+STR_KEYS = ("models_dir", "host", "api_key", "reasoning_mode",
             "extra_args", "exe", "gpu_name", "sd_dir", "image_model_dir",
             "img_model_file", "img_size", "img_family",
             "img_vae_file", "img_llm_file", "img_clip_l_file", "img_clip_g_file",
