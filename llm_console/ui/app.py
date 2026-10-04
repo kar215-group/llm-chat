@@ -13,7 +13,7 @@ from tkinter import ttk, scrolledtext, messagebox
 
 from ..core.config import (load_config, DEFAULT_CONFIG, APP_DIR, APP_VERSION,
                            CONFIG_PATH)
-from ..core import cloudjobs, config, crashlog, diagnose, providers
+from ..core import cloudjobs, config, crashlog, diagnose, providers, secrets, updater
 from ..core.models import display_name, has_local_chat
 from ..core.server import _query_serving_model, server_process_alive, server_state, stop_server
 from ..connection import cloud_media
@@ -62,6 +62,20 @@ class App(ChatMixin, ImageGenMixin, VideoGenMixin, ServiceMixin, ModelsMixin, Se
         # 设置页的会话内界面状态：{"show_all": 底部「显示全部参数」勾没勾, "fold": {区块名: 展开}}
         # 挂在 App 上（不是窗口上）→ 关掉设置窗再开，勾选与展开状态还在；程序一退就没了
         self._settings_ui = {"show_all": False, "fold": {}}
+        # 「检查更新」的会话内状态，同样挂 App（关掉设置窗再开，冷却与上次结果都还在）：
+        #   at     = 上次真发起检查的墙钟时刻（time.time()；进页自动查的 10 分钟冷却看它）
+        #   busy   = 有请求正在飞（互斥，别叠第二个请求）
+        #   last   = 上次结果 `(状态, 详情)` —— 冷却期进页拿它回显，不会看起来像"刚查过"
+        #   cache  = core.updater.Cache()，上次响应的 ETag 与结果（304 就复用，省限流额度）
+        #   render = 当前关于页那行状态的渲染函数（窗口关掉后指向死控件，靠 winfo_exists 兜）
+        self._upd_check = {"at": 0.0, "busy": False, "last": None,
+                           "cache": updater.Cache(), "render": None, "help": None}
+        # 开发者模式（W 2026-10-04）：入口是"关于页那行版本号连点 5 次"，见 ui/settings.py。
+        # **只在本次运行内有效**（W 点名：重启后回到普通界面）—— 所以它在这儿、不进配置文件；
+        # 而开发者选项里填的**东西**（GitHub 令牌等）是持久的，关掉这个模式也不清。
+        self._dev_mode = False
+        self._dev_tap = {"count": 0, "at": 0.0}    # 连点计数：上一次点击的时刻 + 已连了几下
+        self._dev_upd = {"timer": None}            # 后台查更新的 after id（有令牌才不是 None）
         self._diag_win = None         # 「诊断」次级页面（设置 → 关于 的按钮开的，放路径与一键诊断）
         self._alias_tried = set()    # （备用）已尝试向模型请求别名的模型
         self._serving_model = None   # 当前服务实际加载的模型文件名（None=未知/未运行）
@@ -133,6 +147,7 @@ class App(ChatMixin, ImageGenMixin, VideoGenMixin, ServiceMixin, ModelsMixin, Se
         threading.Thread(target=self._status_loop, daemon=True).start()
         threading.Thread(target=self._precompute_ngl, daemon=True).start()
         root.after(80, self._poll)
+        self._dev_upd_start()        # 上次运行填过 GitHub 令牌 → 后台查更新这就接上
         self.input.focus_set()
         self._offer_cloud_recovery()
         self._offer_crash_notice()
@@ -774,6 +789,77 @@ class App(ChatMixin, ImageGenMixin, VideoGenMixin, ServiceMixin, ModelsMixin, Se
         if not self._closing:
             self.root.after(80, self._poll)
 
+    # ---- 开发者选项：后台查更新（只在填了 GitHub 令牌时才跑）----
+    def _dev_upd_start(self):
+        """按"有没有 GitHub 令牌"决定后台查更新的定时器该不该跑。幂等：改完令牌直接调。
+
+        为什么按令牌分岔：匿名接口每 IP 每小时只给 60 次，后台每 10 分钟问一次就要占掉
+        6 次 —— 用户自己点「检查更新」的额度会因此变少，而这条后台行为根本不是他要的。
+        带了令牌（5000 次/小时）才谈得上"顺手替他一直盯着"（W 2026-10-04 的口径）。
+        """
+        self._dev_upd_stop()
+        if not secrets.get_github_token():
+            return
+        try:
+            self._dev_upd["timer"] = self.root.after(
+                updater.POLL_EVERY * 1000, self._dev_upd_tick)
+        except Exception:
+            self._dev_upd["timer"] = None    # 窗口正在拆：没有定时器可挂，不是错误
+
+    def _dev_upd_stop(self):
+        """把待触发的定时器撤掉（没挂过 / 已经触发过都是空操作）。"""
+        t = self._dev_upd.get("timer")
+        self._dev_upd["timer"] = None
+        if t is None:
+            return
+        try:
+            self.root.after_cancel(t)
+        except Exception:
+            pass
+
+    def _dev_upd_tick(self):
+        """到点了：查一次（在子线程），顺手把下一次排上。"""
+        self._dev_upd["timer"] = None
+        token = secrets.get_github_token()
+        if not token:               # 令牌在这期间被清掉了：不再续排
+            return
+        cur = APP_VERSION
+        # 与关于页**共用同一个 cache**：那边刚查过的话，这儿带 If-None-Match 拿个 304
+        # 就够了 —— 不计额度、也不用重新解析（见 core/updater.fetch_releases）
+        cache = self._upd_check["cache"]
+
+        def work():
+            try:
+                res = updater.check_update(cur, updater.CHANNEL_STABLE, cache=cache,
+                                           token=token)
+            except Exception as e:          # 兜底：异常不许穿回 UI 线程（坑 54）
+                res = (updater.STATE_ERROR, {"msg": "检查更新时出错：%s" % e})
+            self._ui_q.put(lambda: self._dev_upd_notify(*res))
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _dev_upd_notify(self, state, info):
+        """后台结果 → 真查到新版本才弹窗提醒。
+
+        "同一版本只打扰一次"靠 `cfg["dev_upd_dismissed"]`：弹完就把 tag 记下 —— 点确定也好、
+        直接关掉窗口也好，都算"这个版本我知道了"。判据是 **tag 变了没有**，不是时间，
+        所以出现更新的版本时照旧会弹。
+        """
+        tag = str((info or {}).get("tag") or "")
+        if state == updater.STATE_UPDATE and tag and tag != str(
+                self.cfg.get("dev_upd_dismissed", "") or ""):
+            self.cfg["dev_upd_dismissed"] = tag
+            try:
+                config.save_config(self.cfg)
+            except Exception:
+                pass
+            messagebox.showinfo(
+                "发现新版本",
+                "GitHub 上有新版本：%s（本机 %s）。\n\n"
+                "到 设置 → 关于 点「检查更新」，那里能打开下载页。"
+                % (updater.display_version(tag), updater.display_version(APP_VERSION)))
+        self._dev_upd_start()       # 续排下一次
+
     def _render_status(self, alive, ready):
         """渲染状态灯 + 状态驱动的按钮样式。"""
         cloud = providers.is_cloud(self.cfg)
@@ -889,6 +975,7 @@ class App(ChatMixin, ImageGenMixin, VideoGenMixin, ServiceMixin, ModelsMixin, Se
         self._save_chat_log()
         self._closing = True
         self.proxy.stop()
+        self._dev_upd_stop()          # 撤掉后台查更新的定时器，别让它对着拆到一半的根窗打
         self.root.destroy()
 
 

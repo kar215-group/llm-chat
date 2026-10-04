@@ -30,7 +30,7 @@ CONFIG_PATH = os.path.join(APP_DIR, "gui_config.json")
 
 # 版本号：发版时改这一处（--selfcheck / --version 会打印它）。
 # GitHub Release 的 tag 要与它一致（tag 去掉开头的 v），Actions 工作流会做一致性校验。
-APP_VERSION = "1.0.3"
+APP_VERSION = "1.0.4"
 
 CFG_VERSION = 2
 
@@ -167,6 +167,12 @@ DEFAULT_CONFIG = {
     # 高分屏清晰度（DPI 感知）。**冷切换**：只在下次启动生效 —— Windows 允许一个进程
     # 只标一次，窗口一建出来就再也改不了了。0 = 让系统按缩放位图拉伸（发虚但字大）
     "dpi_aware": 1,
+    # ---- 开发者选项（隐藏页：关于页版本号连点 5 次才出现，见 ui/settings.py）----
+    # 「后台查到的更新弹过窗、用户把它关掉了」的那个 tag：同一个版本不再打扰第二次。
+    # 单放配置里（不是内存）是因为"别再说了"是用户对**这个版本**的表态，重启后仍该算数；
+    # 出现更新的 tag 时照旧会弹（判据是"tag 变了"，不是"时间没到"）。
+    # 注意：开发者模式**开关本身**不在这里 —— 它只在本次运行内有效（App._dev_mode）。
+    "dev_upd_dismissed": "",
 }
 
 INT_KEYS = ("port", "ngl", "ctx", "threads", "reasoning_budget",

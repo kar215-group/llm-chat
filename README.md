@@ -30,10 +30,15 @@ OpenAI 兼容 API 收进同一个窗口，只用 Python 标准库 + Tkinter 写�
 
 ## 快速开始
 
-1. **准备推理引擎**（本仓库不含，界面里也能直接开下载页：**设置 → 本地模型 → 获取引擎**）
-   - 对话引擎：**[llama.cpp](https://github.com/ggml-org/llama.cpp)** →
-     [Releases](https://github.com/ggml-org/llama.cpp/releases) 下载对应平台的预编译包
-     （CUDA 版还要把 `cudart` 包的 dll 放到同一目录），或者直接跑仓库里的脚本：
+1. **准备推理引擎**（本仓库不含。界面里可直接装：**设置 → 本地模型 → 获取引擎**）
+   - 最省事的做法：在那一页点「**刷新版本**」→ 选档位（CUDA / Vulkan / CPU 等）→
+     点「**自动安装引擎**」，它会下好、校验、解压到程序目录下的 `engines/`。
+     装完按它给的路径去指路（下一步）。下不动时那一页还有「打开下载页」「复制下载链接」
+     两条退路，拿到的就是选中档位的安装包直链。
+   - 也可以自己下：对话引擎 **[llama.cpp](https://github.com/ggml-org/llama.cpp)** →
+     [Releases](https://github.com/ggml-org/llama.cpp/releases) 取对应平台的预编译包
+     （**CUDA 版还要把同名的 `cudart-…` 包一起整包解压到同一目录**，漏了启动时报缺 dll），
+     或者跑仓库里的脚本：
      ```bash
      bash tools/deploy_llamacpp.sh ./llama-engine
      ```
@@ -58,10 +63,10 @@ OpenAI 兼容 API 收进同一个窗口，只用 Python 标准库 + Tkinter 写�
 
 | 用途 | 从哪拿 | 拿什么 | 放哪 |
 |---|---|---|---|
-| 本地对话引擎 | [ggml-org/llama.cpp](https://github.com/ggml-org/llama.cpp) 的 [Releases](https://github.com/ggml-org/llama.cpp/releases) | `llama-server` 及其同目录运行库（CUDA 版另需 `cudart` 包里的 dll） | 任意目录，**设置 → 本地模型 → 服务参数** 指路；界面里 **设置 → 本地模型 → 获取引擎** 能直接打开下载页 |
+| 本地对话引擎 | [ggml-org/llama.cpp](https://github.com/ggml-org/llama.cpp) 的 [Releases](https://github.com/ggml-org/llama.cpp/releases) | `llama-server` 及其同目录运行库（CUDA 版另需 `cudart` 包里的 dll） | 任意目录，**设置 → 本地模型 → 服务参数** 指路；界面里 **设置 → 本地模型 → 获取引擎** 可一键装到 `engines/` |
 | 对话模型 | HuggingFace 等模型站上的 GGUF（Qwen、DeepSeek、GLM、Gemma…） | `*.gguf` | `models/` 或自定模型目录 |
 | 让模型能看图 | 同上模型页面 | `mmproj-*.gguf` 视觉投影器 | 与主模型同目录，界面会自动配对并标注 |
-| 生图引擎 | [leejet/stable-diffusion.cpp](https://github.com/leejet/stable-diffusion.cpp) 的 [Releases](https://github.com/leejet/stable-diffusion.cpp/releases) | `sd-cli`（Windows 为 `sd-cli.exe`）+ dll | 单独目录，**设置 → 本地模型 → 生图** 指路；同样可以在 **设置 → 本地模型 → 获取引擎** 直接打开下载页 |
+| 生图引擎 | [leejet/stable-diffusion.cpp](https://github.com/leejet/stable-diffusion.cpp) 的 [Releases](https://github.com/leejet/stable-diffusion.cpp/releases) | `sd-cli`（Windows 为 `sd-cli.exe`）+ dll | 单独目录，**设置 → 本地模型 → 生图** 指路；同样可在 **设置 → 本地模型 → 获取引擎** 一键装 |
 | 生图权重 | Qwen-Image / SD1.5 / SDXL / Flux 等的 GGUF 或 safetensors | 模型文件 | 生图模型目录 |
 | 生视频 | MiniMax-H3 视频链路的**三件套**：扩散主体 GGUF、文本编码器、视频 VAE | 三个文件都要，**VAE 最容易漏** | 生视频模型目录，**设置 → 本地模型 → 生视频** 指路 |
 | 云端对话 | 各服务商控制台（DeepSeek、阿里云 Token Plan / 百炼、MiniMax、智谱、Kimi、腾讯云混元、华为云 MaaS） | API Key | **设置 → 云端模型 → 服务商与密钥** 的密钥按钮（存进 `secrets.json`，不入库） |

@@ -60,6 +60,29 @@ def has_api_key(provider_id):
     return bool(get_api_key(provider_id))
 
 
+def get_github_token():
+    """开发者选项里填的 GitHub 令牌（「检查更新」带认证时用；没填返回空串）。
+
+    为什么也放这份文件：它是一把凭据，和云端 key 一样只该留在本机、不进 gui_config.json
+    （那个文件会随备份一起外流）。它是**独立的键**、不塞进 `api_keys` —— 那里按 provider id
+    索引，塞一个假的 provider 进去会污染"这台机器配了哪几家"的判据。
+    """
+    return str(load_secrets().get("github_token", "") or "")
+
+
+def set_github_token(token):
+    """写入 GitHub 令牌（空则删除该键）。读-改-写持锁，理由同 `set_api_key`。"""
+    with _LOCK:
+        data = load_secrets()
+        data.setdefault("version", 1)
+        t = str(token or "").strip()
+        if t:
+            data["github_token"] = t
+        else:
+            data.pop("github_token", None)
+        return save_secrets(data)
+
+
 def mask(key):
     """界面显示用：只露首尾，避免截屏/录屏泄漏完整 key。"""
     k = str(key or "")

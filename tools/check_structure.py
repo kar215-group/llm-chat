@@ -21,6 +21,9 @@
       函数"）；② registry − NAV 叶子差集非空 = 红（注册了但导航到不了）；③ NAV 内部
       一致性：每叶子 page / section / title / help 四项齐全、`nav_hide` 的替身 key
       必须是有效叶子（替身改名则悬空）；同一 (page, sec) 键注册两次 = 红（静默覆盖）。
+      ② 有一处**明账**豁免：NAV_HIDDEN（一行一键一理由）—— 给"确实到得了、但有意不走
+      左栏"的隐藏页用（如开发者选项，入口在关于页版本号上）。豁免不是免检：豁免的键
+      必须有模块级**字面量**导航项指向它，否则照旧判红。
       `@section` 的两个参数必须是常量（变量 / 调用 = 红）。literal_eval 失败本身 = 红，
       红文案三段式见实现——检查绝不静默跳过，这是防检查器自身腐烂的机制。
 
@@ -162,6 +165,19 @@ def _flatten_nav(items, out):
 _NON_LITERAL = (ast.Call, ast.Name, ast.JoinedStr, ast.Attribute, ast.Starred,
                 ast.IfExp, ast.Lambda, ast.Compare, ast.Await)
 
+# [2]「② registry − NAV 叶子」那一半的**唯一**豁免口：一行一键一理由（同 ALLOWED_DUP 的规矩，
+# 变更随 git diff 被 review，并登记 `99-待确认规则清单.md`）。
+# 用它的前提是"这一页确实到得了，只是**有意**不走左栏"：
+#   - 开发者选项（W 2026-10-04）：入口是"关于页那行版本号连点 5 次"，见 settings.DEV_NAV_ITEM。
+#     它故意不进 NAV_SPEC 是有理由的：NAV_SPEC 描述的是"普通用户看得到的左栏"，
+#     而且这一页不放 "?"（help 为空）—— 塞进去会连带打翻 [2] 自己的"四项齐全"判据
+#     和 test_settings_layout 的 11 个叶子数断言。
+# 光豁免会让"死区块"有地方躲，所以 check_g2 末尾会回头验一遍：豁免的键必须有
+# **模块级字面量**导航项指向它（`DEV_NAV_ITEM` 那种），否则照旧判红。
+NAV_HIDDEN = {
+    ("dev", "dev"): "开发者选项：入口藏在关于页版本号上（连点 5 次），见 settings.DEV_NAV_ITEM",
+}
+
 
 def check_g2():
     print("[2] NAV_SPEC ↔ @section 键一致（导航到不了 / 接不上，都在这一段抓）")
@@ -204,11 +220,26 @@ def check_g2():
     nav_keys = {(it.get("page"), it.get("section")) for it in leaves}
     reg_keys = set(reg_pairs)
     missing = sorted(nav_keys - reg_keys)
-    dead = sorted(reg_keys - nav_keys)
+    dead = sorted(reg_keys - nav_keys - set(NAV_HIDDEN))
     if missing:
         red("[2]", "NAV 叶子未接 @section（点过去显示「还没接上构建函数」）：%s" % missing)
     if dead:
         red("[2]", "@section 注册了但导航到不了（死区块 / 漏挂 NAV_SPEC）：%s" % dead)
+    # 豁免项得真的"到得了"：模块级必须有个**字面量**导航项（如 DEV_NAV_ITEM）指向它。
+    # 少了这一验，NAV_HIDDEN 就成了死区块的遮羞布 —— 写进去一行就再没人管它了。
+    hid_ok = set()
+    for n in tree.body:
+        if not isinstance(n, ast.Assign):
+            continue
+        try:
+            val = ast.literal_eval(n.value)
+        except (ValueError, SyntaxError, TypeError):
+            continue
+        if isinstance(val, dict) and (val.get("page"), val.get("section")) in NAV_HIDDEN:
+            hid_ok.add((val.get("page"), val.get("section")))
+    for k in sorted(set(NAV_HIDDEN) - hid_ok):
+        red("[2]", "NAV_HIDDEN 豁免的 %s 找不到模块级字面量导航项（如 DEV_NAV_ITEM）——"
+                   "「隐藏」不能当「死区块」的遮羞布：要么把它接回去，要么说明为什么到得了" % (k,))
     key_set = {it.get("key") for it in leaves}
     for it in leaves:
         for need in ("page", "section", "title", "help"):
@@ -221,8 +252,11 @@ def check_g2():
     if len(reg_pairs) != len(reg_keys):
         dup = sorted(k for k in reg_keys if reg_pairs.count(k) > 1)
         red("[2]", "同一 (page, section) 注册了两次（registry 后写覆盖先写）：%s" % dup)
-    ok("NAV %d 叶子 ↔ @section %d 处注册，双向差集为空；四项齐全；nav_hide 替身有效"
-       % (len(leaves), len(reg_pairs)))
+    hid = sorted(set(NAV_HIDDEN) & reg_keys)
+    ok("NAV %d 叶子 ↔ @section %d 处注册，双向差集为空；四项齐全；nav_hide 替身有效%s"
+       % (len(leaves), len(reg_pairs),
+          ("；隐藏页豁免 %d 处（%s，均有模块级字面量导航项兜着）"
+           % (len(hid), ", ".join("%s/%s" % k for k in hid))) if hid else ""))
 
 
 # =========================================================================

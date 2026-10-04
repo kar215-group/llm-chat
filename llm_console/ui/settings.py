@@ -5,10 +5,12 @@
 
 import os
 import threading
+import time
 import tkinter as tk
 from tkinter import ttk, messagebox, font as tkfont
 
-from ..core import capability, cloudjobs, providers, sdprofile, secrets, textfile, updater
+from ..core import (capability, cloudjobs, engine_install, providers, sdprofile, secrets,
+                   textfile, updater)
 from ..core.config import (APP_DIR, APP_VERSION, CFG_VERSION, DEFAULT_CONFIG,
                            FLOAT_KEYS, INT_KEYS, STR_KEYS, cloud_media_dir,
                            gen_api_key, save_config)
@@ -66,11 +68,12 @@ NAV_SPEC = [
         {"key": "eng", "label": "获取引擎", "page": "files", "section": "eng",
          "nav_hide": "files",
          "title": "获取引擎（llama.cpp 与 sd.cpp）",
-         "help": "这一屏只解决「还没装引擎」：告诉你现在缺哪一个、官方下载页在哪、"
-                 "该解压到哪儿。\n程序不代你下载 —— 一个预编译包 100~200MB，还要按 "
-                 "CUDA / CPU 分档，下坏了留下半个目录比没下更难收拾。"
-                 "所以这里给的是「打开下载页 / 复制链接 / 打开目标目录 / 重新检测」，"
-                 "动手的还是你自己。"},
+         "help": "这一屏解决「还没装引擎」：说清现在缺哪一个、可以选哪几档、"
+                 "点一下装到程序目录的 engines 里。\n"
+                 "CUDA 档要连运行库一起下（几百 MB），所以下之前会先说清多大；"
+                 "装完回「服务参数」把路径指过去。\n"
+                 "网络不通下不动时，还有「打开下载页 / 复制下载链接」两条路 —— "
+                 "那两条拿到的就是选中档位的安装包直链。"},
     ]},
     {"key": "g_cloud", "label": "云端模型", "children": [
         {"key": "c_prov", "label": "服务商与密钥", "page": "cloud", "section": "prov",
@@ -110,6 +113,59 @@ NAV_SPEC = [
              "一键诊断只读本地信息：不联网、不启动推理引擎、不碰显卡。"
              "结果可以复制成一段文字贴给别人求助，也可以存成文件。"},
 ]
+
+
+# ---------------------------------------------------------------------------
+# 开发者模式（W 2026-10-04）：关于页那行版本号**连点 5 次**才现身的隐藏页。
+#
+# 为什么**不**写进 NAV_SPEC：NAV_SPEC 说的是"普通用户看得到的左栏"，自检也按它的叶子数
+# 钉着（`_selftest/test_settings_layout.py`）—— 把一项藏进去、只在运行时过滤掉，会让
+# "这份常量到底描述谁"变得说不清。所以它单放一个常量，由 `_nav_items()` 在运行时拼。
+#
+# 也**不是** `nav_hide` 那种"合成项"（坑 142）：那是"这一项不在左栏成行、但它仍是导航
+# 目标"；这里要的是"非开发者模式下它根本不存在"。
+#
+# `help` 空着是有意的：目标用户是开发者，这一页不放 "?"（W 2026-10-04 点名）。
+# ---------------------------------------------------------------------------
+DEV_NAV_ITEM = {"key": "dev", "label": "开发者选项", "page": "dev", "section": "dev",
+                "title": "开发者选项", "help": ""}
+
+# 后台查更新的间隔不在这里：它是"我们能多频繁地问 GitHub"的一部分，和 `COOLDOWN` /
+# `COOLDOWN_TOKEN` 同一个账本，定在 `core/updater.POLL_EVERY`；起停逻辑在 ui/app.py
+# 的 `_dev_upd_start`（只有填了 GitHub 令牌才会跑）。
+
+# 关于页那行版本号的"隐形开关"（W 2026-10-04）：**连点 5 次**进开发者模式，
+# 两次之间超过 3 秒就当没在连点、从 1 重新数（判定宽松一点，手速慢的人也能连上）。
+DEV_TAP_TIMES = 5
+DEV_TAP_GAP = 3.0
+
+
+def _nav_items(dev_mode=False):
+    """左栏条目：普通用户 = NAV_SPEC；开发者模式 = 末尾多一项「开发者选项」。
+
+    尾部追加正好落在"关于与诊断"那组后面，也就是 W 要的"关于导航栏下方"。
+    """
+    return list(NAV_SPEC) + ([DEV_NAV_ITEM] if dev_mode else [])
+
+
+def _upd_help_text():
+    """关于页「检查更新」那个 "?" 的说明。
+
+    为什么是个函数而不是写死的字符串：最后那句"多久之内不再自动查"是**跟着令牌变的**
+    （带令牌 5 秒 / 匿名 10 分钟，见 updater.cooldown_seconds）。这里是用户唯一能看到这条
+    规则的地方，令牌换了还留着旧数字就是骗人 —— 所以开发者选项那边一改令牌，就回来重算它。
+    """
+    t = secrets.get_github_token()
+    if t:
+        tail = ("进入本页时会自动按「正式版」查一次；填了 GitHub 令牌后 5 秒内不重复查"
+                "（认证接口限额 5000 次/小时），后台还会每 10 分钟查一次、"
+                "查到新版本会弹窗提醒。")
+    else:
+        tail = ("进入本页时会自动按「正式版」查一次；同一进程内 10 分钟内不重复查"
+                "（GitHub 匿名接口每 IP 每小时 60 次）。")
+    return ("检查更新：按右边选的通道向 GitHub 查最新 Release。\n"
+            "正式版 = 只看正式发布的 Release；测试版 = 把预发布一起算，给最新的那个。\n"
+            "打开下载页 = 查到新版本时跳到它的下载页。\n" + tail)
 
 
 def _local_model_shown(cfg):
@@ -353,7 +409,7 @@ class SettingsMixin:
         heads = {}                 # (page, section) → 区块标题 frame（锚点）
         page_frames = {}           # page → 页面 frame
         state = {"page": None, "section": None}
-        leaves = _nav_leaves()
+        leaves = _nav_leaves(_nav_items(self._dev_mode))
         page_order, page_items = [], {}
         for it in leaves:
             if it["page"] not in page_order:
@@ -361,9 +417,31 @@ class SettingsMixin:
                 page_items[it["page"]] = []
             page_items[it["page"]].append(it)
 
-        nav = widgets.SideNav(main, NAV_SPEC, width=232,
+        nav = widgets.SideNav(main, _nav_items(self._dev_mode), width=232,
                               on_select=lambda it: _nav_select(it))
         self._settings_nav = nav            # 输出栏的按钮要能直接跳到某个叶子
+
+        def _rebuild_nav():
+            """开发者模式开关一动 → 重算左栏（关于页版本号连点 5 次那条路会调它）。
+
+            项数变了，`leaves` / `page_items` 都得跟着变 —— `_make_page` 是按
+            `page_items[page]` 建区块的，不重算就建不出「开发者选项」那一页。
+            `page_items` 必须**原地清空再填**：`_nav_select` / `_make_page` / `_global_save`
+            都闭包引着这个 dict 对象，换成新对象它们就永远看不见新页了。
+            """
+            nonlocal leaves
+            items = _nav_items(self._dev_mode)
+            nav.spec = items
+            leaves = _nav_leaves(items)
+            page_order[:] = []
+            page_items.clear()
+            for it in leaves:
+                if it["page"] not in page_order:
+                    page_order.append(it["page"])
+                    page_items[it["page"]] = []
+                page_items[it["page"]].append(it)
+            nav.render()
+
         sp = widgets.ScrollPage(main)
 
         # ---- 「高级参数」折叠区（设置页分层）----
@@ -2236,14 +2314,41 @@ class SettingsMixin:
                 lab.pack(side="left", padx=(0, 16))
             names = tk.Frame(head, background=widgets.default_bg())
             names.pack(side="left")
+
+            def _tap_version(_e=None):
+                """版本号那行被点了一下：连够 `DEV_TAP_TIMES` 次就进开发者模式。
+
+                判据重点是"**连着**点"：距上次超过 `DEV_TAP_GAP` 秒就当没在连点、从 1 重数。
+                够数以后**直接跳到「开发者选项」页**当作反馈 —— 不弹窗：这一页开头就写着
+                开关状态，而在左栏平白多一行、还不告诉你进了哪儿，等于让人自己找。
+                """
+                now = time.time()
+                if now - float(self._dev_tap.get("at") or 0) > DEV_TAP_GAP:
+                    self._dev_tap["count"] = 0
+                self._dev_tap["count"] = int(self._dev_tap.get("count") or 0) + 1
+                self._dev_tap["at"] = now
+                if self._dev_tap["count"] < DEV_TAP_TIMES:
+                    return
+                self._dev_tap["count"] = 0
+                self._dev_mode = True
+                _rebuild_nav()              # 左栏补上「开发者选项」
+                nav.select("dev")
+
+            # 版本号那行同时是开发者模式的**入口**。"隐形按钮"的做法就用这个 Label 自己接
+            # 点击：不加控件、字体颜色都不动、光标也保持默认箭头 —— 用户看不出任何差别
+            # （W 2026-10-04 要的"无法察觉"）。比在它下面另摆一个透明按钮更稳：那个无论怎么
+            # 调都会多占一点纵向版面，还容易和 `place` 的层次、`grid` 的格子打架。
             for txt_, font, fg, pady in (
                     ("LLM Chat", ("Microsoft YaHei UI", 16, "bold"), "#111111", (0, 2)),
                     ("本地模型工作台 · 版本 %s" % APP_VERSION,
                      ("Microsoft YaHei UI", 9), "#5a5a5a", (0, 2)),
                     ("llama.cpp 对话 · sd.cpp 生图生视频 · 云端服务商",
                      ("Microsoft YaHei UI", 9), "#808080", (0, 0))):
-                ttk.Label(names, text=txt_, foreground=fg, font=font,
-                          wraplength=420, justify="left").pack(anchor="w", pady=pady)
+                lab = ttk.Label(names, text=txt_, foreground=fg, font=font,
+                                wraplength=420, justify="left")
+                lab.pack(anchor="w", pady=pady)
+                if txt_.startswith("本地模型工作台"):
+                    lab.bind("<Button-1>", _tap_version)
 
             bf = ttk.Frame(t9)
             i = r9["i"]
@@ -2256,8 +2361,13 @@ class SettingsMixin:
 
             # 检查更新：联网在子线程、结果回主线程走 _ui_q
             # （坑 54），通道与本机版本在主线程取快照；查不到就报查不到（见 core/updater.py）
+            #
+            # 检查状态挂 App（`self._upd_check`）而不是这个窗口：关掉设置窗再开，10 分钟冷却
+            # 与上次结果都还在 —— 冷却本来就是为"来回翻设置页"这种进页动作准备的
+            # （W 2026-10-04）。
             import webbrowser
 
+            st = self._upd_check        # App 级会话状态：at / busy / last / cache / render
             up_url = {"v": ""}          # 有新版本时才填上，"打开下载页"才可点
             ch_var = tk.StringVar(value=updater.CHANNEL_LABEL[updater.CHANNEL_STABLE])
             ustate = tk.StringVar(value="还没检查过。")
@@ -2282,10 +2392,53 @@ class SettingsMixin:
                         "打开下载页", "打不开浏览器（%s）。\n把这个地址复制到浏览器里就行：\n%s"
                         % (e, url))
 
-            checking = {"v": False}     # 已经有一个在查（进页那次还没回来 / 连点）
+            def _render(state, info, note="", dialog=False):
+                """把一次结果写到**当前**关于页那行状态上（控件已销毁就什么都不画）。
+
+                `note` = 冷却期进页时追加的说明（"检查时间 14:32 …"）；`dialog` = 弹不弹窗，
+                只给**用户亲手点的那一次** —— 进页自动查与冷却回显都不弹（每次进设置都弹
+                一个框会烦人）。
+
+                放在 `_do_check` **外面**：冷却回显那次根本没发请求，也得能把上次结果写出来；
+                它只认 `info`（本机版本与通道名都在里面），不依赖某一次请求的局部量。
+                """
+                if not ust_lab.winfo_exists():       # 窗口/控件已销毁（坑 135）
+                    return
+                cur = updater.display_version(info.get("current") or APP_VERSION)
+                ch_text_ = updater.channel_label(
+                    info.get("channel") or updater.CHANNEL_STABLE)
+                btn_chk.configure(state="normal")
+                if state == updater.STATE_UPDATE:
+                    up_url["v"] = info.get("url") or ""
+                    btn_open.configure(state="normal")
+                    _say("发现新版本：%s（%s）　本机：%s　发布于 %s"
+                         % (info.get("name") or info["tag"],
+                            info["tag"], cur, info.get("published") or "日期未知")
+                         + note, "#1a7f37")
+                    if dialog:
+                        messagebox.showinfo(
+                            "有新版本", "发现新版本：%s（%s）\n本机：%s\n发布于 %s\n\n%s"
+                            % (info.get("name") or info["tag"], info["tag"], cur,
+                               info.get("published") or "日期未知",
+                               info.get("notes") or "（这个 Release 没写说明）"))
+                elif state == updater.STATE_LATEST:
+                    _say("已是最新：%s（%s）。"
+                         % (updater.display_version(info.get("tag") or cur), ch_text_)
+                         + note, "#1a7f37")
+                elif state == updater.STATE_AHEAD:
+                    # 报实话：不并进「已是最新」（多半是自己编的版本还没打 tag）
+                    _say("本机 %s 比线上最新的 %s 还新（%s）。"
+                         % (cur, updater.display_version(info.get("tag") or "？"),
+                            ch_text_) + note, "#b06000")
+                else:
+                    # msg 自带"检查更新失败："前缀，这里不再叠一层（2026-10-03）
+                    msg = info.get("msg") or "检查更新失败：原因未知。"
+                    _say(msg + note, "#b00020")
+                    if dialog:
+                        messagebox.showwarning("检查更新", msg)
 
             def _do_check(channel=None, notify=True):
-                if checking["v"]:       # 不叠第二个请求：状态与按钮都由前一个负责收尾
+                if st["busy"]:          # 不叠第二个请求：状态与按钮都由前一个负责收尾
                     return
                 # 主线程取快照（通道 + 本机版本），子线程只用这份数据、不读 Tk 变量（坑 54）。
                 # `channel` 显式给出时按它查（进页自动查「正式版」就是走这条），**不去读也
@@ -2293,52 +2446,33 @@ class SettingsMixin:
                 ch_code = channel or updater.channel_of_label(ch_var.get())
                 ch_text = updater.CHANNEL_LABEL.get(ch_code, ch_var.get())
                 cur = updater.display_version(APP_VERSION)
-                checking["v"] = True
+                # 令牌也在主线程取好（坑 54：子线程只用这份快照，不自己去读盘 / 读 Tk）。
+                # 空串 = 走匿名接口（限额 60 次/小时）。
+                tok = secrets.get_github_token()
+                st["busy"] = True
+                st["at"] = time.time()      # 冷却从"真发出了一次请求"起算（失败也算，别反复打）
                 btn_chk.configure(state="disabled")     # 防连点：一次只发一个请求
                 btn_open.configure(state="disabled")
                 up_url["v"] = ""
                 _say("正在向 GitHub 查询%s的最新版本…（本机 %s）" % (ch_text, cur))
 
                 def done(state, info):
-                    checking["v"] = False
-                    if not ust_lab.winfo_exists():       # 窗口/控件已销毁（坑 135）
-                        return
-                    btn_chk.configure(state="normal")
-                    if state == updater.STATE_UPDATE:
-                        up_url["v"] = info.get("url") or ""
-                        btn_open.configure(state="normal")
-                        _say("发现新版本：%s（%s）　本机：%s　发布于 %s"
-                             % (info.get("name") or info["tag"],
-                                info["tag"], cur, info.get("published") or "日期未知"),
-                             "#1a7f37")
-                        if notify:      # 进页自动查那一次不弹窗：每次进设置都弹一个框会烦人
-                            messagebox.showinfo(
-                                "有新版本", "发现新版本：%s（%s）\n本机：%s\n发布于 %s\n\n%s"
-                                % (info.get("name") or info["tag"], info["tag"], cur,
-                                   info.get("published") or "日期未知",
-                                   info.get("notes") or "（这个 Release 没写说明）"))
-                    elif state == updater.STATE_LATEST:
-                        _say("已是最新：%s（%s）。"
-                             % (updater.display_version(info.get("tag") or cur), ch_text),
-                             "#1a7f37")
-                    elif state == updater.STATE_AHEAD:
-                        # 报实话：不并进「已是最新」（多半是自己编的版本还没打 tag）
-                        _say("本机 %s 比线上最新的 %s 还新（%s）。"
-                             % (cur, updater.display_version(info.get("tag") or "？"),
-                                ch_text), "#b06000")
-                    else:
-                        # msg 自带"检查更新失败："前缀，这里不再叠一层（2026-10-03）
-                        _say(info.get("msg") or "检查更新失败：原因未知。", "#b00020")
-                        if notify:
-                            messagebox.showwarning(
-                                "检查更新", info.get("msg") or "检查更新失败：原因未知。")
+                    st["busy"] = False
+                    st["last"] = (state, info)      # 冷却期进页靠它回显（见下面 _enter_about）
+                    r = st.get("render")
+                    if callable(r):
+                        # 结果写给**当前**那个关于页：用户可能已经关掉又重开了
+                        r(state, info, dialog=bool(notify and ust_lab.winfo_exists()))
 
                 def work():
                     try:
-                        st, info = updater.check_update(cur, ch_code)
+                        # cache：上次响应的 ETag 与结果带下去 —— 没变化时 GitHub 回 304
+                        # （不计入匿名限流额度），直接复用上次那份，不重新解析
+                        res = updater.check_update(cur, ch_code, cache=st["cache"],
+                                                   token=tok)
                     except Exception as e:          # 兜底：异常不许穿回 UI 线程
-                        st, info = updater.STATE_ERROR, {"msg": "检查更新时出错：%s" % e}
-                    self._ui_q.put(lambda: done(st, info))
+                        res = (updater.STATE_ERROR, {"msg": "检查更新时出错：%s" % e})
+                    self._ui_q.put(lambda: done(*res))
 
                 threading.Thread(target=work, daemon=True).start()
 
@@ -2355,22 +2489,52 @@ class SettingsMixin:
                                   command=lambda: _open_page(up_url["v"]),
                                   state="disabled")
             btn_open.pack(side="left", padx=(0, 6))
-            widgets.HelpDot(
-                uf, "检查更新：按右边选的通道向 GitHub 查最新 Release。\n"
-                    "正式版 = 只看正式发布的 Release；测试版 = 把预发布一起算，给最新的那个。\n"
-                    "打开下载页 = 查到新版本时跳到它的下载页。\n"
-                    "进入本页时会自动按「正式版」查一次（只更新这行状态，不改右边选的通道）。"
-            ).pack(side="left")
+            upd_help = widgets.HelpDot(uf, _upd_help_text())
+            upd_help.pack(side="left")
+            # 挂在 App 级状态里：开发者选项改了令牌，要能回头把这段说明改成实话
+            st["help"] = upd_help
             uf.grid(row=r9["i"], column=0, columnspan=3, sticky="w", pady=(4, 0))
             r9["i"] += 1
             ust_lab.grid(row=r9["i"], column=0, columnspan=3, sticky="w", pady=(2, 6))
             r9["i"] += 1
 
-            # 进页就自动查一次「正式版」（W 2026-10-04）。次数=进页次数，GitHub 匿名接口
-            # 每 IP 每小时 60 次，正常用远够；正在查的时候 _do_check 里那对禁用按钮会挡住
-            # 重复请求，所以连点也不会叠。`notify=False`：不弹窗，只把这行状态写出来。
-            enter_hooks.setdefault("about", []).append(
-                lambda: _do_check(channel=updater.CHANNEL_STABLE, notify=False))
+            # 渲染器登记给 App：窗口关掉后这个指针还指着这行控件（`_render` 里用
+            # winfo_exists 兜住），而新窗口一建就把它换成新那行 —— 于是"关窗之后结果才
+            # 回来"既不会写丢，也不会写进一个已经不存在的窗口。
+            st["render"] = _render
+
+            # 进页就自动按「正式版」查一次（W 2026-10-04），但带 **10 分钟冷却**
+            # （W 2026-10-04 加，`updater.COOLDOWN`）：来回翻设置页不再反复打 GitHub 匿名
+            # 接口（每 IP 每小时 60 次）。冷却只拦"自动查"这条路径，手动点按钮不受限。
+            #
+            # 冷却期**不能装作刚查过**（W 点名的就是这条文案异常）：把上次结果原样写出来，
+            # 末尾注明检查时刻与"要立刻复查请点按钮"，让人一眼看出这不是刚刚的结果。
+            # 这一次同样 `notify=False`：不弹窗，只写这行状态。
+            def _enter_about():
+                if st["busy"]:          # 上一个请求还在飞：把同一句"正在查"说出来
+                    _say("正在向 GitHub 查询%s的最新版本…（本机 %s）"
+                         % (updater.CHANNEL_LABEL[updater.CHANNEL_STABLE],
+                            updater.display_version(APP_VERSION)))
+                    return
+                # 冷却多久**看有没有令牌**（updater.cooldown_seconds）：匿名 10 分钟是因为
+                # 60 次/小时的额度经不起来回翻页，填了令牌就是 5000 次/小时、压到 5 秒。
+                cd = updater.cooldown_seconds(secrets.get_github_token())
+                if updater.cooldown_left(st["at"], time.time(), cd) <= 0:
+                    _do_check(channel=updater.CHANNEL_STABLE, notify=False)
+                    return
+                last, r = st.get("last"), st.get("render")
+                if last is None or not callable(r):
+                    # 没有上次结果可回显（走不到：`at` 一旦设上，结果回来时必写 `last`；
+                    # 结果没回来则 busy 已在上面拦掉）—— 真遇上就照常查一次，别留空话
+                    _do_check(channel=updater.CHANNEL_STABLE, notify=False)
+                    return
+                cd_txt = ("%d 分钟内" % int(round(cd / 60.0)) if cd >= 120
+                          else "%d 秒内" % int(round(cd)))
+                r(last[0], last[1],
+                  note="　（检查时间 %s，%s不再自动查；要立刻复查请点「检查更新」）"
+                       % (time.strftime("%H:%M", time.localtime(st["at"])), cd_txt))
+
+            enter_hooks.setdefault("about", []).append(_enter_about)
 
             # 高分屏清晰度（DPI 感知）。**冷切换**：Windows 只允许一个进程标一次，
             # 窗口一建出来就改不动了，所以这里只能"记住 + 下次生效"，不能骗用户说立刻变。
@@ -2404,44 +2568,176 @@ class SettingsMixin:
                       justify="left", font=("Microsoft YaHei UI", 9)).grid(
                 row=r9["i"], column=0, columnspan=3, sticky="w")
 
+        # ---- 开发者页（隐藏入口：关于页版本号连点 5 次，见 `DEV_NAV_ITEM`）----
+        @section("dev", "dev")
+        def _t_dev(t_dev, r_dev):
+            """开发者选项：关掉这个模式 / 填 GitHub 令牌 / 把本页填过的东西清回默认。
+
+            **不放 "?"**（W 2026-10-04 点名）：目标用户是开发者，这一页每件事都自解释。
+            文案按"开发者"口吻压缩：只留状态与怎么重新进来，限额/冷却这类数字属于
+            关心就查的细节（W 2026-10-04），解释性长句一律收进按钮弹窗里。
+            这里的设置**不随"关闭开发者模式"消失**（W 2026-10-04 明确要求）：关掉的只是入口
+            —— 令牌在 secrets.json、已提醒过的版本在配置里，两处都不看这个开关。
+            """
+            tok_lab = tk.StringVar()
+            msg_lab = tk.StringVar()
+
+            def _refresh():
+                t = secrets.get_github_token()
+                if t:
+                    tok_lab.set("GitHub 令牌：已填写 " + secrets.mask(t))
+                else:
+                    tok_lab.set("GitHub 令牌：未填写（匿名接口 60 次/小时）")
+
+            def _sync_upd_help():
+                """令牌一变，关于页那个 "?" 里"多久不再自动查"就得跟着变（见 `_upd_help_text`）。
+                关于页没建过、或它那个窗口已关，就什么都不用做（文本是悬停时才读的）。"""
+                h = self._upd_check.get("help")
+                if h is None:
+                    return
+                h.text = _upd_help_text()
+
+            def close_dev():
+                self._dev_mode = False
+                _rebuild_nav()              # 左栏把「开发者选项」收走
+                nav.select("about")         # 把用户放回「关于」——他刚点的那个入口就在那儿
+
+            def fill_token():
+                d = tk.Toplevel(win)
+                d.withdraw()                # 先藏起来，摆正了再显示（否则左上角闪一下）
+                d.title("GitHub 令牌")
+                ttk.Label(d, text="GitHub 令牌",
+                          font=("Microsoft YaHei UI", 10, "bold")).pack(
+                    anchor="w", padx=14, pady=(12, 4))
+                ttk.Label(d, text="限额 60 → 5000 次/小时，更新冷却 10 分钟 → 5 秒，"
+                                  "并开启后台定时检查。\n"
+                                  "只写进本机 secrets.json，界面与配置文件仅显示掩码。",
+                          foreground="#808080", wraplength=430, justify="left",
+                          font=("Microsoft YaHei UI", 9)).pack(anchor="w", padx=14)
+                e = ttk.Entry(d, width=48, show="●")
+                e.pack(padx=14, pady=10)
+                ttk.Label(d, textvariable=tok_lab, foreground="#808080",
+                          font=("Microsoft YaHei UI", 9)).pack(anchor="w", padx=14)
+                bf = ttk.Frame(d)
+                bf.pack(padx=14, pady=(6, 14), anchor="e")
+
+                def save():
+                    k = e.get().strip()
+                    if not k:       # 空 = 不改（要清掉有下面那个「清除」）
+                        d.destroy()
+                        return
+                    secrets.set_github_token(k)
+                    _refresh()
+                    _sync_upd_help()
+                    self._dev_upd_start()   # 令牌到手 → 后台那个定时器可以起来了
+                    msg_lab.set("已保存 GitHub 令牌。")
+                    d.destroy()
+
+                def clear():
+                    if messagebox.askyesno("GitHub 令牌", "清除已填的 GitHub 令牌？"):
+                        secrets.set_github_token("")
+                        _refresh()
+                        _sync_upd_help()
+                        self._dev_upd_start()   # 令牌没了 → 定时器自己会停
+                        msg_lab.set("已清除 GitHub 令牌。")
+                    d.destroy()
+
+                ttk.Button(bf, text="清除", width=8, command=clear).pack(side="left", padx=4)
+                ttk.Button(bf, text="取消", width=8, command=d.destroy).pack(side="left", padx=4)
+                ttk.Button(bf, text="保存令牌", width=10, command=save).pack(side="left")
+                e.focus_set()
+                widgets.center_on(d, win)   # 摆到设置页正中，别落在屏幕左上角
+
+            def reset_dev():
+                t = secrets.get_github_token()
+                if not messagebox.askyesno(
+                        "重置开发者选项",
+                        "清掉 GitHub 令牌%s，以及「已提醒过、不再弹窗」的版本记录？\n"
+                        "开发者模式保持开启。"
+                        % ("（当前 %s）" % secrets.mask(t) if t else "（本来就没填）")):
+                    return
+                secrets.set_github_token("")
+                self.cfg["dev_upd_dismissed"] = ""
+                save_config(self.cfg)
+                _refresh()
+                _sync_upd_help()
+                self._dev_upd_start()       # 令牌清空了 → 后台定时器停掉
+                msg_lab.set("已重置开发者选项。")
+
+            # 控件放在回调之后建：`command=名字` 是建控件那一刻就要绑定的（坑 115）
+            i = r_dev["i"]
+            r_dev["i"] += 1
+            ttk.Label(t_dev, text="开发者模式已开启 · 仅本次运行有效 · "
+                                  "重新进入：关于页版本号连点 5 次",
+                      foreground="#5a6a7a", wraplength=720, justify="left",
+                      font=("Microsoft YaHei UI", 9)).grid(
+                row=i, column=0, columnspan=3, sticky="w", pady=(0, 6))
+
+            i = r_dev["i"]
+            r_dev["i"] += 1
+            brf = ttk.Frame(t_dev)
+            brf.grid(row=i, column=0, columnspan=3, sticky="w", pady=(2, 6))
+            ttk.Button(brf, text="关闭开发者模式",
+                       command=close_dev).pack(side="left", padx=(0, 6))
+            ttk.Button(brf, text="填写 GitHub 令牌",
+                       command=fill_token).pack(side="left", padx=(0, 6))
+            ttk.Button(brf, text="重置开发者选项",
+                       command=reset_dev).pack(side="left")
+
+            for var, fg in ((tok_lab, "#5a6a7a"), (msg_lab, "#1a7f37")):
+                i = r_dev["i"]
+                r_dev["i"] += 1
+                ttk.Label(t_dev, textvariable=var, foreground=fg, wraplength=720,
+                          justify="left", font=("Microsoft YaHei UI", 9)).grid(
+                    row=i, column=0, columnspan=3, sticky="w", pady=(0, 4))
+            _refresh()
+
         # ---- 区块 10：获取引擎（与「模型文件管理」同一页；左栏合成一项「模型文件与引擎」，
-         #      这一段的锚点靠 nav_hide 走 jump="eng" 定位）----
+        #      这一段的锚点靠 nav_hide 走 jump="eng" 定位）----
         @section("files", "eng")
         def _t10(t10, r10):
-            """本地引擎的获取入口：说清现状 + 把官方 Releases 页送到浏览器里打开。
+            """本地引擎的获取：说清现状 + 给出可选档位 + 一键装到程序目录的 engines 下。
 
-            为什么不做成「一键下载安装」：预编译包 100~200MB，还要按 CUDA/CPU 分档、
-            解压到指定目录、覆盖旧版本 —— 那等于把网络依赖和破坏性操作塞进一个按钮，
-            下载失败留下半个目录比什么都没下更难收拾。W 2026-10-01 的口径是
-            "实现较难只提供仓库链接也行"，所以这一页只负责**把人送到对的地方、
-            把该看的状态说清楚**；真要动文件的是那三个入口 + 服务参数里的指路。
+            **口径变更（W 2026-10-04）**：原来这里只导航不下载（`09` §1「引擎只给入口」）。
+            W 裁定分三期，本轮落前两期 —— ①「复制下载链接」改为复制**选中档位的资产直链**、
+            「打开下载页」指向**具体那一次发布**；②新增「自动安装引擎」（选档 → 下载 →
+            校验 → 解压 → 换目录）。**第三期「自动更新 / 原地升级」W 已裁定不做**（原话：
+            "不增加自动更新引擎的功能，因为引擎版本一般比较稳定，不需要改动"，`16` §18）。
+            **这一页不注册任何 `enter_hooks`**：开页一次网络请求都不发，版本清单只在用户
+            主动点「刷新版本」时拉 —— 想固定引擎版本的用户走「打开下载页 / 复制下载链接」。
+
+            为什么装完**不自动改配置**：`exe` / `sd_dir` 是用户自己指的路径，程序替他改
+            就等于替他做决定（`15` §2 第 4 条同一条纪律）。装完只报出路径与该去哪儿指。
+
+            网络：`github.com` 在部分网络下不通（`07` §4），所以每个入口都还有
+            「打开下载页 / 复制链接」两条退路，自动安装失败不许把人堵死。
             """
             import webbrowser
-            # (标题, 下载页, 用户在配置里填的那项, 真正要存在才行的文件, 该放哪儿, 目录怎么称呼, 指路在哪, 额外说明)
+            # (键, 标题, 用户在配置里填的那项, 真正要存在才行的文件, 该放哪儿, 目录怎么称呼, 指路在哪, 额外说明)
             engines = [
-                ("llama.cpp（对话引擎）",
-                 "https://github.com/ggml-org/llama.cpp/releases",
+                ("llama",
+                 "llama.cpp（对话引擎）",
                  lambda: str((self.cfg.get("exe") or "").strip()),
                  lambda: str((self.cfg.get("exe") or "").strip()),
                  lambda: os.path.dirname(str((self.cfg.get("exe") or "").strip())) or APP_DIR,
                  "llama-server 所在目录",
                  "本地模型 → 服务参数",
-                 "CUDA 版还要把 cudart 包里的 dll 一起放进同一目录，否则启动时报缺 dll。"),
-                ("stable-diffusion.cpp（生图 / 生视频引擎）",
-                 "https://github.com/leejet/stable-diffusion.cpp/releases",
+                 "CUDA 版还要把 cudart 包里的运行库一起放进同一目录，否则启动时报缺 dll。"),
+                ("sd",
+                 "stable-diffusion.cpp（生图 / 生视频引擎）",
                  lambda: str((self.cfg.get("sd_dir") or "").strip()),
                  lambda: os.path.join(str((self.cfg.get("sd_dir") or "").strip()),
-                                      "sd-cli.exe"),
+                                      engine_install.exe_name("sd")),
                  lambda: str((self.cfg.get("sd_dir") or "").strip()),
                  "sd.cpp 引擎目录",
                  "本地模型 → 生图",
                  "生图与生视频共用这一个可执行文件，只是参数不同；"
-                 "Windows 上文件名是 sd-cli.exe，同级还要有一堆 dll。"),
+                 "同目录还要有一堆运行库 dll。"),
             ]
 
             def _state_of(cfg_of, exe_of):
                 # 判"没指路"要看**用户填的那一项**，不能拿拼出来的文件路径判空：
-                # sd 那项拼的是 os.path.join(sd_dir, "sd-cli.exe")，sd_dir 留空时得到
+                # sd 那项拼的是 os.path.join(sd_dir, 可执行文件名)，sd_dir 留空时得到
                 # 相对路径 "sd-cli.exe"，非空但也不存在 —— 报"指了路但找不到"就冤枉人了
                 # （和坑 42 里 `os.path.join("", "output")` 在 CWD 建目录是同一个根子）。
                 if not str(cfg_of() or "").strip():
@@ -2451,18 +2747,74 @@ class SettingsMixin:
                     return "已就位：" + exe, "#1a7f37"
                 return "指了路但找不到这个文件：" + exe, "#b00020"
 
-            for title, url, cfg_of, exe_of, dir_of, what, setting, note in engines:
+            # ---- 这几个 helper **定义在循环之外**，全部显式收参。
+            #
+            # 为什么不能定义在循环里按默认参数绑（那正是下面注释里写的正确做法）：
+            # 一旦循环内的函数**按名字**去调另一个循环内定义的函数，那个名字在运行时
+            # 解析到的是**最后一次循环**的定义 —— 也就是两个引擎都去动 sd 那份。
+            # 2026-10-04 真踩过：点 llama 的「刷新版本」，写进状态行的是 sd 的版本行
+            # （坑 124 的同族，只是方向反过来）。
+            def _say(sv, stl, text="", color="#5a5a5a"):
+                sv.set(text)
+                stl.configure(foreground=color)
+
+            def _page_of(b, k):
+                """「打开下载页」开哪一页：查到版本就开**具体那一次发布**，否则退回发布列表页。"""
+                if b["builds"]:
+                    return b["builds"][0].get("page") or engine_install.page_url(k)
+                return engine_install.page_url(k)
+
+            def _plan_of(b, k, fv):
+                """当前选中的档位落成下载清单；没查过版本就返回 None（不猜）。"""
+                if not b["builds"] or not fv.get():
+                    return None
+                build = engine_install.pick_build(b["builds"], fv.get())
+                if not build:
+                    return None
+                return engine_install.plan(k, build, fv.get())
+
+            def _on_pick(b, k, fv, vv):
+                """换档位就换版本行：版本号 + 两个包加起来多大。"""
+                if not b["builds"]:
+                    vv.set("还没查过可用版本。")
+                    return
+                build = engine_install.pick_build(b["builds"], fv.get())
+                fl = [f for f in engine_install.flavors_from(build)
+                      if f["id"] == fv.get()]
+                if not fl:
+                    vv.set("这个档位当前版本没有可用包。")
+                    return
+                mb = fl[0]["size"] / 1048576.0
+                extra = "（含运行库）" if fl[0].get("extra") else ""
+                vv.set("最新可用：%s · %.0f MB%s" % (build.get("tag") or "？", mb, extra))
+
+            def _guard(b, k, co):
+                """装之前拦一下"正在被用"的那份引擎：覆盖它等于把跑着的服务弄坏。"""
+                cur = str(co() or "").strip()
+                if not cur:
+                    return ""
+                try:
+                    same = os.path.normcase(os.path.dirname(cur)) == os.path.normcase(
+                        engine_install.default_dir(k))
+                except Exception:
+                    return ""
+                if same and server_process_alive():
+                    return "这份引擎正在运行，请先在主页面停止服务再安装。"
+                return ""
+
+            for key, title, cfg_of, exe_of, dir_of, what, setting, note in engines:
                 i = r10["i"]
                 r10["i"] += 1
                 th = tk.Frame(t10, background=widgets.default_bg())
                 th.grid(row=i, column=0, columnspan=3, sticky="w", pady=(10, 2))
                 tk.Label(th, text=title, font=("Microsoft YaHei UI", 10, "bold"),
                          background=widgets.default_bg(), anchor="w").pack(side="left")
-                widgets.HelpDot(th, "把下载的压缩包**整包解压**到引擎目录（不要只放那一个 exe，"
-                                     "同目录的运行库 dll 都要）。\n" + note +
-                                "\n解压完再回 设置 → %s 把路径指过去。"
-                                "引擎本来就装在这台机器上、只是换了位置的，"
-                                "改指路就行，不用重新下载。" % setting).pack(
+                widgets.HelpDot(th, "「自动安装引擎」会把压缩包整包解压（不要只放那一个 exe，"
+                                     "同目录的运行库都要），落到程序目录下的 engines 里。\n"
+                                     + note +
+                                     "\n装完回 设置 → %s 把路径指过去。"
+                                     "引擎本来就装在这台机器上、只是换了位置的，"
+                                     "改指路就行，不用重装。" % setting).pack(
                     side="left", padx=(6, 0))
                 st_var = tk.StringVar(value="")
                 st = ttk.Label(t10, textvariable=st_var, wraplength=600, justify="left",
@@ -2470,8 +2822,27 @@ class SettingsMixin:
                 st.grid(row=r10["i"], column=1, columnspan=2, sticky="w", pady=(0, 2))
                 r10["i"] += 1
 
-                # 循环里定义的回调一律把当轮的值绑成默认参数：不绑的话两个引擎的按钮
-                # 都会指到最后一个（闭包按变量名取，取到的是循环结束后的那一份）
+                # ---- 档位行：下拉 + 版本回显 + 「刷新版本」。
+                #     单独占一行而不是塞进按钮那一排：`ScrollPage` 只竖滚不横滚（坑 106），
+                #     按钮排已经接近右界，再加两个控件必然越界（坑 76）。
+                #     变量一律挂控件保活，否则被 GC 后 Label 静默变空（坑 145 ①）。
+                flavor_var = tk.StringVar(value="")
+                ver_var = tk.StringVar(value="还没查过可用版本。")
+                frow = ttk.Frame(t10)
+                frow.grid(row=r10["i"], column=0, columnspan=3, sticky="w", pady=(2, 2))
+                r10["i"] += 1
+                ttk.Label(frow, text="档位").pack(side="left", padx=(0, 4))
+                flavor_cb = ttk.Combobox(frow, textvariable=flavor_var, state="readonly",
+                                         width=24, values=[])
+                # 构造时就绑 textvariable（坑 112：只 set 变量而没绑，界面是空的而数据是对的）
+                flavor_cb.pack(side="left", padx=(0, 6))
+                ttk.Label(frow, textvariable=ver_var, foreground="#5a5a5a",
+                          font=("Microsoft YaHei UI", 9)).pack(side="left")
+                btn_ver = ttk.Button(frow, text="刷新版本", width=10)
+                btn_ver.pack(side="left", padx=(6, 0))
+
+                # ---- 循环里定义的回调一律把当轮的值绑成默认参数：不绑的话两个引擎的按钮
+                #      都会指到最后一个（闭包按变量名取，取到的是循环结束后的那一份，坑 124）
                 def refresh(_e=None, co=cfg_of, so=exe_of, sv=st_var, stl=st):
                     t_, color = _state_of(co, so)
                     sv.set(t_)
@@ -2480,8 +2851,70 @@ class SettingsMixin:
                 bf = ttk.Frame(t10)
                 bf.grid(row=r10["i"], column=1, columnspan=2, sticky="w", pady=(0, 4))
                 r10["i"] += 1
+                # 第二排（安装那一排）也在这里建：行的先后照旧，6 个按钮挤一排必然
+                # 越出右界（`ScrollPage` 只竖滚不横滚 —— 坑 76 / 106）。
+                # **必须早于 `do_install` 定义**：它要把这两个按钮绑成默认参数，
+                # 按钮建在后面的话那两个默认参数拿到 None，一装就 AttributeError，
+                # 界面看着像"点了没反应"。
+                inf = ttk.Frame(t10)
+                inf.grid(row=r10["i"], column=1, columnspan=2, sticky="w", pady=(0, 6))
+                r10["i"] += 1
+                btn_dl = ttk.Button(inf, text="自动安装引擎", width=13)
+                btn_dl.pack(side="left", padx=(0, 6))
+                btn_cancel = ttk.Button(inf, text="取消安装", width=10, state="disabled")
+                btn_cancel.pack(side="left")
 
-                def open_page(u=url):
+                # 这一行引擎的会话状态：可用版本 / 正在装 / 取消标志
+                box = {"builds": [], "busy": False, "stop": None}
+
+                def load_versions(_e=None, b=box, cb=flavor_cb, vv=ver_var, k=key,
+                                  sv=st_var, stl=st, btn=btn_ver, fv=flavor_var,
+                                  rf=refresh):
+                    """点「刷新版本」才联网（开页不联网：首屏与无头自检都不该被网络拖累）。
+
+                    令牌在主线程取快照再进子线程 —— 子线程不读 Tk 变量、也不自己读盘（坑 54）。
+                    """
+                    if b["busy"]:
+                        return
+                    tok = secrets.get_github_token()
+                    b["busy"] = True
+                    btn.configure(state="disabled")
+                    _say(sv, stl, "正在查可用版本…")
+
+                    def done(builds, why, kk=k, bb=b, cb=cb, vv=vv, sv=sv, stl=stl,
+                             btn=btn, fv=fv, rf=rf):
+                        bb["busy"] = False
+                        try:
+                            btn.configure(state="normal")
+                        except Exception:
+                            pass
+                        if not builds:
+                            _say(sv, stl, why or "没查到带本平台安装包的版本。", "#b00020")
+                            return
+                        bb["builds"] = builds
+                        ids = [f["id"] for f in engine_install.flavors_from(builds[0])]
+                        cb.configure(values=ids)
+                        if ids:
+                            fv.set(ids[0])
+                        # 显式传当轮的那几个对象：`_on_pick` 定义在循环之外，
+                        # 不传就是 None（它只收显式参数，不吃默认参数）。
+                        _on_pick(bb, kk, fv, vv)
+                        # 状态行复原成本行引擎的现状（W 2026-10-04）：查版本只是顺带一问，
+                        # 那一行显示的是"引擎装没装 / 指没指路"，不能停在"正在查可用版本…"。
+                        # 查到的版本号与体积由上面那行版本行显示，不挤在这一行里。
+                        rf()
+
+                    def work():
+                        try:
+                            builds, why = engine_install.list_builds(k, token=tok)
+                        except Exception as e:       # 兜底：异常不许穿回 UI 线程（坑 54）
+                            builds, why = [], "查可用版本时出错：%s" % e
+                        self._ui_q.put(lambda: done(builds, why))
+
+                    threading.Thread(target=work, daemon=True).start()
+
+                def open_page(_e=None, b=box, k=key):
+                    u = _page_of(b, k)
                     try:
                         if not webbrowser.open(u):
                             raise RuntimeError("浏览器没响应")
@@ -2490,14 +2923,113 @@ class SettingsMixin:
                             "打开下载页", "打不开浏览器（%s）。\n把这个地址复制到浏览器里就行：\n%s"
                             % (e, u))
 
-                def copy_link(u=url, sv=st_var):
+                def copy_link(_e=None, b=box, k=key, fv=flavor_var, sv=st_var):
+                    """复制**选中档位的安装包直链**；没查过版本才退回发布列表页。
+
+                    原来复制的是发布列表页地址，用户贴过去还要自己翻哪个包；
+                    查过版本后直接给能点的那个包。
+                    """
+                    p = _plan_of(b, k, fv)
+                    u = (p["files"][0]["url"] if p and p["files"]
+                         else engine_install.page_url(k))
                     try:
                         t10.winfo_toplevel().clipboard_clear()
                         t10.winfo_toplevel().clipboard_append(u)
-                        sv.set("下载页链接已复制，贴到浏览器地址栏就能打开。")
+                        sv.set("安装包链接已复制，贴到浏览器地址栏就能开始下载。"
+                               if p and p["files"] else "发布页链接已复制。")
                     except Exception as e:
                         messagebox.showwarning("复制链接", "复制失败（%s），"
                                                "可以直接点「打开下载页」。" % e)
+
+                def do_install(_e=None, b=box, k=key, sv=st_var, stl=st, fv=flavor_var,
+                               setting=setting, co=cfg_of, btn_dl=btn_dl,
+                               btn_cancel=btn_cancel):
+                    p = _plan_of(b, k, fv)
+                    if not p or not p["files"]:
+                        # 同一句也写进状态行：无头自检看不见 messagebox，
+                        # 而"没刷新就点安装"这条规矩必须能被断言（也更像这页的口径）。
+                        _say(sv, stl, "还没查过可用版本 —— 先点「刷新版本」，再选一个档位。",
+                             "#b00020")
+                        messagebox.showinfo("自动安装引擎",
+                                            "先点「刷新版本」，再选一个档位。")
+                        return
+                    why = _guard(b, k, co)
+                    if why and not messagebox.askyesno("自动安装引擎", why + "\n\n仍要继续吗？"):
+                        return
+                    dest = p["dir"]
+                    tok = secrets.get_github_token()
+                    b["stop"] = threading.Event()
+                    b["busy"] = True
+                    btn_dl.configure(state="disabled")
+                    btn_cancel.configure(state="normal")
+                    _say(sv, stl, "准备下载 %s（%.0f MB）…"
+                         % (p["files"][0]["name"], p["total"] / 1048576.0))
+
+                    def emit(text):
+                        self._ui_q.put(lambda: _say(sv, stl, text))
+
+                    def finish(ok, why_, exe, p=p, b=b, sv=sv, stl=stl, k=k,
+                               btn_dl=btn_dl, btn_cancel=btn_cancel, setting=setting,
+                               co=co):
+                        b["busy"] = False
+                        for w in (btn_dl, btn_cancel):
+                            try:
+                                w.configure(state="normal")
+                            except Exception:
+                                pass
+                        if not ok:
+                            _say(sv, stl, why_, "#b00020")
+                            messagebox.showwarning(
+                                "自动安装引擎",
+                                "%s\n\n也可以点「打开下载页」自己下。" % why_)
+                            return
+                        _say(sv, stl, "已装好：" + exe, "#1a7f37")
+                        messagebox.showinfo(
+                            "自动安装引擎",
+                            "已装到：\n%s\n\n回 设置 → %s 把路径指过去就能用。"
+                            % (exe, setting))
+
+                    def work():
+                        tmp = engine_install.staging_dir()
+                        got, why2, exe3, files = True, "", "", []
+                        try:
+                            for f in p["files"]:
+                                emit("正在下载 %s（%.0f MB）…"
+                                     % (f["name"], f["size"] / 1048576.0))
+                                dest_f = os.path.join(tmp, f["name"])
+                                ok, why2 = engine_install.download(
+                                    f["url"], dest_f, emit=emit, stop_flag=b["stop"],
+                                    digest=f.get("digest") or "")
+                                if not ok:
+                                    got = False
+                                    break
+                                f["path"] = dest_f
+                                files.append(f)
+                            if got:
+                                ok3, why3, exe3 = engine_install.install(
+                                    k, files, dest, emit=emit, stop_flag=b["stop"],
+                                    guard=lambda: "已取消" if b["stop"].is_set() else "")
+                                got, why2 = ok3, why3
+                        except Exception as e:
+                            got, why2 = False, "安装时出错：%s" % e
+                        finally:
+                            engine_install.cleanup(tmp)
+                        self._ui_q.put(lambda: finish(got, why2, exe3))
+
+                    def work_safe():
+                        try:
+                            work()
+                        except Exception as e:      # 兜底：异常不许穿回 UI 线程（坑 54）
+                            self._ui_q.put(
+                                lambda: finish(False, "安装时出错：%s" % e, ""))
+
+                    threading.Thread(target=work_safe, daemon=True).start()
+
+                def do_cancel(_e=None, b=box, sv=st_var, stl=st, fv=flavor_var):
+                    if b["stop"] is None:
+                        return
+                    b["stop"].set()
+                    _say(sv=sv, stl=stl, text="正在取消…")
 
                 ttk.Button(bf, text="打开下载页", width=12, command=open_page).pack(
                     side="left", padx=(0, 6))
@@ -2508,6 +3040,13 @@ class SettingsMixin:
                                d(), w, s)).pack(
                     side="left", padx=(0, 6))
                 ttk.Button(bf, text="重新检测", width=10, command=refresh).pack(side="left")
+                btn_dl.configure(command=do_install)
+                btn_cancel.configure(command=do_cancel)
+                btn_ver.configure(command=load_versions)
+                # 包一层把当轮那四个对象绑进去：`_on_pick` 在循环之外，只收显式参数
+                flavor_cb.bind("<<ComboboxSelected>>",
+                               lambda e=None, b=box, k=key, fv=flavor_var, vv=ver_var:
+                               _on_pick(b, k, fv, vv))
                 refresh()
 
         # ---- 区块 8：模型文件管理（左栏「模型文件与引擎」那一项指到这里）----

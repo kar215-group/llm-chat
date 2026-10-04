@@ -10,14 +10,27 @@
 
 ⚠ **404 必须报人话**：仓库不可见 / 该版本已撤下 / 出口被网关拦时，匿名查 releases 都会 404；
 不能静默，更不能假装"已是最新"。
+
+**省额度**（W 2026-10-04）：匿名接口每 IP 每小时只有 60 次，而"进关于页就查一次"会白白吃它。
+两手一起上：① `cache` 里留着上次响应的 ETag 与结果，下次请求带上 `If-None-Match` —— 内容没变
+时 GitHub 回 304，且**不计入限流额度**，这时直接复用上次那份、连 JSON 都不重新解析；
+② 界面侧给"进页自动查"加冷却（`COOLDOWN`），手动点「检查更新」不受限。
+两者只管"什么时候问"，不管"结论是什么"：304 也**不许**被当成"已是最新"（那是 200 + 比对的结果）。
+
+**带令牌那条路**（藏在设置 → 开发者选项里，普通用户看不到）：`token` 非空时请求带
+`Authorization: Bearer <token>`，额度从 60 次/小时升到 5000 次/小时，于是界面敢把进页冷却
+压到几秒、还敢在后台定期查（见 ui/app.py 的 `_dev_upd_*`）。令牌只走 `secrets.json`，
+不落配置、不进日志 —— 这个模块只负责把它放进请求头，不负责它在哪儿存。
 """
 
 import json
+import os
 import re
 import urllib.error
 import urllib.request
 
-from .config import USER_AGENT
+from . import config
+from .config import APP_DIR, USER_AGENT
 
 # 对外仓库坐标（公开仓库，匿名 API 可读）
 REPO = "kar215-group/llm-chat"
@@ -38,9 +51,93 @@ STATE_ERROR = "error"        # 查不到
 
 TIMEOUT = 12                  # 秒。GitHub 匿名接口正常 <1s
 
+# 「进关于页自动查」两次之间的最小间隔（秒）；手动点「检查更新」不受它限制。
+# 由来：匿名接口每 IP 每小时只给 60 次，而"来回翻设置页"这种不花钱的操作不该把额度吃光。
+# W 2026-10-04 定 600 秒。它只是个**节流**，不改变任何结论：冷却内不发请求。
+COOLDOWN = 600
+
+# 开发者选项里填了 GitHub 令牌时的冷却（W 2026-10-04 定 **60 秒**）：带认证的额度是
+# 5000 次/小时，进页那点频率远够不着上限，没必要再让用户等 10 分钟。
+# 从 5 秒调到 60 秒是 W 2026-10-04 的第二次口径：5 秒那档实测太频繁，而 ETag 机制
+# （`Cache` 落盘）已经把"每次都真打一次"这个问题解决了大半 —— 冷却只需兜住翻页节奏。
+COOLDOWN_TOKEN = 60
+
+
+# 后台**定时**查更新的间隔（秒）。只有开发者选项里填了 GitHub 令牌才起这个定时器：
+# 同一条额度账 —— 匿名 60 次/小时经不起后台常驻，认证 5000 次/小时则连零头都不算。
+# 它和 `COOLDOWN` 不冲突：那个管"进页自动查"的节流，这个管"不在关于页时也盯着"。
+# W 2026-10-04 定 1800 秒（30 分钟，原 10 分钟）：本程序发版不频繁，盯着太勤没有意义。
+POLL_EVERY = 1800
+
+
+def cooldown_seconds(token=""):
+    """按有没有令牌给出该用哪个冷却；界面只问这一处，别自己写 if。"""
+    return COOLDOWN_TOKEN if str(token or "").strip() else COOLDOWN
+
 
 class UpdaterError(Exception):
     """可预期失败（网络 / 404 / 返回体不对）—— 都已翻成人话。"""
+
+
+class NotModified(Exception):
+    """服务端回了 304：内容没变，直接复用上次那份（不计入 GitHub 限流额度）。
+
+    只在**确实留着上次结果**时才允许走到这里（见 `fetch_releases`）；没得复用就翻成人话报错。
+    """
+
+
+class Cache:
+    """上一次 releases 响应的 ETag 与解析结果（**只存内存**，由调用方持有，进程退出即清）。
+
+    为什么要带 `If-None-Match`：内容没变时 GitHub 回 304 并且不计入匿名限流额度
+    （60 次/小时/IP），于是"进关于页就查一次"可以放心带着它发。
+    304 时复用 `items`，不重新解析 JSON —— 也就不存在"304 没东西可比"这种岔路。
+    """
+
+    def __init__(self):
+        self.etag = None      # 上次响应头里的 ETag（服务端没给就留 None：下次走普通 GET）
+        self.items = None     # 上次解析好的数组（None = 没缓存过，304 时不敢复用）
+
+
+class FileCache(Cache):
+    """`Cache` 的**落盘**版：ETag 与上次那份数组一起写进 `<APP_DIR>/upd_cache.json`。
+
+    为什么内存那份不够（W 2026-10-04）：匿名额度 60 次/小时是**按 IP 跨进程**算的，
+    而内存缓存进程退出即清 —— 于是"重启程序 → 点一次刷新版本"必然又吃 1 次额度，
+    一天几十次就见底。落盘之后重启也能带 `If-None-Match`，拿到 304（不计额度）。
+
+    写盘一律走 `config.atomic_write_json`（先写 .tmp 再 `os.replace`，不抛）。
+    **缓存是纯优化，不是权威**：读不出来 / 坏了 / 写不下去，一律当没有缓存（走普通 200），
+    绝不让"缓存坏了"变成"查不到版本"。`items` 为空时**不落盘**（304 时没东西可复用）。
+    """
+
+    def __init__(self, path=None):
+        Cache.__init__(self)
+        self.path = path or os.path.join(APP_DIR, "upd_cache.json")
+
+    def load(self):
+        """把上次落盘的 ETag 与数组读回来；读不到 / 不成形就当没有（返回是否可用）。"""
+        try:
+            with open(self.path, "rb") as f:
+                data = json.loads(f.read().decode("utf-8"))
+        except Exception:
+            return False
+        items = data.get("items")
+        if not isinstance(items, list) or not items:
+            return False
+        self.items = items
+        self.etag = str(data.get("etag") or "") or None
+        return True
+
+    def save(self):
+        """把当前这份写下去。**只在有东西可复用时写**（见类注释）。"""
+        if not self.items:
+            return False
+        try:
+            return bool(config.atomic_write_json(
+                self.path, {"etag": self.etag or "", "items": self.items}))
+        except Exception:
+            return False
 
 
 # ---------------------------------------------------------------- 版本号解析与比较
@@ -113,20 +210,68 @@ def channel_label(channel):
     return CHANNEL_LABEL.get(channel, "正式版")
 
 
+# ---------------------------------------------------------------- 冷却（进页自动查的节流）
+
+def cooldown_left(last_at, now, cooldown=COOLDOWN):
+    """距"允许下一次自动检查"还差几秒；`<= 0` = 现在就可以查。
+
+    `last_at` / `now` 都是**墙钟秒**（`time.time()`），不是单调时钟 —— 界面还要用它
+    把这行写成"上次检查 14:32"，两种语义不能混用（所以这里不做时间源抽象）。
+    `last_at` 为 0 / None（从没查过）时返回 0：第一次进页总能查。
+    """
+    if not last_at:
+        return 0
+    elapsed = float(now) - float(last_at)
+    if elapsed < 0:        # 系统时间往回拨过：当成"刚刚查过"，别把冷却拖成无穷（手动仍可查）
+        elapsed = 0.0
+    return max(0.0, float(cooldown) - elapsed)
+
+
 # ---------------------------------------------------------------- 取 Release 列表
 
-def _http_get(url, timeout):
-    req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT,
-                                               "Accept": "application/vnd.github+json"})
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
-        return resp.read()
+def _http_get(url, timeout, etag=None, token=None):
+    """GET → `(body, etag)`；带了 `etag` 就发 `If-None-Match`、带了 `token` 就发 `Authorization`。
 
-
-def fetch_releases(fetch=None, timeout=TIMEOUT, repo=REPO):
-    """GET 该仓库的 releases 列表 → 解析成数组；`fetch` 可注入（自检喂假响应）。"""
-    f = fetch or _http_get
+    服务端回 304 时 urlopen 抛 HTTPError（没有响应体可读），这里翻成 `NotModified`：
+    对调用方来说"没变化"不是失败。
+    """
+    headers = {"User-Agent": USER_AGENT, "Accept": "application/vnd.github+json"}
+    if etag:
+        headers["If-None-Match"] = str(etag)
+    if token:
+        headers["Authorization"] = "Bearer " + str(token).strip()
+    req = urllib.request.Request(url, headers=headers)
     try:
-        body = f(API_RELEASES % repo, timeout)
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return resp.read(), resp.headers.get("ETag")
+    except urllib.error.HTTPError as e:
+        if int(getattr(e, "code", 0) or 0) == 304:
+            raise NotModified(str(etag or ""))
+        raise
+
+
+def fetch_releases(fetch=None, timeout=TIMEOUT, repo=REPO, cache=None, token=None):
+    """GET 该仓库的 releases 列表 → 解析成数组；`fetch` 可注入（自检喂假响应）。
+
+    `cache`（`Cache`，可不传）里留着上次的 ETag 与结果：有得带就带上 `If-None-Match`，
+    内容没变时 GitHub 回 304、**不计入限流额度**，这时直接复用上次那份（不重新解析）。
+    结果照旧写回 `cache`，供下一次用。
+
+    `token` 非空时请求带 `Authorization`（额度 60 → 5000 次/小时）。它**不往 `fetch` 上递**：
+    自检注入的假 fetch 只认 `(url, timeout, etag)`，多一个位置参数就把它们全打翻；
+    令牌只在与真实 `_http_get` 打交道的那个闭包里出现。
+    """
+    f = fetch or (lambda url, timeout, etag=None: _http_get(url, timeout, etag, token))
+    # 只有"上次真留下结果"时才带条件头：否则万一服务端回 304，我们没东西可复用，
+    # 只能当场报错 —— 与其走到那一步，不如老老实实发一次普通 GET（200）。
+    etag = cache.etag if (cache is not None and cache.items is not None) else None
+    try:
+        body, new_etag = f(API_RELEASES % repo, timeout, etag)
+    except NotModified:
+        if cache is not None and cache.items is not None:
+            return cache.items
+        # 没得复用：翻成人话报错，**不**装作"已是最新"（见模块开头那段）
+        raise UpdaterError(humanize_http(304, "", repo))
     except UpdaterError:
         raise
     except urllib.error.HTTPError as e:
@@ -141,6 +286,10 @@ def fetch_releases(fetch=None, timeout=TIMEOUT, repo=REPO):
     if not isinstance(data, list):
         raise UpdaterError("检查更新失败：GitHub 返回的数据格式不对，"
                            "请稍后重试。%s" % _MANUAL)
+    if cache is not None:
+        cache.items = data
+        # 服务端这次没回 ETag（或换了弱校验）就别把旧值丢了：留着它下次照样能问出 304
+        cache.etag = new_etag or cache.etag
     return data
 
 
@@ -177,10 +326,16 @@ def _reason(code):
     收尾：客户端这条路失败时，手动那条永远走得通。
     """
     return {
+        # 401 只可能出现在"带了令牌"那条路上（不带的请求根本没有 Authorization 头，
+        # GitHub 对匿名只会回 403）。所以这里可以直接把话说死：是令牌的问题。
+        401: ("GitHub 不认这个令牌",
+              "请在「开发者选项」里重新填写 GitHub 令牌"),
         403: ("GitHub 拒绝了此次访问",
               "请几分钟后重试；若仍失败，可能是当前出口 IP 被 GitHub 限流"),
         404: ("GitHub 上找不到该仓库的 Release",
               "请稍后重试；若一直如此，可能是仓库地址变了或该版本已撤下"),
+        304: ("GitHub 说 Release 没变化，但本机没留下上次的结果可复用",
+              "请再点一次「检查更新」"),
         422: ("GitHub 不认这个请求", "请稍后重试"),
         429: ("请求太密，被 GitHub 限流了", "请过几分钟再点一次"),
         500: ("GitHub 服务端出错", "请稍后重试"),
@@ -203,7 +358,14 @@ def humanize_http(code, body="", repo=REPO):
 
 
 def humanize_net(err, repo=REPO):
-    """网络层错误（DNS / 连不上 / 超时）→ 同一句式。"""
+    """网络层错误（DNS / 连不上 / 超时）→ 同一句式。
+
+    `UpdaterError` 进来**原样返回**：它已经是 `humanize_http` 翻好的人话了，再套一层
+    会变成"检查更新失败：检查更新失败：…。。。请手动前往仓库下载更新。。请手动前往…" ——
+    前缀重复、句号叠成"。。"。2026-10-04 真联网才暴露（403 限流那条路径）。
+    """
+    if isinstance(err, UpdaterError):
+        return str(err)
     if isinstance(err, urllib.error.URLError):
         reason = getattr(err, "reason", err)
         if isinstance(reason, TimeoutError) or "timed out" in str(reason).lower():
@@ -230,15 +392,22 @@ def _notes(item):
 
 
 def check_update(current, channel=CHANNEL_STABLE, fetch=None, timeout=TIMEOUT,
-                 repo=REPO):
+                 repo=REPO, cache=None, token=None):
     """查该通道有没有比 `current` 新的版本 → `(状态, 详情)`。
 
     STATE_UPDATE（有新版本，详情带 tag / 名字 / 日期 / 说明摘录 / 下载页地址）/
     STATE_LATEST（已是最新）/ STATE_AHEAD（本机比线上还新）/ STATE_ERROR（查不到，
     详情里的 `msg` 是可直接显示的人话）。**没有"出错就当最新"那一档。**
+
+    `cache`（`Cache`，可不传）用来省匿名限流额度：留着上次的 ETag 与结果，下次带
+    `If-None-Match`，没变化时 GitHub 回 304 不计额度（见 `fetch_releases`）。
+
+    `token`（可不传）非空就走认证请求，额度 60 → 5000 次/小时；只有开发者选项里
+    填了 GitHub 令牌才会有值。它**不改变任何判据**，只改变"我们能问多频繁"。
     """
     try:
-        items = fetch_releases(fetch=fetch, timeout=timeout, repo=repo)
+        items = fetch_releases(fetch=fetch, timeout=timeout, repo=repo, cache=cache,
+                               token=token)
     except UpdaterError as e:
         return STATE_ERROR, {"channel": channel, "current": current, "msg": str(e)}
     except Exception as e:                      # 兜底：绝不让异常穿到 UI 线程
