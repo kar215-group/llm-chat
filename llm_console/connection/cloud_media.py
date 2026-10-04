@@ -1109,12 +1109,16 @@ def wait_task(cfg, provider, task_id, dest, kind="video", emit=None, stop_flag=N
             return res
         bad = 0
         status = q["status"]
-        if persist is not None:
-            try:
-                persist(status, q.get("raw"))
-            except Exception:
-                pass
         if status != last:
+            # 状态没变就不落盘（D3）：persist 每拍都全量重写 cloud_jobs.json 并刷新
+            # updated_at，PENDING/RUNNING 一路每拍重写同一个状态纯属写放大。updated_at
+            # 只有 TTL 清理会读，而 TTL 只清已完结任务（OPEN_STATUS 永不清理），心跳
+            # 断掉不影响任何判据；首次进循环 last="" 必触发一次，终态也一定触发。
+            if persist is not None:
+                try:
+                    persist(status, q.get("raw"))
+                except Exception:
+                    pass
             last = status
             log.json("状态 %s ｜ task_id=%s" % (status, task_id), q.get("raw"))
             emit(("line", "云端任务状态：%s（%s）" % (status, _LABEL.get(status, status))))

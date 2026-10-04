@@ -248,8 +248,10 @@ def flavors_from(build, plat=None, archs=None):
 
     **刻意不写死档位表**：上游随时会加 / 改名档位，写死的表一漂就静默装错。
     这里每次从真实资产推，代价只是"没联网就没有档位可列"。
-    顺序 = CUDA → ROCm → Vulkan → SYCL/OpenVINO → CPU（`hardware.detect_gpu` 判有没有 N 卡，
-    但**判不出该用哪个 CUDA 运行库**，所以推荐序不等于自动选，用户自己挑）。
+    顺序 = CUDA → ROCm → Vulkan → SYCL/OpenVINO → CPU。**这只是显示顺序**；界面里的默认值
+    另由 `recommend_flavor` 按本机显卡挑（W 2026-10-04：没有 N 卡就不该默认 CUDA）。
+    这里刻意不掺硬件判断：本模块只依赖标准库 + `core.updater`，而探硬件会 spawn
+    `nvidia-smi`（最坏 10 秒），那一份判据留在 `core/hardware.py`。
     """
     plat = plat if plat is not None else platform_token()
     archs = archs if archs is not None else _arch_tokens()
@@ -288,6 +290,60 @@ def _flavor_rank(flavor):
         if f.startswith(k):
             return r
     return 9
+
+
+# ---------------------------------------------------------------------------
+# 默认该选哪一档（按本机显卡挑；W 2026-10-04）
+# ---------------------------------------------------------------------------
+
+# 厂商标记 → 档位前缀的偏好序。键来自 `hardware.gpu_kinds`，值按 `flavors_from` 推出来的
+# 那套档位 id 做前缀匹配（`cuda-12.4` / `cuda12` / `rocm-7.14.0` / `vulkan` / `sycl` /
+# `openvino-2026.4.1` / `cpu` / `base` / `blas` / `opencl-adreno`）：
+#   · 有 N 卡 → CUDA（与改动前一致，显示序里 CUDA 本来也排第一）；
+#   · A 卡 → 先 Vulkan 再 ROCm：ROCm 只认特定 gfx 型号，Vulkan 各家 GPU 都跑得起来；
+#   · Intel（含核显）→ 先 Vulkan，再 SYCL / OpenVINO（后两者还要额外的 Intel 运行库）；
+#   · 高通（`opencl-adreno` 档，arm64 Windows）→ OpenCL。
+_VENDOR_PREF = {
+    "nvidia": ("cuda", "vulkan", "cpu", "base", "blas"),
+    "amd": ("vulkan", "rocm", "cpu", "base", "blas"),
+    "intel": ("vulkan", "sycl", "openvino", "cpu", "base", "blas"),
+    "adreno": ("opencl", "cpu", "base", "blas"),
+}
+# 多个厂商同时在时按这个序取偏好（实测 W 的机器：Intel 核显 + NVIDIA 独显 ⇒ 独显优先）
+_VENDOR_ORDER = ("nvidia", "amd", "intel", "adreno")
+# 认不出显卡（远程桌面 / 无头 / 纯虚拟机）时：**保证跑得起来**优先于快 —— Vulkan 档在
+# 没有 GPU 的机器上启动即失败，CPU 档在任何机器上都能跑（慢，但用户自己换得回来）。
+_UNKNOWN_PREF = ("cpu", "base", "blas", "vulkan")
+
+
+def recommend_flavor(build, kinds=None, plat=None, archs=None):
+    """按本机显卡挑"默认该选哪一档"，返回档位 id；这一版没有可装档位时返回空串。
+
+    `kinds` = `hardware.gpu_kinds()` 的结果（厂商标记集合；`None` / 空集 = 认不出）。
+    **本函数不自己去探硬件**：探测会 spawn `nvidia-smi`（最坏 10 秒，坑 4），而本模块
+    只依赖标准库 + `core.updater`；判硬件那一份在 `core/hardware.py`，由界面在子线程里
+    问一次再传进来（判据仍然只写在一处：厂商 → 档位的映射就在下面这张表）。
+
+    为什么要单独一个"默认值"判据（W 2026-10-04）：界面原来直接拿 `flavors_from` 的第一项
+    当默认，而那个显示序把 CUDA 排在最前 ⇒ **没有 N 卡的用户一进页面就被选中一个装上必然
+    启动失败的档位**。显示序不动（它只是清单顺序），默认值改为按本机硬件挑。
+    """
+    fl = flavors_from(build, plat, archs)
+    if not fl:
+        return ""
+    ids = [str(f["id"]) for f in fl]
+    pref = _UNKNOWN_PREF
+    for v in _VENDOR_ORDER:
+        if kinds and v in kinds:
+            pref = _VENDOR_PREF[v]
+            break
+    for p in pref:
+        for i in ids:
+            if i.lower().startswith(p):
+                return i
+    # 偏好表一个都没命中（上游改了档位名、或这一版只有 GPU 档）：退回显示序第一项，
+    # 别让用户拿不到默认值 —— 与 `pick_build` 的"挑不出就退回最新"同一条口径。
+    return ids[0]
 
 
 # ---------------------------------------------------------------------------

@@ -9,8 +9,8 @@ import time
 import tkinter as tk
 from tkinter import ttk, messagebox, font as tkfont
 
-from ..core import (capability, cloudjobs, engine_install, providers, sdprofile, secrets,
-                   textfile, updater)
+from ..core import (capability, cloudjobs, engine_install, hardware, providers, sdprofile,
+                   secrets, textfile, updater)
 from ..core.config import (APP_DIR, APP_VERSION, CFG_VERSION, DEFAULT_CONFIG,
                            FLOAT_KEYS, INT_KEYS, STR_KEYS, cloud_media_dir,
                            gen_api_key, save_config)
@@ -2877,11 +2877,14 @@ class SettingsMixin:
                     if b["busy"]:
                         return
                     tok = secrets.get_github_token()
+                    # 显卡型号也在主线程取快照（同上：子线程不翻配置）。有值就不必 spawn
+                    # nvidia-smi（适配器枚举那一级照走，毫秒级、不 spawn）。
+                    hw = {"gpu_name": str(self.cfg.get("gpu_name") or "")}
                     b["busy"] = True
                     btn.configure(state="disabled")
                     _say(sv, stl, "正在查可用版本…")
 
-                    def done(builds, why, kk=k, bb=b, cb=cb, vv=vv, sv=sv, stl=stl,
+                    def done(builds, why, kinds, kk=k, bb=b, cb=cb, vv=vv, sv=sv, stl=stl,
                              btn=btn, fv=fv, rf=rf):
                         bb["busy"] = False
                         try:
@@ -2895,7 +2898,11 @@ class SettingsMixin:
                         ids = [f["id"] for f in engine_install.flavors_from(builds[0])]
                         cb.configure(values=ids)
                         if ids:
-                            fv.set(ids[0])
+                            # 默认档位按本机显卡挑（W 2026-10-04）：没有 N 卡时不许默认 CUDA
+                            # ——原来直接拿显示序第一项当默认，而显示序把 CUDA 排最前，没 N 卡
+                            # 的用户一进页面就选中一个装上必然启动失败的档位。显示序本身不动，
+                            # 只改默认值；判据在 `engine_install.recommend_flavor`（一处）。
+                            fv.set(engine_install.recommend_flavor(builds[0], kinds) or ids[0])
                         # 显式传当轮的那几个对象：`_on_pick` 定义在循环之外，
                         # 不传就是 None（它只收显式参数，不吃默认参数）。
                         _on_pick(bb, kk, fv, vv)
@@ -2909,7 +2916,15 @@ class SettingsMixin:
                             builds, why = engine_install.list_builds(k, token=tok)
                         except Exception as e:       # 兜底：异常不许穿回 UI 线程（坑 54）
                             builds, why = [], "查可用版本时出错：%s" % e
-                        self._ui_q.put(lambda: done(builds, why))
+                        # 探显卡放在联网之后、且只在**子线程**里做（坑 4：最坏会 spawn
+                        # nvidia-smi 等满 10 秒，放这儿不冻界面）。三级判据便宜的先问，只有
+                        # "没认到 N 卡"才走到 spawn 那一级，而那类机器通常连 nvidia-smi 都没装
+                        # （"找不到文件"级别的花费）。探失败就当"认不出"，默认值退 CPU 档，不猜。
+                        try:
+                            kinds = hardware.gpu_kinds(hw)
+                        except Exception:
+                            kinds = set()
+                        self._ui_q.put(lambda: done(builds, why, kinds))
 
                     threading.Thread(target=work, daemon=True).start()
 

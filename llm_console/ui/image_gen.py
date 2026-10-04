@@ -186,6 +186,12 @@ class ImageGenMixin:
             if not t or cur["tid"]:
                 return
             cur["tid"] = t
+            # 取消链路要找得到它：主线程「停止生成」读 self._cloud_tid 才能对 PENDING
+            # 窗口内的任务发起真取消（生视频链路同款 worker 写回，见 video_gen 的
+            # _cloud_video_worker）。不写回的话，已提交的任务点停止会被当成
+            # "还没提交出去"——文案与事实不符，还错过唯一取消得掉的窗口。
+            # 乱序兜底沿用既有纪律：新任务 begin / 收尾都会再清一次 _cloud_tid。
+            self._cloud_tid = t
             if not cloudjobs.get_job(t):
                 cloudjobs.add_job(t, "image", provider["id"],
                                   provider.get("name", ""), model, prompt, dest)
