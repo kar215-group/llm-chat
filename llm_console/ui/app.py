@@ -13,7 +13,7 @@ from tkinter import ttk, scrolledtext, messagebox
 
 from ..core.config import (load_config, DEFAULT_CONFIG, APP_DIR, APP_VERSION,
                            CONFIG_PATH)
-from ..core import (cloudjobs, config, crashlog, diagnose, engine_install, providers,
+from ..core import (cloudjobs, codesign, config, crashlog, diagnose, engine_install, providers,
                     secrets, selfupdate, throttle, updater)
 from ..core.models import (auto_locate_models_dir, dir_has_any_gguf, display_name,
                           extra_sources, first_usable, has_local_chat,
@@ -169,6 +169,9 @@ class App(ChatMixin, ImageGenMixin, VideoGenMixin, ServiceMixin, ModelsMixin, Se
         # 扫描（尤其是自动定向）跑在它们前面，用户已经配好的那份才会被判成"已配置"。
         self._first_open_scan()
         self._offer_engine_hint()
+        # 签名信任：**第一次问一次**（W 2026-10-05）。首跑先让引导说完，不叠浮层。
+        if not self._first_run:
+            self._codesign_offer_start()
 
     def report_callback_exception(self, exc, val, tb):
         """Tk 回调里抛出的异常：先落进崩溃日志，再照原样打一份。
@@ -209,6 +212,52 @@ class App(ChatMixin, ImageGenMixin, VideoGenMixin, ServiceMixin, ModelsMixin, Se
                 % (p, crashlog.tail(6) or "（读不出内容）"))
         except Exception:
             pass
+
+    # ---- 签名信任：启动时问一次（W 2026-10-05）----
+    def _codesign_offer_start(self):
+        """冻结运行、自身带签名、且**还没在本机被信任**时，问一次要不要加入信任。
+
+        为什么是"问一次"而不是自动加入：本程序是**分发**给别人的，它没法判断自己是不是
+        被重打包的副本 —— 静默写入等于替用户给"任何一份自称 LLM Chat 的东西"发一张长期
+        通行证（边界见 `05` §4.1 与 `99` F5）。所以把成本压到"一次点击"，判断权留在用户手里。
+
+        检测走后台线程（PowerShell 起一次要几百毫秒），结果回主线程走 `_ui_q`（坑 54）。
+        """
+        if self.cfg.get("codesign_prompt"):
+            return                       # 问过了（选"加入"还是"不用了"都算），不再打扰
+        if codesign.self_exe() is None:
+            return                       # 源码运行：没有签名可谈
+
+        def work():
+            try:
+                info = codesign.read_cert()
+            except Exception:            # 兜底：异常不许穿回 UI 线程（坑 54）
+                info = None
+            self._ui_q.put(lambda: self._codesign_notify(info))
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _codesign_notify(self, info):
+        """`_codesign_offer_start` 的后台结果回主线程：该问才问，问完就记账。"""
+        if not info or info.get("trusted"):
+            return                       # 没签名 / 已经信任：什么都不用做，也不记账
+        if self._closing:
+            return
+        self.cfg["codesign_prompt"] = True
+        config.save_config(self.cfg)     # 先记账：点"不用了"同样不再问
+        if not messagebox.askyesno(
+                "把本软件签名列入本机可信名单",
+                "本软件带自签名证书。加入信任后，以后从 GitHub 下载的新版"
+                "不会再被 SmartScreen 拦一下。\n\n"
+                "请确保该软件是从 GitHub 上直接下载的，\n"
+                "否则将签名列入可信名单是一件很危险的事。\n\n"
+                "（只写进当前用户，不影响这台机器的其他 Windows 用户）"):
+            return
+        ok, why = codesign.trust()
+        if ok:
+            self._append("[签名] 已把本软件的签名列入本机可信名单（当前用户）。\n", "meta")
+        else:
+            self._append("[签名] 列入可信名单失败：%s\n" % why, "meta")
 
     def _guide_missing(self):
         """引导第一屏那份缺件清单。

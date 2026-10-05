@@ -5,8 +5,11 @@
 列入信任的机器上，Windows 会把它当"未知发布者"，SmartScreen 第一次会拦一下。这个模块
 只做一件事：读出**当前 exe 自己的签名证书**，写进**当前用户**的「受信任的根证书颁发机构」。
 
-⚠ 三条边界（都是有意为之，别顺手放宽）：
-  · 只写 **CurrentUser** 存储 —— **不需要管理员权限**，也只对这台机器的这个 Windows 用户生效；
+⚠ 边界（都是有意为之，别顺手放宽）：
+  · 默认那条路只写 **CurrentUser**（`trust`）—— **不需要管理员权限**，也只对这台机器的这个
+    Windows 用户生效；
+  · **`trust_machine` 是另一回事**：写 `LocalMachine`（这台机器所有用户）、**要管理员**（走 UAC
+    提权），只该由开发者选项里**带严重警告**的那个按钮调用；
   · 别人下载后仍然要**自己**执行一次同样的操作（信任是逐机逐用户的事，替不了）；
   · **信了这张证书 = 这台机器会信所有用它签的东西** —— 所以界面上必须先让用户确认
     「软件是从 GitHub 直接下载的」（危险点在这一句，不在实现里）。
@@ -59,8 +62,30 @@ def _read_script(path):
         "$c=$s.SignerCertificate;"
         "$o=[ordered]@{subject=$c.Subject;thumbprint=$c.Thumbprint;"
         "not_after=$c.NotAfter.ToString('yyyy-MM-dd');"
-        "trusted=(Test-Path ('Cert:\\CurrentUser\\Root\\'+$c.Thumbprint))};"
+        "trusted=(Test-Path ('Cert:\\CurrentUser\\Root\\'+$c.Thumbprint));"
+        "trusted_machine=(Test-Path ('Cert:\\LocalMachine\\Root\\'+$c.Thumbprint))};"
         "ConvertTo-Json -Compress -InputObject $o"
+    ) % (_q(path), _UNSIGNED)
+
+
+def _trust_machine_script(path):
+    return (
+        "[Console]::OutputEncoding=[Text.Encoding]::UTF8;"
+        "$s=Get-AuthenticodeSignature -LiteralPath '%s';"
+        "if(-not $s.SignerCertificate){Write-Output '%s';exit 3};"
+        "$c=$s.SignerCertificate;"
+        "$f=Join-Path $env:TEMP ('llmchat-codesign-'+[guid]::NewGuid().ToString('N')+'.cer');"
+        "Export-Certificate -Cert $c -FilePath $f -Force | Out-Null;"
+        # 机器级要管理员：把内层命令编成 Base64 交给提权进程，绕开命令行引号 / 空格的坑
+        "$inner='certutil -addstore -f Root \"'+$f+'\"';"
+        "$b64=[Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($inner));"
+        "try{Start-Process -Verb RunAs -Wait -FilePath powershell "
+        "-ArgumentList @('-NoProfile','-EncodedCommand',$b64)}"
+        "catch{Remove-Item $f -Force -ErrorAction SilentlyContinue;Write-Output 'UAC-DENIED';exit 5};"
+        "Remove-Item $f -Force -ErrorAction SilentlyContinue;"
+        "if(Test-Path ('Cert:\\LocalMachine\\Root\\'+$c.Thumbprint))"
+        "{Write-Output 'TRUSTED';exit 0};"
+        "Write-Output 'NOT-INSTALLED';exit 6"
     ) % (_q(path), _UNSIGNED)
 
 
@@ -102,6 +127,7 @@ def read_cert(exe=None, runner=None):
     if not isinstance(info, dict) or not info.get("thumbprint"):
         return None
     info["trusted"] = bool(info.get("trusted"))
+    info["trusted_machine"] = bool(info.get("trusted_machine"))
     return info
 
 
@@ -122,4 +148,30 @@ def trust(exe=None, runner=None):
         return True, ""
     if out == _UNSIGNED:
         return False, "本程序这份 exe 没有签名，没有可列入的证书。"
+    return False, (out or "系统工具返回了错误（退出码 %s）。" % code)
+
+
+def trust_machine(exe=None, runner=None):
+    """把 exe 的签名证书写进**本机（所有用户）**的受信任根 → `(True, "")` / `(False, 原因)`。
+
+    ⚠ 这一条**需要管理员**：脚本用 `Start-Process -Verb RunAs` 拉起提权进程，用户在 UAC 上点
+    "否"就是放弃（回 `UAC-DENIED`）。成败**不看**提权进程的退出码（拿不到），而是回读
+    `Cert:\\LocalMachine\\Root` 判断 —— 只该由开发者选项里带严重警告的那个按钮调用。
+    """
+    path = exe or self_exe()
+    if not path or not os.path.isfile(path):
+        return False, "拿不到本程序自己的 exe（源码运行时没有可签名的文件）。"
+    try:
+        code, out = _run(_trust_machine_script(path), runner)
+    except Exception as e:
+        return False, "调用系统工具失败：%s" % e
+    out = (out or "").strip()
+    if code == 0 and out.endswith("TRUSTED"):
+        return True, ""
+    if out == _UNSIGNED:
+        return False, "本程序这份 exe 没有签名，没有可列入的证书。"
+    if out == "UAC-DENIED":
+        return False, "管理员授权被取消，本机信任名单没有改动。"
+    if out == "NOT-INSTALLED":
+        return False, "写入没有生效（可能被系统策略拒绝）。"
     return False, (out or "系统工具返回了错误（退出码 %s）。" % code)

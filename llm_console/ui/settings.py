@@ -2712,6 +2712,40 @@ class SettingsMixin:
                 else:
                     msg_lab.set("列入失败：%s" % why)
 
+            def trust_sign_machine():
+                """把本程序 exe 的签名证书列入**本机（所有用户）**信任根 —— 需要管理员。
+
+                比用户级那一步重得多：影响这台机器上**所有** Windows 用户，而且要过 UAC。
+                所以警告写得比用户级那条更狠（W 点名的"很严重的警告"），并把"接下来会弹
+                管理员授权"提前说清楚 —— 用户在 UAC 上点取消就是放弃，不是失败。
+                """
+                info = codesign.read_cert()
+                if info is None:
+                    msg_lab.set("列入失败：本程序这份 exe 没有签名"
+                                "（源码运行、或装的是未签名的构建）。")
+                    return
+                if info.get("trusted_machine"):
+                    msg_lab.set("这张签名证书已经在本机（所有用户）可信名单里了。")
+                    return
+                if not messagebox.askyesno(
+                        "列入系统级信任（所有用户）—— 请看清再决定",
+                        "这一步会把证书写进【这台机器的所有用户】，不只是你当前这个用户。\n\n"
+                        "后果：这台机器上任何人、任何程序，只要是用这张证书签名的，"
+                        "Windows 都会直接信任它。\n\n"
+                        "除非你确定这份软件是从 GitHub 上直接下载的、并且这台机器只由你使用，"
+                        "否则不要继续。\n\n"
+                        "接下来会弹系统管理员授权 —— 在那里取消就等于放弃。\n\n"
+                        "要列入的证书：\n%s\n指纹：%s"
+                        % (info.get("subject") or "（读不出主体）",
+                           info.get("thumbprint") or "")):
+                    return
+                msg_lab.set("正在请求管理员授权…")
+                ok, why = codesign.trust_machine()
+                if ok:
+                    msg_lab.set("已把本软件的签名列入本机（所有用户）可信名单。")
+                else:
+                    msg_lab.set("列入失败：%s" % why)
+
             # 控件放在回调之后建：`command=名字` 是建控件那一刻就要绑定的（坑 115）
             i = r_dev["i"]
             r_dev["i"] += 1
@@ -2738,7 +2772,9 @@ class SettingsMixin:
             srf = ttk.Frame(t_dev)
             srf.grid(row=i, column=0, columnspan=3, sticky="w", pady=(2, 6))
             ttk.Button(srf, text="将本软件签名列入本机可信签名",
-                       command=trust_sign).pack(side="left")
+                       command=trust_sign).pack(side="left", padx=(0, 6))
+            ttk.Button(srf, text="列入系统级信任（所有用户）",
+                       command=trust_sign_machine).pack(side="left")
 
             for var, fg in ((tok_lab, "#5a6a7a"), (msg_lab, "#1a7f37")):
                 i = r_dev["i"]
