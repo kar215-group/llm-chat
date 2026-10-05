@@ -223,30 +223,34 @@ jobs:
           name: llm-chat-windows-x64-${{ github.sha }}
           path: in
 
+      # ⚠ 这一步用 powershell **而不是 bash**：runner 上的 bash 是 git-bash（MSYS2），
+      # 它会把 `/fd` `/f` 这类以斜杠开头的参数当成 POSIX 路径转换掉 —— signtool 于是报
+      # "No file digest algorithm specified"（2026-10-05 踩过）。同链路的「校验签名」
+      # 「签名后自检」本来就在 powershell 里，这样三步写法也统一了。
+      # ⚠ 本步骤**一律不许出现非 ASCII 字符**（含注释）：PS 5.1 按系统 ANSI 码页读临时 .ps1。
       - name: 解出 exe 并用 PFX 签名
-        shell: bash
+        shell: powershell
         env:
           PFX_B64: ${{ secrets.CODESIGN_PFX_BASE64 }}
           PFX_PW: ${{ secrets.CODESIGN_PFX_PASSWORD }}
         run: |
-          set -euo pipefail
-          STAGE="llm-chat-${GITHUB_REF_NAME}-windows-x64"
-          mkdir -p work
-          echo "$PFX_B64" | base64 -d > codesign.pfx
-          python - <<'PY'
-          import glob, zipfile
-          z = sorted(glob.glob('in/*.zip'))[0]
-          zipfile.ZipFile(z).extractall('work')
-          print('extracted:', z)
-          PY
-          ls -la "work/$STAGE"
-          # runner 自带 Windows SDK；挑版本号最高的那份 x64 signtool
-          SIGNTOOL=$(ls "/c/Program Files (x86)/Windows Kits/10/bin/"*/x64/signtool.exe 2>/dev/null | sort -V | tail -1 || true)
-          if [ -z "$SIGNTOOL" ]; then echo "::error::runner 上找不到 signtool.exe"; exit 1; fi
-          echo "signtool: $SIGNTOOL"
-          "$SIGNTOOL" sign /f codesign.pfx /p "$PFX_PW" /fd SHA256 \
-            /tr http://timestamp.digicert.com /td SHA256 "work/$STAGE/llm-chat.exe"
-          echo "signed"
+          $ErrorActionPreference = "Stop"
+          $stage = "llm-chat-" + $env:GITHUB_REF_NAME + "-windows-x64"
+          New-Item -ItemType Directory -Force -Path work | Out-Null
+          $zip = (Get-ChildItem -Path in -Filter *.zip | Select-Object -First 1).FullName
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          [System.IO.Compression.ZipFile]::ExtractToDirectory($zip, (Join-Path (Get-Location) "work"))
+          Write-Host "extracted: $zip"
+          Get-ChildItem "work\$stage"
+          $pfx = Join-Path (Get-Location) "codesign.pfx"
+          [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:PFX_B64))
+          $signtool = Get-ChildItem "C:\Program Files (x86)\Windows Kits\10\bin\*\x64\signtool.exe" -ErrorAction SilentlyContinue |
+                      Sort-Object FullName -Descending | Select-Object -First 1 -ExpandProperty FullName
+          if (-not $signtool) { Write-Error "signtool.exe not found on this runner"; exit 1 }
+          Write-Host "signtool: $signtool"
+          & $signtool sign /f $pfx /p $env:PFX_PW /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 "work\$stage\llm-chat.exe"
+          if ($LASTEXITCODE -ne 0) { Write-Error "signtool exited with $LASTEXITCODE"; exit $LASTEXITCODE }
+          Write-Host "signed"
 
       # ⚠ 这一段是 powershell：**不能出现任何非 ASCII 字符**（含注释）—— Actions 把 run
       # 写成 UTF-8 无 BOM 的临时 .ps1，而 Windows PowerShell 5.1 按系统 ANSI 码页读它，
