@@ -151,10 +151,6 @@ class FileCache(Cache):
 
 _VER_RE = re.compile(r"^\s*v?(\d+)(?:\.(\d+))?(?:\.(\d+))?([A-Za-z][\w.\-]*)?\s*$")
 _PRE_WORDS = ("alpha", "beta", "rc", "dev", "pre", "preview", "snapshot", "nightly")
-# 「正式发布」后缀（W 2026-10-06 定的 `v1.0.6realise` 就是这一档）。
-# ⚠ 少了这一行，`realise` 会落进下面「认不出的按修补处理」那条 ⇒ 被当成**比正式版还低**，
-# 而且 `is_prerelease` 判它 True ⇒ **正式版通道根本看不见这次发布**（用户查更新什么也查不到）。
-_FINAL_WORDS = ("release", "realise", "final", "stable")
 
 _RANK_HOTFIX = 0     # 修补构建：1.0.1repair < 1.0.1
 _RANK_PRE = 1        # 测试版：1.0.3beta1 < 1.0.3beta2 < 1.0.3
@@ -173,8 +169,6 @@ def _suffix_key(suffix):
     word, num = m.group(1), int(m.group(2) or 0)
     if word in _PRE_WORDS:
         return (_RANK_PRE, num + 1)
-    if word in _FINAL_WORDS:
-        return (_RANK_FINAL, 1)         # 与同号正式版一样新：1.0.6realise == 1.0.6
     return (_RANK_HOTFIX, num + 1, word)
 
 

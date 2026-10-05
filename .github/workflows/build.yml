@@ -14,10 +14,8 @@
 # CODESIGN_PFX_BASE64 / CODESIGN_PFX_PASSWORD 给 exe 签名；该环境配了 required reviewer，
 # 所以每次打 tag 都要人工批准才会往下走（W 2026-10-05 定）。
 #
-# 版本一致性：tag 去掉开头的 v 与 `llm_console/core/config.py` 的 APP_VERSION
-# **按 `core/updater` 的版本序相等**才算一致（不是字符串相等 —— 正式版允许
-# tag=v1.0.6 而 APP_VERSION=1.0.6realise），对不上直接失败，避免
-# "Release 写着 v1.2.0、里面 exe 是 1.1.0"。
+# 版本一致性：tag 去掉开头的 v 之后必须等于 llm_console/core/config.py 里的
+# APP_VERSION，对不上直接失败——避免"Release 写着 v1.2.0、里面 exe 是 1.1.0"。
 # =============================================================================
 name: 打包 exe 并发布
 
@@ -73,20 +71,10 @@ jobs:
           TAG="${GITHUB_REF_NAME#v}"
           SRC=$(grep -m1 '^APP_VERSION' llm_console/core/config.py | sed -E 's/.*"([^"]+)".*/\1/')
           echo "tag=v$TAG  APP_VERSION=$SRC"
-          # 判据走 core/updater 的版本序，**不是字符串相等**：正式版本可以写成
-          # tag=v1.0.6 而 APP_VERSION=1.0.6realise（W 2026-10-06 的口径）——两者都归
-          # `_RANK_FINAL` 档、版本序相等即算一致。「Release 写着 v1.2.0、里面 exe 是
-          # 1.1.0」这种仍然会被拒。
-          python - "$TAG" "$SRC" <<'PY'
-          import sys
-          from llm_console.core import updater
-          tag, src = sys.argv[1], sys.argv[2]
-          if updater.compare_versions(tag, src) != 0:
-              print("::error::版本号不一致：tag=%s 与 APP_VERSION=%s 按版本序不相等，"
-                    "先改 config.py 的 APP_VERSION 再打 tag" % (tag, src))
-              sys.exit(1)
-          print("版本序一致：%s == %s" % (tag, src))
-          PY
+          if [ "$TAG" != "$SRC" ]; then
+            echo "::error::版本号不一致：先改 config.py 的 APP_VERSION 再打 tag"
+            exit 1
+          fi
 
       # 不赌 PyInstaller 的 tkinter 钩子：hostedtoolcache 的 Python 与 python.org 安装包
       # 的 tcl/tk 目录布局不同，钩子可能一个文件都不收，exe 会在启动阶段（还没进我们的
