@@ -19,7 +19,7 @@ import os
 import sys
 import time
 
-from . import config, hardware, models, params, secrets
+from . import config, engine_install, hardware, models, params, secrets
 from .config import write_error          # 只读：本模块不写状态文件（判据见 run_checks 里那条注释）
 
 
@@ -155,9 +155,18 @@ def _config_state():
         return "broken", "%s: %s" % (type(e).__name__, e)
 
 
-# 只有本地链路才需要的条目：云端已经能用时，它们不该继续报"故障"
-LOCAL_ONLY = ("server_exe", "cudart", "gpu", "ram", "models_dir", "chat_models",
-              "selected", "budget", "vision", "sd_cli", "img_models", "vid_models")
+# 本地**两条**链路各自的条目。判「能不能跑通」时只降**没就位的那条**：
+# "没装 llama 引擎"对"只用 sd 生图"的用户不是缺件（那是他们的正常状态），
+# 原来照报 fail，报告读起来像程序坏了（坑 150）。
+LOCAL_CHAT = ("server_exe", "cudart", "chat_models", "selected", "budget", "vision")
+LOCAL_MEDIA = ("sd_cli", "img_models", "vid_models")
+# 整条本地链路都不通（也就是纯云端）时才降的：显卡 / 内存 / 模型目录与"走哪条链路"无关。
+LOCAL_ONLY = LOCAL_CHAT + LOCAL_MEDIA + ("gpu", "ram", "models_dir")
+
+# 三条路的标题（引导第一屏与输出栏的催办都读它，判据只在 quick_paths 一处 —— 坑 128）
+PATH_CHAT = "本地对话"
+PATH_MEDIA = "本地生图 / 生视频"
+PATH_CLOUD = "云端"
 
 
 def _cloud_ready(cfg):
@@ -179,68 +188,108 @@ def _cloud_ready(cfg):
 
 
 def guide_missing(cfg):
-    """引导第一屏那份缺件清单（Check 形状，但**只走廉价判据**）。
+    """引导第一屏那份清单（Check 形状，但**只走廉价判据**）。
 
     为什么不用 `run_checks`：那套要真往目录里试写 `.probe`、bind 两个端口、逐模型算
     ngl —— 而引导这份清单是在**主线程**上算的（首跑 after(400) 与每次点「新手引导」），
     挂上去就是"一点就冻"。要看全的出口是「诊断」页里的「一键诊断」（那里放线程里跑）。
 
-    口径与 §5.6 一致：**本地与云端任一能跑就不算缺件**（只想用云端的人不缺东西）。
+    口径（W 2026-10-05）：**三条路逐条列出** —— 本地对话（llama 引擎）、本地生图 / 生视频
+    （sd 引擎）、云端（密钥）。原来只列 llama 与云端，于是只想生图的用户被催去下
+    对话引擎（坑 150）。任一条就绪就返回空清单（那一屏换回欢迎页）。
     """
     q = quick_paths(cfg)
-    if q["local"] or q["cloud"]:
+    if q["usable"]:
         return []
-    out = [_c("guide_miss_%d" % i, GROUP_ENGINE, FAIL, t, "", "",
-              ("settings", "本地模型 → 模型文件与引擎"))
-           for i, t in enumerate(q["missing"])]
-    out.append(_c("guide_cloud", GROUP_CLOUD, FAIL, "云端一家 API Key 都没填", "", "",
-                  ("settings", "云端模型 → 服务商与密钥")))
+    out = []
+    for p in q["paths"]:
+        out.append(_c("guide_%s" % p["id"], GROUP_ENV, OK if p["ready"] else FAIL,
+                      "%s：%s" % (p["title"], "就绪" if p["ready"] else p["why"]),
+                      "", "", ("settings", p["action"])))
     return out
 
 
 def quick_paths(cfg):
-    """两条路通不通的**廉价**判定：不试写目录、不查端口、不探显卡。
+    """三条路通不通的**廉价**判定：不试写目录、不查端口、不探显卡。
 
-    给"每次开程序都要跑一次"的地方用（输出栏那句缺引擎的提示）。`run_checks` 不能
+    给"每次开程序都要跑一次"的地方用（输出栏那句催办、引导第一屏）。`run_checks` 不能
     替代它 —— 那条会往目录里试写 `.probe`、还要量端口，那是用户点「一键诊断」时
     才付得起的一次性开销。
-    返回 {"local": bool, "cloud": bool, "missing": [给人看的一句话]}。
+
+    返回 {"local", "chat", "media", "cloud", "usable", "paths", "missing"}：
+      · `paths` = 三条路各自 `{"id","title","ready","why","action"}`，**唯一的逐路判据**；
+      · `local` = 本地两条里任一条就绪（对话 **或** 生图/生视频）；`cloud` = 云端就绪；
+      · `usable` = 三条里任一条就绪（= 程序现在能干活）；`missing` = 没就位的路各一句人话。
     """
     cfg = cfg or {}
-    exe = str(cfg.get("exe", "") or "")
-    engine = bool(exe.strip()) and os.path.isfile(exe)
+    llm = bool(engine_install.configured_exe("llama", cfg))
+    sd = bool(engine_install.configured_exe("sd", cfg))
     try:
-        _d, chat, _i = models.scan_models(cfg)
+        _d, chat, img = models.scan_models(cfg)
     except Exception:
-        chat = []
-    missing = []
-    if not engine:
-        missing.append("推理引擎（llama-server）还没下载或没指路")
-    elif not chat:
-        missing.append("模型目录里没有能对话的模型")
-    return {"local": bool(engine and chat), "cloud": _cloud_ready(cfg),
-            "missing": missing}
+        chat, img = [], []
+    try:
+        vid, _enc = models.scan_video_models(cfg)
+    except Exception:
+        vid = []
+    media = list(img) + list(vid)
+    cloud_ok = _cloud_ready(cfg)
+    paths = [
+        {"id": "chat", "title": PATH_CHAT, "ready": bool(llm and chat),
+         "why": ("缺 %s" % models.ENGINE_LABEL["llama"] if not llm
+                 else "缺能对话的模型"),
+         "action": "本地模型 → 模型文件与引擎"},
+        {"id": "media", "title": PATH_MEDIA, "ready": bool(sd and media),
+         "why": ("缺 %s" % models.ENGINE_LABEL["sd"] if not sd
+                 else "缺生图 / 生视频模型"),
+         "action": "本地模型 → 模型文件与引擎"},
+        {"id": "cloud", "title": PATH_CLOUD, "ready": cloud_ok,
+         "why": "没填 API Key", "action": "云端模型 → 服务商与密钥"},
+    ]
+    return {"local": bool(paths[0]["ready"] or paths[1]["ready"]),
+            "chat": paths[0]["ready"], "media": paths[1]["ready"],
+            "cloud": cloud_ok,
+            "usable": any(p["ready"] for p in paths),
+            "paths": paths,
+            "missing": ["%s：%s" % (p["title"], p["why"]) for p in paths
+                        if not p["ready"]]}
 
 
 def _apply_paths(out, cloud_ok):
-    """按「本地与云端任一跑通即算成功使用」重判级别（W 定的口径，2026-10-01）。
+    """按「三条路任一跑通即算成功使用」重判级别（W 定的口径，2026-10-01；2026-10-05 扩到三路）。
 
-    原来把"没有本地可聊天模型"报成 fail 是**判错了目标**：一个只想接云端的人
-    根本不需要引擎和权重。规则改成三条：
-      · 本地能跑 → 照原样；
-      · 本地不能跑但云端能跑 → 本地那 12 项一律降成"不适用"，并说清为什么，
-        报告里它们挤在一起、不再占"需要处理"的名额；
-      · 两条都不通 → 才在**最前面**加一条 fail 汇总，明细保持各自的原级。
+    原来把"没有本地可聊天模型"报成 fail 是**判错了目标**：一个只想接云端、或者只想用本地
+    生图的人根本不需要 llama 引擎与对话权重。规则是：
+      · 逐条链路判就位，**只把没就位的那条**降成"不适用"，并说清为什么，报告里它们挤在
+        一起、不再占"需要处理"的名额；
+      · 本地两条都不通（纯云端）时，显卡 / 内存 / 模型目录也一并降 —— 那几项只与"跑本地
+        大模型"有关；
+      · 三条都不通 → 才在**最前面**加一条 fail 汇总，明细保持各自的原级。
+    汇总项的措辞仍是本地 / 云端两段（本地 = 两条里任一条就绪），见 W 2026-10-05 的口径。
     """
     by = {c["id"]: c for c in out}
-    local_ok = by.get("server_exe", {}).get("level") == OK \
-        and by.get("chat_models", {}).get("level") == OK
-    if not local_ok and cloud_ok:
-        for cid in LOCAL_ONLY:
+    chat_ok = (by.get("server_exe", {}).get("level") == OK
+               and by.get("chat_models", {}).get("level") == OK)
+    media_ok = by.get("sd_cli", {}).get("level") == OK and bool(
+        by.get("img_models", {}).get("level") == OK
+        or by.get("vid_models", {}).get("level") == OK)
+    local_ok = chat_ok or media_ok
+
+    def _na(ids, why):
+        for cid in ids:
             c = by.get(cid)
             if c and c["level"] in (WARN, FAIL):
                 c["level"] = NA
-                c["fact"] = "只用云端不需要这个 —— " + c["fact"]
+                c["fact"] = why + c["fact"]
+
+    if not chat_ok and (media_ok or cloud_ok):
+        _na(LOCAL_CHAT, "只用云端不需要这个 —— " if cloud_ok and not media_ok
+           else "不做本地对话不需要这个 —— ")
+    if not media_ok and (chat_ok or cloud_ok):
+        _na(LOCAL_MEDIA, "只用云端不需要这个 —— " if cloud_ok and not chat_ok
+           else "不做本地生图 / 生视频不需要这个 —— ")
+    if not local_ok and cloud_ok:
+        _na(("gpu", "ram", "models_dir"), "只用云端不需要这个 —— ")
     out.insert(0, _c("paths", GROUP_ENV, OK if (local_ok or cloud_ok) else FAIL,
                      "能不能跑通",
                      "本地：%s ｜ 云端：%s ｜ 只要通一条就能用"
@@ -356,10 +405,12 @@ def run_checks(cfg, proxy_running=False, server_running=False, probe_gpu=True):
     if not exe:
         out.append(_c("server_exe", GROUP_ENGINE, FAIL, "没有指定推理引擎",
                       "设置里的「引擎程序」是空的",
-                      "去 设置 → 本地模型 → 服务参数 里指向 llama-server.exe。",
+                      "去 设置 → 本地模型 → 服务参数 里指向 %s。"
+                      % engine_install.exe_name("llama"),
                       ("settings", "本地模型 → 服务参数")))
     elif not os.path.isfile(exe):
-        out.append(_c("server_exe", GROUP_ENGINE, FAIL, "找不到推理引擎 llama-server.exe",
+        out.append(_c("server_exe", GROUP_ENGINE, FAIL,
+                      "找不到推理引擎 %s" % engine_install.exe_name("llama"),
                       exe,
                       "引擎不随本程序分发（许可与体积原因）。在 设置 → 本地模型 → 模型文件与引擎 "
                       "点「检查更新」→「更新引擎」装 llama.cpp（CUDA 档会连运行库一起下），"
@@ -473,30 +524,34 @@ def run_checks(cfg, proxy_running=False, server_running=False, probe_gpu=True):
                       ""))
 
     # ---------------- 本地生图 / 生视频 ----------------
-    sd = str(cfg.get("sd_dir", "") or "")
-    cli = os.path.join(sd, "sd-cli.exe") if sd else ""
-    if not sd or not os.path.isfile(cli):
-        out.append(_c("sd_cli", GROUP_MEDIA, NA, "本地生图 / 生视频引擎",
+    # 先把模型扫出来，再判引擎：**方向反了会把"模型在、引擎没装"报成"不适用"** ——
+    # 那是"现在就出不了图"（fail），不是"不需要"。只有一个模型都没有时才当不适用。
+    try:
+        _d2, _c2, img2 = models.scan_models(cfg)
+    except Exception:
+        img2 = []
+    try:
+        vid, _enc = models.scan_video_models(cfg)     # 返回 (主体, 编码器) 两段
+    except Exception:
+        vid = []
+    sd_exe = engine_install.configured_exe("sd", cfg)
+    media_any = bool(img2 or vid)
+    if not sd_exe:
+        out.append(_c("sd_cli", GROUP_MEDIA, FAIL if media_any else NA,
+                      "本地生图 / 生视频引擎",
+                      "目录里已经有生图 / 生视频模型，但引擎没就位" if media_any else
                       "没装 stable-diffusion.cpp（只有想用本地生图或生视频时才需要）",
                       "要用的话在 设置 → 本地模型 → 模型文件与引擎 用「检查更新 → 更新引擎」"
                       "装 sd.cpp（或「自动定向」指到已有目录），装完到 设置 → 本地模型 → 生图 里指路。",
                       ("settings", "本地模型 → 模型文件与引擎")))
     else:
-        out.append(_c("sd_cli", GROUP_MEDIA, OK, "本地生图 / 生视频引擎", cli))
-    _d2, _c2, img2 = ("", [], [])
-    try:
-        _d2, _c2, img2 = models.scan_models(cfg)
-    except Exception:
-        pass
-    if img2:
-        out.append(_c("img_models", GROUP_MEDIA, OK, "本地生图模型", "%d 个" % len(img2)))
-    vid = []
-    try:
-        vid, _enc = models.scan_video_models(cfg)     # 返回 (主体, 编码器) 两段
-    except Exception:
-        pass
-    if vid:
-        out.append(_c("vid_models", GROUP_MEDIA, OK, "本地生视频主体", "%d 个" % len(vid)))
+        out.append(_c("sd_cli", GROUP_MEDIA, OK, "本地生图 / 生视频引擎", sd_exe))
+    out.append(_c("img_models", GROUP_MEDIA, OK if img2 else NA, "本地生图模型",
+                  "%d 个" % len(img2) if img2 else
+                  "没放生图模型（只有想用本地生图时才需要）", ""))
+    out.append(_c("vid_models", GROUP_MEDIA, OK if vid else NA, "本地生视频主体",
+                  "%d 个" % len(vid) if vid else
+                  "没放生视频模型（只有想用本地生视频时才需要）", ""))
 
     # ---------------- 端口 ----------------
     p1 = int(cfg.get("port", 8080) or 8080)

@@ -10,8 +10,10 @@ from tkinter import ttk, messagebox, filedialog, font as tkfont
 from ..core import capability, localmodels, providers, secrets
 from ..core.config import save_config
 from ..core.hardware import detect_gpu, detect_ram_gb
-from ..core.models import (apply_tidy, display_name, find_vl_pairs, plan_tidy,
-                          scan_models, scan_video_models, short_alias)
+from ..core.models import (ENGINE_LABEL, apply_tidy, display_name, engine_ready,
+                          find_vl_pairs, first_usable, plan_tidy, scan_models,
+                          scan_video_models, selected_usable, short_alias,
+                          usable_local)
 from ..core.params import auto_ctx_for_model, compute_ngl, current_ngl
 from ..core.media import resolve_video_files
 from ..connection.stream import request_auto_alias
@@ -35,6 +37,74 @@ def model_missing(cfg):
 
 class ModelsMixin:
     """App 的模型菜单、切换与管理页职责（Mixin）；self._xxx 在运行时经 MRO 解析。"""
+
+    def _maybe_adopt_first_model(self, force=False):
+        """第一个"现在就能用"的模型配好时，主页面**立即**切过去（一次性，坑 150）。
+
+        判据只有一处：`core.models.selected_usable` / `first_usable`
+        （本地 = 对应引擎的文件真的存在 × 模型在；云端 = 服务商启用且填过密钥）。
+        四个要点：
+          · **只在"当前选中不可用"时动手** —— 已经在用一个能用的模型就一个字节都不改。
+          · **一次性**：`cfg["model_auto_picked"]` 记下"已经替用户选过一次"（用户自己
+            在菜单里选过同样置位），之后程序不再插手。
+          · **"删光全部模型"会重新武装**：一个可用的都没有时把标记清掉，所以用户清空
+            模型目录后再配第一个模型，这条会再生效一次（W 口径）。
+          · **正在忙就跳过**（生成 / 生图 / 生视频 / 服务操作）：换模型不能插进任务中间，
+            下一轮再来。
+
+        `force=True` 给"用户刚做完某个动作"的调用点（设置页保存、引擎装完、手动定向
+        模型）—— 那几处要的是**立刻**响应，不等冷却。`force=False` 是状态轮询里的安全网，
+        带冷却（`core.throttle`），免得每 3 秒白扫一次盘（坑 4 的通用纪律）。
+        """
+        th = getattr(self, "_auto_pick", None)
+        if not force:
+            if th is not None and not th.due():
+                return
+            # 便宜的先问：一个引擎都没就位、也没填密钥 ⇒ 不可能有可用模型，别白扫盘
+            if not (engine_ready(self.cfg, "llama") or engine_ready(self.cfg, "sd")
+                    or any(secrets.has_api_key(p.get("id"))
+                            for p in (self.cfg.get("cloud_providers") or [])
+                            if (p or {}).get("enabled", True))):
+                return
+        if self._busy or self._svc_busy or self._img_busy or self._vid_busy:
+            return
+        if th is not None:
+            th.mark()
+        if self.cfg.get("model_auto_picked"):
+            # 已接管过。绝大多数轮询在这里就收工（`selected_usable` 走快路径，不扫盘）。
+            if selected_usable(self.cfg):
+                return
+            if first_usable(self.cfg):
+                return                # 还有别的可用模型，但用户已经选过 ⇒ 不插手
+            # 一个可用的都不剩 = 用户把模型删光了 ⇒ 重新武装，下一个配好的会再切一次
+            self.cfg.pop("model_auto_picked", None)
+            save_config(self.cfg)
+            return
+        if selected_usable(self.cfg):
+            self.cfg["model_auto_picked"] = True     # 已经有一个能用的了
+            return
+        got = first_usable(self.cfg)
+        if not got:
+            return                                   # 还没有可用的：等下一轮（标记不置位）
+        # 三类都存**绝对路径**（与 `pick_model` 同一形状）：`media.resolve_*_model_path`
+        # 判的是 `os.path.isfile(cfg["model"])`，存文件名会让生图 / 生视频直接报"未找到模型"
+        self.cfg["model"] = got["id"]
+        self.cfg["model_kind"] = got["kind"]
+        self.cfg["model_provider"] = got["provider"]
+        self.cfg["model_auto_picked"] = True
+        save_config(self.cfg)
+        self._update_model_label()
+        self._render_status(self._server_alive_flag, self._server_ready_flag)
+        if providers.is_cloud(self.cfg):
+            name = providers.display_of_cloud(self.cfg, got["id"])
+        else:
+            name = display_name(self.cfg, got["id"])
+        what = {"chat": "点「启动服务」加载后即可对话",
+                "image": "无需启动服务，直接发提示词和参考图（可选）即可",
+                "video": "无需启动服务，直接发提示词和首帧（可选）即可"}[got["kind"]]
+        self._append("\n[模型] 已自动选中第一个可用的模型：%s —— %s。\n"
+                     "（换模型点顶部模型名；这条自动选择只发生一次，删光全部模型后才会再来一次。）\n"
+                     % (name, what), "meta")
 
     def _update_model_label(self):
         cur = str(self.cfg.get("model") or "")
@@ -65,18 +135,24 @@ class ModelsMixin:
 
     # ---- 模型切换 ----
     def show_model_menu(self):
-        d, chat, images = scan_models(self.cfg)
-        vids, _ens = scan_video_models(self.cfg)
-        # 主菜单的显示过滤：`model_hidden` 只影响这里 —— 设置页的模型清单、扫描补全、
-        # 8081 代理的模型解析照旧认得全部文件（"不进菜单"不等于"这个模型不存在"）。
+        # 引擎没就位的那一组**不列**（坑 150）：菜单里的每个条目都得是真能发出去的 ——
+        # 列一条选上去就跑不了的模型，比不列更糟。判据与"自动选中第一个可用模型"、
+        # 引导第一屏、一键诊断共用 `core.models.usable_local` 一处（坑 128）。
+        # 只管主菜单：设置页的模型清单、扫描补全、8081 代理的模型解析照旧认得全部文件
+        # （沿用 `localmodels.hidden_set` 那条"显示层的事"口径）。
+        use = usable_local(self.cfg)
+        d = use["dir"]
+        # 用户自己勾掉的「不进主菜单」是另一回事：那要算进「另有 N 个未列入」，
+        # 而"这台机器上引擎还没装"不是用户的选择，不占那个名额。
         hid = localmodels.hidden_set(self.cfg)
-        _n0 = len(chat) + len(images) + len(vids)
+        _n0 = len(use["chat"]) + len(use["image"]) + len(use["video"])
 
         def _vis(p):
             return os.path.basename(p) not in hid
 
-        chat, images, vids = [x for x in chat if _vis(x)], \
-            [x for x in images if _vis(x)], [x for x in vids if _vis(x)]
+        chat = [x for x in use["chat"] if _vis(x)]
+        images = [x for x in use["image"] if _vis(x)]
+        vids = [x for x in use["video"] if _vis(x)]
         n_hid = _n0 - (len(chat) + len(images) + len(vids))
         # 云模型按能力混排进下面三组（不再单列"云端模型"组）：文本进文本组、
         # 生图/生视频进各自组，显示一律是「模型名（云）」
@@ -87,6 +163,17 @@ class ModelsMixin:
                 messagebox.showinfo("模型列表", "本地模型都在，但都被「不进主菜单」勾掉了：\n"
                                             "去 设置 → 本地模型 → 模型文件与引擎 里的「管理本地模型…」勾回来。")
                 return
+            if not (engine_ready(self.cfg, "chat") or engine_ready(self.cfg, "media")):
+                # 一个引擎都没就位：先说引擎，别让用户以为模型没扫到
+                messagebox.showinfo(
+                    "模型列表",
+                    "还没就位的引擎：\n· %s（本地对话）\n· %s（本地生图 / 生视频）\n\n"
+                    "去 设置 → 本地模型 → 模型文件与引擎 点「检查更新 → 更新引擎」装一份，"
+                    "或用「自动定向」指到本机已有的那一份；\n"
+                    "只想用云端：在 设置 → 云端模型 → 服务商与密钥 填密钥，"
+                    "再到「选择模型」里勾上要用那几个。"
+                    % (ENGINE_LABEL["llama"], ENGINE_LABEL["sd"]))
+                return
             messagebox.showinfo("模型列表", "模型文件夹里没有找到 .gguf 文件：\n%s\n\n"
                                 "可在 设置 → 服务参数 → models_dir 修改目录；"
                                 "生图模型放在其下的「生图」子文件夹，"
@@ -96,6 +183,11 @@ class ModelsMixin:
         menu = tk.Menu(self.root, tearoff=0, font=("Microsoft YaHei UI", 10))
         cur = os.path.basename(self.cfg["model"])
         cur_id = self.cfg.get("model") if providers.is_cloud(self.cfg) else None
+        # 分组里一项都没有时那句提示：引擎没装要说清是引擎的事（不然用户去翻模型目录）
+        no_llm = "" if engine_ready(self.cfg, "chat") else "：还没就位 %s" % ENGINE_LABEL["llama"]
+        no_sd = "" if engine_ready(self.cfg, "sd") else "：还没就位 %s" % ENGINE_LABEL["sd"]
+        no_vid = ("（无：把视频组件的 .gguf 放进模型目录下的「生视频」文件夹）"
+                  if not no_sd else "（无%s）" % no_sd)
 
         def add_cloud(kind):
             """把某个能力下的云模型追加进当前分组。
@@ -152,8 +244,10 @@ class ModelsMixin:
                 for g in groups:
                     cascade(g["key"], g["models"])
 
+        # 三组一律给出组头（原来文本组没内容时整组消失，用户看不到"这台机器缺什么"）：
+        # 空组用一行「（无：还没就位 …）」占位，与生图 / 生视频那两组同一形状。
+        menu.add_command(label="—— 文本模型 ——", state="disabled")
         if chat or cloud[providers.KIND_TEXT]:
-            menu.add_command(label="—— 文本模型 ——", state="disabled")
             _pairs = find_vl_pairs(self.cfg)
             _rec = self.cfg.get("model_mmproj") or {}
             for p in chat:
@@ -166,6 +260,8 @@ class ModelsMixin:
                                     "（纯文本）" if v == capability.NO else "（看图未确认）"),
                                  command=lambda pp=p: self.pick_model(pp))
             add_cloud(providers.KIND_TEXT)
+        else:
+            menu.add_command(label="（无%s）" % no_llm, state="disabled")
         menu.add_separator()
         menu.add_command(label="—— 生图模型 ——", state="disabled")
         if images or cloud[providers.KIND_IMAGE]:
@@ -176,7 +272,7 @@ class ModelsMixin:
                                  command=lambda pp=p: self.pick_model(pp))
             add_cloud(providers.KIND_IMAGE)
         else:
-            menu.add_command(label="（无）", state="disabled")
+            menu.add_command(label="（无%s）" % no_sd, state="disabled")
         menu.add_separator()
         menu.add_command(label="—— 生视频模型 ——", state="disabled")
         if vids or cloud[providers.KIND_VIDEO]:
@@ -187,8 +283,7 @@ class ModelsMixin:
                                  command=lambda pp=p: self.pick_model(pp))
             add_cloud(providers.KIND_VIDEO)
         else:
-            menu.add_command(label="（无：把视频组件的 .gguf 放进模型目录下的「生视频」文件夹）",
-                             state="disabled")
+            menu.add_command(label=no_vid, state="disabled")
         if n_hid:
             # 一句就够：让人知道菜单是被过滤过的、去哪儿放开（否则"我的模型不见了"
             # 只会让人以为程序扫错了目录）
@@ -225,6 +320,7 @@ class ModelsMixin:
         self.cfg["model"] = path
         self.cfg["model_kind"] = kind
         self.cfg["model_provider"] = providers.LOCAL    # 切回本地：清掉云端归属
+        self.cfg["model_auto_picked"] = True   # 用户自己选的 ⇒ 记下"别再自动接管"
         save_config(self.cfg)
         self._update_model_label()
         self._render_status(self._server_alive_flag, self._server_ready_flag)
@@ -260,6 +356,7 @@ class ModelsMixin:
             return
         self.cfg["model"] = mid
         self.cfg["model_provider"] = pid
+        self.cfg["model_auto_picked"] = True   # 用户自己选的 ⇒ 记下"别再自动接管"
         kind = kind or providers.model_kind_of(
             providers.get_provider(self.cfg, pid), model)
         # 能力 → 本地那套 model_kind 词表：text=chat、image=video 之外不新增第三种
@@ -776,6 +873,11 @@ class ModelsMixin:
         messagebox.showinfo("手动定向模型",
                             "已加入：\n%s\n\n文件没有移动 —— 扫描与模型菜单会认它。" % p)
         threading.Thread(target=self._scan_and_fill, args=(False,), daemon=True).start()
+        # 加了来源就可能凑齐了"第一个可用模型" ⇒ 立刻切过去（坑 150）
+        try:
+            self._maybe_adopt_first_model(force=True)
+        except Exception:
+            pass
 
     def _reindex_after_tidy(self):
         """整理移动后：清理失效记录并按新位置重新配对 mmproj。"""

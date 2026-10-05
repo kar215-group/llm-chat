@@ -21,13 +21,14 @@
 按钮开窗口前先 `lift()` 已存在的那个（重开 = 抬到最前，不叠第二个）。
 """
 import os
+import re
 import sys
 import threading
 import tkinter as tk
 from tkinter import ttk, messagebox
 
-from ..core import crashlog, diagnose, providers
-from ..core.config import APP_DIR, CONFIG_PATH, save_config
+from ..core import (crashlog, diagnose, providers, secrets, selfupdate, updater)
+from ..core.config import APP_DIR, APP_VERSION, CONFIG_PATH, save_config
 from . import widgets
 
 
@@ -344,4 +345,254 @@ class SubWindowMixin:
                   justify="left", font=("Microsoft YaHei UI", 9)).grid(
             row=rows["i"], column=1, columnspan=2, sticky="w", pady=(6, 0))
         widgets.center_on(win, host)   # 摆到触发它的设置页正中，别落在屏幕左上角
+        return win
+
+    def open_update_window(self, info, auto=False, parent=None):
+        """「发现新版本」次级窗口（自替换更新，2026-10-05 W 点名）：提示 → 「立即更新」
+        下载（进度条，可取消）→ sha256 对上、解压、新版 `--version` 烟测通过 →
+        提示"要关闭程序" → 确认后换 exe、自动打开新版。
+
+        `auto=True` = 自动检查（进关于页自动查 / 开发者后台轮询）触发的弹窗：用户把它
+        关掉（X 或「暂不」）就把 tag 记进 `cfg["upd_dismissed"]`，同一个版本不再自动弹
+        第二次，出现更新的 tag 照旧弹；手动点「检查更新」进来的（`auto=False`）不受这份
+        记录限制。单实例：已经开着就抬到最前，不叠第二个（与诊断窗同款纪律）。
+
+        下载在子线程、结果一律经 `_ui_q` 回主线程（坑 54）；窗口可能被人手点 X ——
+        每个 UI 回调都先问 `winfo_exists`，暂存目录的清理在 `_close` 与 worker 各兜一边，
+        谁先到谁清，绝不留半个下载目录。
+        """
+        info = dict(info or {})
+        tag = str(info.get("tag") or "")
+        ch = info.get("channel") or updater.CHANNEL_STABLE
+        host = parent or self.root
+        if getattr(self, "_upd_win", None) is not None:
+            try:
+                if self._upd_win.winfo_exists():
+                    self._upd_win.lift()
+                    return self._upd_win
+            except Exception:
+                self._upd_win = None
+
+        win = tk.Toplevel(host)
+        win.withdraw()          # 先藏起来，摆正了再显示（否则左上角闪一下）
+        win.title("发现新版本")
+        win.geometry("560x430")
+        win.minsize(520, 380)
+        win.transient(host)
+        self._upd_win = win
+
+        cfg = self.cfg
+        exe_here = selfupdate.cur_exe_path()   # 源码运行 = None：没有 exe 可换
+        stop_flag = threading.Event()
+        state = {"stage": "prompt", "staging": "", "exe": ""}
+
+        top = ttk.Frame(win)
+        top.pack(side="top", fill="x", padx=14, pady=(12, 4))
+        ttk.Label(top, text="发现新版本：%s" % (info.get("name") or tag),
+                  font=("Microsoft YaHei UI", 11, "bold")).pack(
+            side="top", anchor="w")
+        ttk.Label(top, text="本机 %s → 新版 %s　·　发布于 %s　·　%s"
+                  % (updater.display_version(info.get("current") or APP_VERSION),
+                     updater.display_version(tag),
+                     info.get("published") or "日期未知",
+                     updater.channel_label(ch)),
+                  foreground="#5a6a7a", font=("Microsoft YaHei UI", 9)).pack(
+            side="top", anchor="w", pady=(2, 0))
+
+        body = ttk.Frame(win)
+        body.pack(side="top", fill="both", expand=True, padx=14, pady=(4, 4))
+        notes = tk.Text(body, height=7, font=("Microsoft YaHei UI", 9),
+                        state="disabled", wrap="word")
+        notes.insert("1.0", str(info.get("notes") or "") or "（这个 Release 没写说明）")
+        notes.configure(state="disabled")
+        notes.pack(side="top", fill="both", expand=True)
+
+        bar_var = tk.DoubleVar(value=0.0)
+        bar = ttk.Progressbar(body, maximum=100.0, variable=bar_var, length=320)
+        status = tk.StringVar(value="下载用的是 GitHub 发布包，先校验再替换，"
+                                   "替换前会再确认一次。")
+        st_lab = ttk.Label(body, textvariable=status, foreground="#5a6a7a",
+                           wraplength=520, justify="left",
+                           font=("Microsoft YaHei UI", 9))
+        st_lab.pack(side="top", anchor="w", pady=(8, 0))
+        bar.pack(side="top", anchor="w", pady=(6, 0))
+        bar.pack_forget()       # 进下载阶段才显示；提示阶段放着只是占一行
+
+        if exe_here is None:
+            ttk.Label(body, text="这是源码运行：自动更新只对下载的 exe 生效，"
+                                 "更新请 git pull。", foreground="#b06000",
+                      font=("Microsoft YaHei UI", 9)).pack(
+                side="top", anchor="w", pady=(6, 0))
+
+        btns = ttk.Frame(win)
+        btns.pack(side="bottom", fill="x", padx=14, pady=(0, 12))
+        btn_go = ttk.Button(btns, text="立即更新", width=12)
+        btn_go.pack(side="right")
+        btn_stop = ttk.Button(btns, text="暂不", width=10)
+        btn_stop.pack(side="right", padx=(0, 8))
+        if exe_here is None:
+            btn_go.configure(state="disabled")
+
+        def _record_dismiss():
+            """自动弹的这扇窗被关掉 = 用户对**这个版本**说"别再弹"（落配置，重启仍算数）。"""
+            if auto and tag and tag != str(cfg.get("upd_dismissed", "") or ""):
+                cfg["upd_dismissed"] = tag
+                try:
+                    save_config(cfg)
+                except Exception:
+                    pass
+
+        def _cleanup_staging():
+            if state["staging"]:
+                selfupdate.cleanup(state["staging"])
+                state["staging"] = ""
+
+        def _close():
+            """窗口被手点 X：下载中也一样 —— 先停下载、清暂存，本机版本不动。"""
+            stop_flag.set()
+            _cleanup_staging()
+            _record_dismiss()
+            try:
+                win.destroy()
+            except Exception:
+                pass
+        win.protocol("WM_DELETE_WINDOW", _close)
+
+        def _restore_prompt(why, color="#b00020"):
+            """一次尝试结束（多半是失败）：清暂存、回到提示态。窗口可能已关。"""
+            _cleanup_staging()
+            state["stage"] = "prompt"
+            if not win.winfo_exists():
+                return
+            bar.pack_forget()
+            bar_var.set(0.0)
+            status.set(why)
+            st_lab.configure(foreground=color)
+            btn_go.configure(text="立即更新",
+                             state="normal" if exe_here else "disabled")
+            btn_stop.configure(text="暂不", state="normal")
+
+        def _dl_progress(txt, pct):
+            if not win.winfo_exists():
+                return
+            status.set(txt)
+            if pct is not None:
+                bar_var.set(pct)
+
+        def _dl_ready(staging, exe_path):
+            state["staging"] = staging
+            state["exe"] = exe_path
+            state["stage"] = "confirm"
+            if not win.winfo_exists():
+                _cleanup_staging()      # 窗口没等到这一刻就关了：包不留下
+                return
+            status.set("下载完成，校验通过。更新需要关闭当前程序"
+                       "（正在运行的服务也会一并停止），然后自动打开新版本。")
+            st_lab.configure(foreground="#1a7f37")
+            btn_go.configure(text="确认并更新", state="normal")
+            btn_stop.configure(text="取消", state="normal")
+
+        def _apply():
+            """确认并更新：换 exe → 拉新 → 写哨兵 → 正常退出收尾。
+
+            拉新失败要**回滚**（删掉放歪的新 exe、旧版改回原名）再报错 —— 顺序不能倒：
+            先回滚后报错，用户看到的错误落地的就是"一切照旧"的状态。
+            """
+            state["stage"] = "apply"
+            btn_go.configure(state="disabled")
+            btn_stop.configure(state="disabled")
+            status.set("正在替换程序文件…")
+            ok, why = selfupdate.apply_update(state["exe"], exe_here)
+            if not ok:
+                _restore_prompt(why)
+                return
+            ok2, why2 = selfupdate.launch(exe_here)
+            if not ok2:
+                selfupdate.rollback(exe_here)
+                _restore_prompt("新程序没能启动（%s），已回滚到旧版，本机版本没有动。"
+                                % why2)
+                return
+            selfupdate.mark_updated(exe_here)
+            _cleanup_staging()
+            self.on_close(force=True)   # 正常退出收尾（停服务 / 存对话记录），不再弹二选
+
+        def _start_download():
+            state["stage"] = "download"
+            btn_go.configure(state="disabled")
+            btn_stop.configure(text="取消下载", state="normal")
+            bar.pack(side="top", anchor="w", pady=(6, 0))
+            bar_var.set(0.0)
+            st_lab.configure(foreground="#5a6a7a")
+            status.set("正在向 GitHub 查询安装包…")
+
+            def work():
+                try:
+                    # 与关于页共用同一份 ETag 缓存：能弹到这一步，多半刚查过 → 304，不吃额度
+                    dl = selfupdate.find_download(
+                        ch, token=secrets.get_github_token(),
+                        cache=getattr(self, "_upd_check", {}).get("cache"))
+                except Exception as e:  # UpdaterError / SelfUpdateError 都已是人话
+                    self._ui_q.put(lambda w=str(e): _restore_prompt(w))
+                    return
+                staging = selfupdate.staging_dir()
+                zip_path = os.path.join(staging, "update.zip")
+
+                def emit(txt):
+                    # 下载器的 emit 只给文字；进度百分比从"（a / b MB）"里认出来，
+                    # 认不出就不动进度条（进度是锦上添花，文字才是承诺）
+                    m = re.search(r"（([\d.]+) / ([\d.]+) MB）", txt)
+                    pct = None
+                    if m:
+                        total = max(float(m.group(2)), 0.1)
+                        pct = min(100.0, float(m.group(1)) / total * 100.0)
+                    self._ui_q.put(lambda t=txt, p=pct: _dl_progress(t, p))
+
+                ok, why = selfupdate.download_zip(dl["url"], zip_path, emit=emit,
+                                                  stop_flag=stop_flag,
+                                                  digest=dl["digest"])
+                if not ok:
+                    selfupdate.cleanup(staging)
+                    self._ui_q.put(lambda w=("已取消下载。" if stop_flag.is_set() else why):
+                                   _restore_prompt(w))
+                    return
+                exe_path, werr = selfupdate.extract_exe(zip_path, staging)
+                if exe_path:
+                    good, wsmoke = selfupdate.smoke_test(exe_path, dl["tag"])
+                    if not good:
+                        exe_path, werr = None, wsmoke
+                if not exe_path:
+                    selfupdate.cleanup(staging)
+                    self._ui_q.put(lambda w=werr: _restore_prompt(w))
+                    return
+                self._ui_q.put(lambda s=staging, e=exe_path: _dl_ready(s, e))
+
+            threading.Thread(target=work, daemon=True).start()
+
+        def _stop():
+            if state["stage"] == "download":
+                stop_flag.set()         # worker 收到就停：删 .part、清目录、回"已取消"
+                status.set("正在取消…")
+            elif state["stage"] == "confirm":
+                # 下载完又不想装：清暂存回提示态，本机版本没动
+                _cleanup_staging()
+                state["stage"] = "prompt"
+                bar.pack_forget()
+                bar_var.set(0.0)
+                status.set("已取消，本机版本没有动。下载的文件已清掉。")
+                st_lab.configure(foreground="#5a6a7a")
+                btn_go.configure(text="立即更新",
+                                 state="normal" if exe_here else "disabled")
+                btn_stop.configure(text="暂不", state="normal")
+            else:
+                _close()
+
+        def _go():
+            if state["stage"] == "prompt":
+                _start_download()
+            elif state["stage"] == "confirm":
+                _apply()
+
+        btn_go.configure(command=_go)
+        btn_stop.configure(command=_stop)
+        widgets.center_on(win, host)
         return win

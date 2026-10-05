@@ -30,7 +30,7 @@ CONFIG_PATH = os.path.join(APP_DIR, "gui_config.json")
 
 # 版本号：发版时改这一处（--selfcheck / --version 会打印它）。
 # GitHub Release 的 tag 要与它一致（tag 去掉开头的 v），Actions 工作流会做一致性校验。
-APP_VERSION = "1.0.6beta2"
+APP_VERSION = "1.0.6beta3"
 
 CFG_VERSION = 2
 
@@ -79,6 +79,11 @@ DEFAULT_CONFIG = {
     # ---- 模型分类 ----
     "model_kind": "chat",          # 当前选中模型的类型：chat / image / video
     "image_model_dir": "",           # 生图大模型子文件夹；留空 = models_dir/生图
+    # 「已经替用户自动选中过一个模型」的标记（坑 150）。程序只自动接管一次：用户自己
+    # 在菜单 / 设置页选过也置位。只有"一个可用的模型都不剩"时才会清掉重新武装 ——
+    # 所以删光全部模型后再配第一个，这条会再生效一次。不用 cfg_version 升级那道闸：
+    # 新键缺省 False 正是"还没接管过"，对老用户就是正确初值。
+    "model_auto_picked": False,
     # ---- 生图（sd.cpp；参数形状由 core/sdprofile 按模型族决定）----
     "sd_dir": "",                    # sd.cpp 部署目录（含 sd-cli.exe）；在设置里指路
     "img_model_file": "",          # 生图扩散模型文件名（在 image_model_dir 下）
@@ -173,6 +178,11 @@ DEFAULT_CONFIG = {
     # 出现更新的 tag 时照旧会弹（判据是"tag 变了"，不是"时间没到"）。
     # 注意：开发者模式**开关本身**不在这里 —— 它只在本次运行内有效（App._dev_mode）。
     "dev_upd_dismissed": "",
+    # 「自动检查发现新版本、弹了更新窗口、用户把它关掉了」的那个 tag（2026-10-05）：
+    # 同一个版本不再自动弹第二次；出现更新的 tag 照旧弹。取代上面 dev_upd_dismissed
+    # 的职责 —— 现在两条自动路径（进关于页自动查 / 开发者后台轮询）共用这一个键；
+    # 用户**手动**点「检查更新」不受它限制，永远弹。
+    "upd_dismissed": "",
     # ---- 引擎管理（设置 → 模型文件与引擎 →「引擎管理」；W 2026-10-05）----
     # 记录"自动安装装上的那个版本"（key = engine → tag），用来判断「检查更新」查到的是
     # 「查询到新版本」还是"已经是最新"。手动定向 / 用户自己放的引擎不写这里 ⇒ 会被当成

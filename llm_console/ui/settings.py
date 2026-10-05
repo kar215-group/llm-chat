@@ -157,19 +157,22 @@ def _upd_help_text():
     """关于页「检查更新」那个 "?" 的说明。
 
     为什么是个函数而不是写死的字符串：最后那句"多久之内不再自动查"是**跟着令牌变的**
-    （带令牌 5 秒 / 匿名 10 分钟，见 updater.cooldown_seconds）。这里是用户唯一能看到这条
+    （带令牌 1 分钟 / 匿名 10 分钟，见 updater.cooldown_seconds）。这里是用户唯一能看到这条
     规则的地方，令牌换了还留着旧数字就是骗人 —— 所以开发者选项那边一改令牌，就回来重算它。
     """
     t = secrets.get_github_token()
     if t:
-        tail = ("进入本页时会自动按「正式版」查一次；填了 GitHub 令牌后 5 秒内不重复查"
-                "（认证接口限额 5000 次/小时），后台还会每 10 分钟查一次、"
-                "查到新版本会弹窗提醒。")
+        tail = ("进入本页时会自动按「正式版」查一次；填了 GitHub 令牌后 1 分钟内不重复查"
+                "（认证接口限额 5000 次/小时），开发者模式下还会每 30 分钟在后台查一次。")
     else:
         tail = ("进入本页时会自动按「正式版」查一次；同一进程内 10 分钟内不重复查"
                 "（GitHub 匿名接口每 IP 每小时 60 次）。")
     return ("检查更新：按右边选的通道向 GitHub 查最新 Release。\n"
             "正式版 = 只看正式发布的 Release；测试版 = 把预发布一起算，给最新的那个。\n"
+            "查到新版本会弹「发现新版本」窗口，点「立即更新」就下载并替换本程序，"
+            "替换前会再确认一次（需要关闭程序）。\n"
+            "自动检查弹的窗被关掉后，同一个版本不再自动弹第二次；"
+            "手动点「检查更新」永远弹。\n"
             "打开下载页 = 查到新版本时跳到它的下载页。\n" + tail)
 
 
@@ -1371,6 +1374,12 @@ class SettingsMixin:
                     refresh_key()
                     msg_lbl.set("已保存「%s」的密钥。" % st["pid"])
                     d.destroy()
+                    # 填完密钥可能就凑齐了"第一个可用模型"（这台机器没装任何引擎的
+                    # 常见情形）⇒ 立刻切过去（坑 150）
+                    try:
+                        self._maybe_adopt_first_model(force=True)
+                    except Exception:
+                        pass
 
                 def clear():
                     if st["pid"] and messagebox.askyesno("API Key", "清除「%s」的已存密钥？"
@@ -2421,11 +2430,14 @@ class SettingsMixin:
                             info["tag"], cur, info.get("published") or "日期未知")
                          + note, "#1a7f37")
                     if dialog:
-                        messagebox.showinfo(
-                            "有新版本", "发现新版本：%s（%s）\n本机：%s\n发布于 %s\n\n%s"
-                            % (info.get("name") or info["tag"], info["tag"], cur,
-                               info.get("published") or "日期未知",
-                               info.get("notes") or "（这个 Release 没写说明）"))
+                        # 手动点的：弹「发现新版本」次级窗口（能一键更新），永远弹
+                        # —— 不再看 upd_dismissed 的旧账（2026-10-05）
+                        self.open_update_window(info, auto=False)
+                    elif info.get("tag") and info.get("tag") != str(
+                            self.cfg.get("upd_dismissed", "") or ""):
+                        # 自动检查（进页自动查）查到新版本也弹（W 2026-10-05 定）；
+                        # 同一个版本被关掉过就只留这行状态，不再弹第二次
+                        self.open_update_window(info, auto=True)
                 elif state == updater.STATE_LATEST:
                     _say("已是最新：%s（%s）。"
                          % (updater.display_version(info.get("tag") or cur), ch_text_)
@@ -2662,7 +2674,8 @@ class SettingsMixin:
                         % ("（当前 %s）" % secrets.mask(t) if t else "（本来就没填）")):
                     return
                 secrets.set_github_token("")
-                self.cfg["dev_upd_dismissed"] = ""
+                self.cfg["dev_upd_dismissed"] = ""   # 旧键：2026-10-05 前的后台弹窗记录，顺手清
+                self.cfg["upd_dismissed"] = ""       # 自动弹窗的版本记录（进页自动查/后台轮询共用）
                 save_config(self.cfg)
                 _refresh()
                 _sync_upd_help()
@@ -2916,6 +2929,12 @@ class SettingsMixin:
                             var.set(self.cfg[key2])
                         except Exception:
                             pass
+                    # 引擎刚就位往往就是"第一个可用模型"的时刻（模型早就下好了只差引擎）
+                    # ⇒ 立刻切过去，不等状态轮询（坑 150）
+                    try:
+                        self._maybe_adopt_first_model(force=True)
+                    except Exception:
+                        pass
 
                 def do_check(_e=None, b=box, k=key, cb=flavor_cb, fv=flavor_var,
                              sv=st_var, stl=st, rf=_render, sf=_show_flavor):
@@ -3352,6 +3371,12 @@ class SettingsMixin:
                     messagebox.showwarning(
                         "还没保存", msg or "这一页有内容没通过检查，请改好再保存。")
                     return
+            # 保存往往就是"第一次配好"的时刻（指了引擎 / 指了模型目录 / 勾了云端模型 /
+            # 填了密钥）⇒ 立刻问一次"第一个能用的模型有了没有"，别等下一轮轮询（坑 150）
+            try:
+                self._maybe_adopt_first_model(force=True)
+            except Exception:
+                pass
             win.destroy()
             if restart:
                 self.restart_server()
@@ -3431,6 +3456,7 @@ class SettingsMixin:
             if _m:
                 c["model"] = _m
                 c["model_provider"] = providers.LOCAL
+                c["model_auto_picked"] = True   # 用户自己选的 ⇒ 别再自动接管（坑 150）
                 _k = _kind_of_local_model(c, _m)
                 if _k:
                     c["model_kind"] = _k

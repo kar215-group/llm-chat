@@ -14,9 +14,10 @@ from tkinter import ttk, scrolledtext, messagebox
 from ..core.config import (load_config, DEFAULT_CONFIG, APP_DIR, APP_VERSION,
                            CONFIG_PATH)
 from ..core import (cloudjobs, config, crashlog, diagnose, engine_install, providers,
-                    secrets, throttle, updater)
+                    secrets, selfupdate, throttle, updater)
 from ..core.models import (auto_locate_models_dir, dir_has_any_gguf, display_name,
-                           extra_sources, has_local_chat)
+                          extra_sources, first_usable, has_local_chat,
+                          selected_usable)
 from ..core.server import _query_serving_model, server_process_alive, server_state, stop_server
 from ..connection import cloud_media
 from ..connection.proxy import ProxyServer
@@ -76,6 +77,10 @@ class App(ChatMixin, ImageGenMixin, VideoGenMixin, ServiceMixin, ModelsMixin, Se
         # 进页冷却共用 core.throttle 那套判据（同一处），只是冷却时长固定 10 分钟。
         # 挂 App（不是窗口上）→ 关掉设置窗再开仍在，与 _upd_check 同一条口径。
         self._model_scan = throttle.AutoThrottle(throttle.AUTO_SCAN_COOLDOWN)
+        # 「第一个可用的模型配好了就切过去」那条兜底轮询的冷却（坑150）。真正让主页面
+        # "立即响应"的是事件钩子（设置页保存 / 引擎装完 / 手动定向模型，都是 force=True），
+        # 这一处只是安全网：用户在程序外面放了模型、或密钥是别的进程写进去的。
+        self._auto_pick = throttle.AutoThrottle(throttle.AUTO_PICK_COOLDOWN)
         # 开发者模式（W 2026-10-04）：入口是"关于页那行版本号连点 5 次"，见 ui/settings.py。
         # **只在本次运行内有效**（W 点名：重启后回到普通界面）—— 所以它在这儿、不进配置文件；
         # 而开发者选项里填的**东西**（GitHub 令牌等）是持久的，关掉这个模式也不清。
@@ -83,6 +88,7 @@ class App(ChatMixin, ImageGenMixin, VideoGenMixin, ServiceMixin, ModelsMixin, Se
         self._dev_tap = {"count": 0, "at": 0.0}    # 连点计数：上一次点击的时刻 + 已连了几下
         self._dev_upd = {"timer": None}            # 后台查更新的 after id（有令牌才不是 None）
         self._diag_win = None         # 「诊断」次级页面（设置 → 关于与诊断 的按钮开的，放路径与一键诊断）
+        self._upd_win = None          # 「发现新版本」次级窗口（自替换更新，2026-10-05；单实例）
         self._alias_tried = set()    # （备用）已尝试向模型请求别名的模型
         self._serving_model = None   # 当前服务实际加载的模型文件名（None=未知/未运行）
         self._pending_text = None    # 换载期间暂存的消息，就绪后自动发送
@@ -260,6 +266,12 @@ class App(ChatMixin, ImageGenMixin, VideoGenMixin, ServiceMixin, ModelsMixin, Se
                     changed = True
             if changed:
                 config.save_config(self.cfg)
+        except Exception:
+            pass
+        # 扫完可能刚把引擎 / 模型目录指到用户已经放好的那份 ⇒ 立刻问一次"第一个能用的
+        # 模型有了没有"，别等引导第一屏或状态轮询（坑 150）。
+        try:
+            self._maybe_adopt_first_model(force=True)
         except Exception:
             pass
         try:
@@ -569,25 +581,25 @@ class App(ChatMixin, ImageGenMixin, VideoGenMixin, ServiceMixin, ModelsMixin, Se
             self.chat.configure(state="disabled")
 
     def _offer_engine_hint(self):
-        """本地与云端两条路都不通时，在输出栏留一行说明 + 一个直达按钮。
+        """三条路都不通时，在输出栏留一行说明 + 几个直达按钮。
 
         为什么不靠引导说完就完：引导走完人就关了，"这台机器还差一步"得在**他下次打开
         程序时还在**（W 2026-10-02 验收原话："知道有地方但不会立刻去"）。
-        云端只要有一家填过密钥就不催 —— 只想用云端的人不缺东西，催他下引擎是噪音。
+        只要**任意一条**路通了就不催 —— 只想用云端的人不缺东西，催他下引擎是噪音；
+        只想用本地生图的人也不缺 llama 引擎（坑 150：原来这里只认 llama + 对话模型，
+        装着 sd 引擎和生图模型的用户照样被催一遍）。
         """
         try:
             q = diagnose.quick_paths(self.cfg)
         except Exception:
             return                      # 提示坏了不能把窗口开不成
-        if q["local"] or q["cloud"]:
+        if q["usable"]:
             return
         self.chat.configure(state="normal")
         try:
-            self.chat.insert("end", "\n[环境] 这台机器上两条路都还没通：\n", "meta")
+            self.chat.insert("end", "\n[环境] 这台机器上三条路都还没通：\n", "meta")
             for m in q["missing"]:
                 self.chat.insert("end", "  · %s\n" % m, "meta")
-            self.chat.insert("end", "  · 云端还没填 API Key（只想用云端的话填一家密钥就能聊）\n",
-                             "meta")
             btn = ttk.Button(self.chat, text="去配置引擎",
                              command=lambda: self.open_settings(jump="eng"))
             self.chat.window_create("end", window=btn)
@@ -901,25 +913,16 @@ class App(ChatMixin, ImageGenMixin, VideoGenMixin, ServiceMixin, ModelsMixin, Se
         threading.Thread(target=work, daemon=True).start()
 
     def _dev_upd_notify(self, state, info):
-        """后台结果 → 真查到新版本才弹窗提醒。
+        """后台结果 → 真查到新版本才弹更新窗口（2026-10-05 起是能一键更新的那扇）。
 
-        "同一版本只打扰一次"靠 `cfg["dev_upd_dismissed"]`：弹完就把 tag 记下 —— 点确定也好、
-        直接关掉窗口也好，都算"这个版本我知道了"。判据是 **tag 变了没有**，不是时间，
-        所以出现更新的版本时照旧会弹。
+        "同一版本只打扰一次"靠 `cfg["upd_dismissed"]`：判据是 **tag 变了没有**，不是时间，
+        所以出现更新的版本时照旧会弹。**记录动作在窗口关闭时做**（用户亲手关掉才算数），
+        这里只负责判与弹；手动点「检查更新」不受这份记录限制，永远弹。
         """
         tag = str((info or {}).get("tag") or "")
         if state == updater.STATE_UPDATE and tag and tag != str(
-                self.cfg.get("dev_upd_dismissed", "") or ""):
-            self.cfg["dev_upd_dismissed"] = tag
-            try:
-                config.save_config(self.cfg)
-            except Exception:
-                pass
-            messagebox.showinfo(
-                "发现新版本",
-                "GitHub 上有新版本：%s（本机 %s）。\n\n"
-                "到 设置 → 关于与诊断 点「检查更新」，那里能打开下载页。"
-                % (updater.display_version(tag), updater.display_version(APP_VERSION)))
+                self.cfg.get("upd_dismissed", "") or ""):
+            self.open_update_window(info, auto=True)
         self._dev_upd_start()       # 续排下一次
 
     def _render_status(self, alive, ready):
@@ -959,6 +962,12 @@ class App(ChatMixin, ImageGenMixin, VideoGenMixin, ServiceMixin, ModelsMixin, Se
             self._server_alive_flag = item[1]
             self._server_ready_flag = item[2]
             self._render_status(item[1], item[2])
+            # 兜底：第一个"能用的模型"配好了就切过去（带冷却，判据在 core.models）。
+            # 真正让它"立即响应"的是事件钩子；这一处只兜"程序外面发生的变化"（坑 150）。
+            try:
+                self._maybe_adopt_first_model()
+            except Exception as e:
+                print("[自动选中模型异常] %s: %s" % (type(e).__name__, e))
         elif tag == "serving":
             # 服务实际加载的模型变了（常见来源：agent 经 8081 让代理换了模型）。
             # 顶栏跟着刷新 + 说一句，免得"顶栏写着 A、回答其实来自 B"（坑 134）
@@ -1008,7 +1017,7 @@ class App(ChatMixin, ImageGenMixin, VideoGenMixin, ServiceMixin, ModelsMixin, Se
                 self._update_model_label()
             self._append("\n[服务] 模型别名已生成：%s\n" % alias, "meta")
 
-    def on_close(self):
+    def on_close(self, force=False):
         # 遮罩引导先关掉：它是 overrideredirect 的无边框窗，留着会在退出流程里挡住鼠标
         if getattr(self, "_guide", None) is not None:
             try:
@@ -1021,14 +1030,19 @@ class App(ChatMixin, ImageGenMixin, VideoGenMixin, ServiceMixin, ModelsMixin, Se
             self._cancel_chat_image()
         if self._vid_busy:
             self._cancel_chat_video()
-        # 场景 1：服务已就绪 —— 二选弹窗（可取消关闭）
+        # 场景 1：服务已就绪 —— 二选弹窗（可取消关闭）。`force=True`（自替换更新的
+        # 「确认并更新」）跳过弹窗：用户刚在更新窗口里确认过"要关闭程序"，再问一遍是折磨。
         if self._server_alive_flag:
-            dlg = ExitDialog(self.root)
-            self.root.wait_window(dlg)
-            if dlg.result in (None, "cancel"):
-                return                    # 取消：什么都不做，窗口继续运行
-            stop_server()                 # "stop"：停止服务并退出
-            self._kill_proc()
+            if force:
+                stop_server()             # 直接停服务并退出
+                self._kill_proc()
+            else:
+                dlg = ExitDialog(self.root)
+                self.root.wait_window(dlg)
+                if dlg.result in (None, "cancel"):
+                    return                # 取消：什么都不做，窗口继续运行
+                stop_server()             # "stop"：停止服务并退出
+                self._kill_proc()
         # 场景 2：启动/重启/换载进行中 —— 中止启动流程，不留残留进程
         elif self._svc_busy:
             self._abort_startup()
@@ -1094,20 +1108,25 @@ def main():
         _say("LLM Chat %s" % APP_VERSION)
         return
     crashlog.install()               # 未捕获异常先落盘再走默认处理（--windowed 没有控制台）
+    # 上一次自替换更新留下的收尾（.updating 旧版 + 哨兵）就交给新 exe 的第一次启动清：
+    # 放 main() 而不是 App.__init__ —— 与界面无关；源码运行 cur_exe_path() 是 None，
+    # finish_pending 直接空操作，只有冻结的 exe 才有旧账可清（2026-10-05）。
+    selfupdate.finish_pending(selfupdate.cur_exe_path())
     first_run = not os.path.isfile(CONFIG_PATH)
     cfg = load_config()
     # 默认值不指向任何一台具体机器上的文件（分发给别人时才有意义）：
-    # 没配模型、或配的模型文件不在，就从模型目录里挑一个能聊天的顶上。
-    # 云端模型的 cfg["model"] 是 "pid::model" 复合 id，不是文件路径——isfile 对它
-    # 必为 False，若不先排除会把用户选中的云模型每次启动都静默换成本地模型。
-    if (not providers.is_cloud(cfg)) and (
-            not cfg.get("model") or not os.path.isfile(str(cfg.get("model", "")))):
-        from ..core.models import scan_models
-        _d, chat, _i = scan_models(cfg)
-        if chat:
-            cfg["model"] = chat[0]
-            cfg["model_kind"] = "chat"
-            cfg["model_provider"] = providers.LOCAL
+    # 当前选中的模型"不能用"（没配 / 文件不在 / 对应引擎没就位 / 云端没密钥）时，
+    # 就从"现在就能用"的模型里挑一个顶上 —— 判据与主页面那套**同一处**
+    # （`core.models.selected_usable` / `first_usable`，坑 128 / 坑 150）。
+    # 启动这一次先顶上；"配好第一个可用模型就立即切过去"由运行期的
+    # `ModelsMixin._maybe_adopt_first_model` 负责（那才是那个一次性的自动接管）。
+    if not selected_usable(cfg):
+        got = first_usable(cfg)
+        if got:
+            cfg["model"] = got["id"]
+            cfg["model_kind"] = got["kind"]
+            cfg["model_provider"] = got["provider"]
+            cfg["model_auto_picked"] = True
     root = tk.Tk()
     root.title("LLM 本地对话台 - llama.cpp")
     # 1080x700 是量出来的，不是拍的（DPI-aware 严格档实测，含"模型名占满 22 字"的情况）：

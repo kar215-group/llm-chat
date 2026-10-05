@@ -1,11 +1,11 @@
 # -*- coding: utf-8 -*-
-"""llm_console.core.models — 模型库：扫描、分类（聊天/生图/生视频）、mmproj 配对、简称与模糊解析、文件夹整理"""
+"""llm_console.core.models — 模型库：扫描、分类（聊天/生图/生视频）、**可用性（引擎 × 模型）**、mmproj 配对、简称与模糊解析、文件夹整理"""
 
 import difflib
 import os
 import re
 
-from . import sdprofile
+from . import engine_install, providers, sdprofile, secrets
 from .config import APP_DIR
 from .gguf import gguf_is_chat_capable, gguf_structure
 
@@ -354,15 +354,154 @@ def scan_models(cfg):
 def has_local_chat(cfg):
     """有没有**能转发的本地文本模型** —— 这是 API 代理能用起来的前提。
 
-    没有本地聊天模型时这个代理就是个空壳：agent 连上来也拿不到回答，所以
-    「启用 API 代理」既默认关、也不给打开（判据只有这一处，界面与启动都问它）。
+    判据是「llama 引擎就位 **且** 目录里有能聊天的模型」两件事都成立：只有权重没有引擎时，
+    代理连上去会在换载那一步失败（agent 拿不到回答，而界面显示"运行中"）。
+    没有本地聊天模型时这个代理就是个空壳：所以「启用 API 代理」既默认关、也不给打开
+    （判据只有这一处，界面与启动都问它）。
     实测开发机（5 个模型）`scan_models` 约 9~11ms，放在启动路径上付得起。
     """
     try:
         _d, chat, _i = scan_models(cfg)
     except Exception:
         return False
-    return bool(chat)
+    if not chat:
+        return False
+    try:
+        return bool(engine_install.configured_exe("llama", cfg))
+    except Exception:
+        return False
+
+
+# ---------------------------------------------------------------------------
+# 「现在就能用」—— 引擎存在 × 模型存在（坑 150）
+# ---------------------------------------------------------------------------
+# 为什么要有这一层：本地有**三个**能力（文本 / 生图 / 生视频），只依赖**两个**引擎
+# （llama.cpp 与 sd.cpp）。原来"能不能用"只认「llama 引擎 + 聊天模型」，于是只想用本地
+# 生图的用户被判成"什么都没配好"：引导第一页催他下 llama 引擎、主页面挂"无可用模型"、
+# 一键诊断报「两条路都还没通」。
+#
+# 口径只写在这里，主页面菜单、引导第一屏、一键诊断、一次性自动选中**四处共用**
+# （坑 128：同一事实各写一遍，迟早各走各的偏）。一个本地模型"能用" =
+# **它自己那个引擎的文件真的存在** 且模型文件在；引擎的判据走
+# `engine_install.configured_exe`（一处），不另写 isfile。
+KIND_ENGINE = {"chat": "llama", "image": "sd", "video": "sd", "media": "sd"}
+# 直接说引擎名也认（`engine_ready(cfg, "sd")`），免得调用点把 "media" / "image" 记混。
+ENGINE_ALIAS = {"llama": "llama", "sd": "sd"}
+ENGINE_LABEL = {"llama": "llama 引擎", "sd": "sd 引擎"}
+
+
+def engine_ready(cfg, kind):
+    """某个能力对应的引擎是不是**真的就位**（配置指路 + 那个可执行文件存在）。
+
+    `kind` 用本模块那套词表（chat / image / video）；`"media"` 是生图与生视频的合称
+    （两者共用 sd.cpp，判据相同），也可以直接写引擎名 `"llama"` / `"sd"`。
+    """
+    k = str(kind or "")
+    key = KIND_ENGINE.get(k) or ENGINE_ALIAS.get(k)
+    if not key:
+        return False
+    try:
+        return bool(engine_install.configured_exe(key, cfg))
+    except Exception:
+        return False
+
+
+def usable_local(cfg):
+    """本地三类"现在就能用"的模型 → `{"dir", "chat", "image", "video"}`。
+
+    引擎没就位的那一类给**空列表**（不是"全部照给、界面上自己判断"）—— 判据与展示都在
+    这一处，调用方拿到的就是可以直接显示的清单。
+
+    只管主页面菜单与自动选中这两件显示层的事：设置页的模型清单、扫描补全、8081 代理的
+    模型解析照旧认得全部文件（沿用 `localmodels.hidden_set` 那条"不进主菜单只是显示层
+    的事、不等于这个模型不存在"的口径）。
+    """
+    try:
+        d, chat, images = scan_models(cfg)
+    except Exception:
+        d, chat, images = str((cfg or {}).get("models_dir") or ""), [], []
+    try:
+        vids, _encs = scan_video_models(cfg)
+    except Exception:
+        vids = []
+    ok = {"chat": engine_ready(cfg, "chat"),
+          "image": engine_ready(cfg, "image"),
+          "video": engine_ready(cfg, "video")}
+    return {"dir": d,
+            "chat": list(chat) if ok["chat"] else [],
+            "image": list(images) if ok["image"] else [],
+            "video": list(vids) if ok["video"] else []}
+
+
+def cloud_usable(cfg, kind):
+    """云端某能力下"真的发得出去"的模型：[(provider_id, 模型名)]。
+
+    判据 = 服务商启用 **且** 那家填过密钥。没密钥的模型选上去也发不出去，不该算"可用"
+    （`_cloud_ready` 是同一口径的"有没有一家就绪"版）。
+    """
+    out = []
+    try:
+        listed = providers.cloud_models(cfg, kind)
+    except Exception:
+        listed = []
+    for pid, _name, m in listed:
+        try:
+            if secrets.has_api_key(pid):
+                out.append((pid, m))
+        except Exception:
+            pass
+    return out
+
+
+def first_usable(cfg):
+    """第一个"现在就能用"的模型 → `{"id", "kind", "provider"}`；一个都没有返回 None。
+
+    顺序：本地文本 → 本地生图 → 本地生视频 → 云端文本 → 云端生图 → 云端生视频。
+    本地排前面是因为它不要密钥、没有配额与费用（与原 `main()` 里"从目录里挑一个能聊的
+    顶上"的偏好一致，只是把"能聊的"扩成"能用的"）。
+    """
+    loc = usable_local(cfg)
+    for kind in ("chat", "image", "video"):
+        if loc[kind]:
+            return {"id": loc[kind][0], "kind": kind, "provider": providers.LOCAL}
+    for kind, cloud_kind in (("chat", providers.KIND_TEXT),
+                             ("image", providers.KIND_IMAGE),
+                             ("video", providers.KIND_VIDEO)):
+        got = cloud_usable(cfg, cloud_kind)
+        if got:
+            pid, model = got[0]
+            return {"id": providers.make_cloud_id(pid, model), "kind": kind,
+                    "provider": pid}
+    return None
+
+
+def selected_usable(cfg):
+    """当前选中的模型是不是"现在就能用"（云端看密钥，本地看引擎 + 文件还在）。
+
+    主页面顶栏「（无可用模型）」与自动选中那一步都问它 —— 与 `first_usable` 同一套判据，
+    所以"顶栏说有模型"和"程序肯自动切过去"永远不会各说各话（坑 128）。
+
+    **带一条快路径**：选中的文件还在、且它那一类对应的引擎就位，就直接答 True ——
+    不扫盘。兜底轮询每 10 秒问一次，每次都去读一遍 GGUF 头是白花的开销（坑 4 的通用
+    纪律）；快路径答 False 时才走完整的 `usable_local`（真正可疑的现场才付这个代价）。
+    """
+    cur = str((cfg or {}).get("model") or "")
+    if not cur:
+        return False
+    if providers.is_cloud(cfg):
+        pid, model = providers.split_cloud_id(cur) or ("", "")
+        if not (pid and model):
+            return False
+        try:
+            return bool(secrets.has_api_key(pid))
+        except Exception:
+            return False
+    if os.path.isfile(cur) and engine_ready(cfg, (cfg or {}).get("model_kind") or "chat"):
+        return True
+    loc = usable_local(cfg)
+    want = os.path.normcase(os.path.normpath(cur))
+    return any(os.path.normcase(os.path.normpath(p)) == want
+               for kind in ("chat", "image", "video") for p in loc[kind])
 
 
 def _norm_model_name(s):
