@@ -156,24 +156,23 @@ def _nav_items(dev_mode=False):
 def _upd_help_text():
     """关于页「检查更新」那个 "?" 的说明。
 
-    为什么是个函数而不是写死的字符串：最后那句"多久之内不再自动查"是**跟着令牌变的**
-    （带令牌 1 分钟 / 匿名 10 分钟，见 updater.cooldown_seconds）。这里是用户唯一能看到这条
-    规则的地方，令牌换了还留着旧数字就是骗人 —— 所以开发者选项那边一改令牌，就回来重算它。
+    为什么是个函数而不是写死的字符串：末句"后台定期查"**跟着令牌变**（只有开发者模式填了
+    令牌才跑），令牌换了不重算就与事实不符 —— 开发者选项那边一改令牌就回来重算它。
+
+    W 2026-10-05：把"多久不重复查 / 限额多少"这类**内部节流**的说法全删了 —— 用户不需要
+    知道我们多久问一次 GitHub、额度怎么算（那是省额度的事）。只留"它是什么、什么时候会自己
+    查、查到会怎样"。后台定期查这条要留着：弹窗会在用户没动过手时冒出来，得让他知道正常。
     """
-    t = secrets.get_github_token()
-    if t:
-        tail = ("进入本页时会自动按「正式版」查一次；填了 GitHub 令牌后 1 分钟内不重复查"
-                "（认证接口限额 5000 次/小时），开发者模式下还会每 30 分钟在后台查一次。")
-    else:
-        tail = ("进入本页时会自动按「正式版」查一次；同一进程内 10 分钟内不重复查"
-                "（GitHub 匿名接口每 IP 每小时 60 次）。")
+    tail = "进入本页时会自动按「正式版」查一次"
+    if secrets.get_github_token():
+        tail += "；开发者模式下还会在后台定期查"
     return ("检查更新：按右边选的通道向 GitHub 查最新 Release。\n"
             "正式版 = 只看正式发布的 Release；测试版 = 把预发布一起算，给最新的那个。\n"
             "查到新版本会弹「发现新版本」窗口，点「立即更新」就下载并替换本程序，"
             "替换前会再确认一次（需要关闭程序）。\n"
             "自动检查弹的窗被关掉后，同一个版本不再自动弹第二次；"
             "手动点「检查更新」永远弹。\n"
-            "打开下载页 = 查到新版本时跳到它的下载页。\n" + tail)
+            "打开下载页 = 查到新版本时跳到它的下载页。\n" + tail + "。")
 
 
 def _local_model_shown(cfg):
@@ -2545,11 +2544,10 @@ class SettingsMixin:
                     # 结果没回来则 busy 已在上面拦掉）—— 真遇上就照常查一次，别留空话
                     _do_check(channel=updater.CHANNEL_STABLE, notify=False)
                     return
-                cd_txt = ("%d 分钟内" % int(round(cd / 60.0)) if cd >= 120
-                          else "%d 秒内" % int(round(cd)))
-                r(last[0], last[1],
-                  note="　（检查时间 %s，%s不再自动查；要立刻复查请点「检查更新」）"
-                       % (time.strftime("%H:%M", time.localtime(st["at"])), cd_txt))
+                # W 2026-10-05：这里原来会追一句"（检查时间 HH:MM，N 分钟内不再自动查…）"——
+                # 冷却是我们自己的节流，用户不需要知道（写出来反而像在解释自己的毛病）。
+                # 冷却照旧生效，只是不再说出来；上次结果本身照旧原样回显。
+                r(last[0], last[1])
 
             enter_hooks.setdefault("about", []).append(_enter_about)
 
@@ -2708,6 +2706,9 @@ class SettingsMixin:
                     return
                 good, why = codesign.trust()
                 if good:
+                    self._codesign_info = dict(info, trusted=True)   # 下次建页不再显示这条
+                    if btn_trust_user is not None:
+                        btn_trust_user.pack_forget()                 # 已经信任了，这条没用了
                     msg_lab.set("已把本软件的签名列入本机可信名单（当前用户）。")
                 else:
                     msg_lab.set("列入失败：%s" % why)
@@ -2746,6 +2747,17 @@ class SettingsMixin:
                 else:
                     msg_lab.set("列入失败：%s" % why)
 
+            btn_trust_user = None       # 用户级那个按钮（已信任时不建；点了成功就收起来）
+
+            def _trusted_here():
+                """当前用户是不是已经把这张签名列入信任名单了。
+
+                读启动那次检测的结果（`App._codesign_info`）：拿不到就按"还没信任"处理 ——
+                宁可能点（点进去也会被告知已信任），别把按钮藏得用户找不到。
+                """
+                info = getattr(self, "_codesign_info", None)
+                return bool(info and info.get("trusted"))
+
             # 控件放在回调之后建：`command=名字` 是建控件那一刻就要绑定的（坑 115）
             i = r_dev["i"]
             r_dev["i"] += 1
@@ -2757,24 +2769,24 @@ class SettingsMixin:
 
             i = r_dev["i"]
             r_dev["i"] += 1
+            # 按钮**竖直排列**（W 2026-10-05）：关闭在最上、重置在最下，两条都"始终"成立
+            # —— 所以签名那条按需少建一个时，也不许挪动这两头的位置。
             brf = ttk.Frame(t_dev)
             brf.grid(row=i, column=0, columnspan=3, sticky="w", pady=(2, 6))
             ttk.Button(brf, text="关闭开发者模式",
-                       command=close_dev).pack(side="left", padx=(0, 6))
+                       command=close_dev).pack(side="top", anchor="w", pady=(0, 4))
             ttk.Button(brf, text="填写 GitHub 令牌",
-                       command=fill_token).pack(side="left", padx=(0, 6))
+                       command=fill_token).pack(side="top", anchor="w", pady=(0, 4))
+            # 「本机已写入签名」就不再显示用户级那一条（W 2026-10-05）：判据用启动时那次
+            # 检测的结果（`App._codesign_info`），不在这里再起一次 PowerShell 卡界面。
+            if not _trusted_here():
+                btn_trust_user = ttk.Button(brf, text="将本软件签名列入本机可信签名",
+                                            command=trust_sign)
+                btn_trust_user.pack(side="top", anchor="w", pady=(0, 4))
+            ttk.Button(brf, text="将本软件签名列入系统级信任（所有用户）",
+                       command=trust_sign_machine).pack(side="top", anchor="w", pady=(0, 4))
             ttk.Button(brf, text="重置开发者选项",
-                       command=reset_dev).pack(side="left")
-
-            # 「把本软件签名列入本机可信签名」单独一行：按钮字比上面三个都长，挤一行会顶到右界
-            i = r_dev["i"]
-            r_dev["i"] += 1
-            srf = ttk.Frame(t_dev)
-            srf.grid(row=i, column=0, columnspan=3, sticky="w", pady=(2, 6))
-            ttk.Button(srf, text="将本软件签名列入本机可信签名",
-                       command=trust_sign).pack(side="left", padx=(0, 6))
-            ttk.Button(srf, text="列入系统级信任（所有用户）",
-                       command=trust_sign_machine).pack(side="left")
+                       command=reset_dev).pack(side="top", anchor="w")
 
             for var, fg in ((tok_lab, "#5a6a7a"), (msg_lab, "#1a7f37")):
                 i = r_dev["i"]

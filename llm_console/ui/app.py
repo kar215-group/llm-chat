@@ -87,6 +87,10 @@ class App(ChatMixin, ImageGenMixin, VideoGenMixin, ServiceMixin, ModelsMixin, Se
         self._dev_mode = False
         self._dev_tap = {"count": 0, "at": 0.0}    # 连点计数：上一次点击的时刻 + 已连了几下
         self._dev_upd = {"timer": None}            # 后台查更新的 after id（有令牌才不是 None）
+        # 签名信任（W 2026-10-05）：启动问一次；`info` 是那次的检测结果，开发者选项那页
+        # 靠它决定"用户级那个按钮还要不要显示"（已经信任就不显示）。
+        self._codesign = {"started": False}
+        self._codesign_info = None
         self._diag_win = None         # 「诊断」次级页面（设置 → 关于与诊断 的按钮开的，放路径与一键诊断）
         self._upd_win = None          # 「发现新版本」次级窗口（自替换更新，2026-10-05；单实例）
         self._alias_tried = set()    # （备用）已尝试向模型请求别名的模型
@@ -215,18 +219,23 @@ class App(ChatMixin, ImageGenMixin, VideoGenMixin, ServiceMixin, ModelsMixin, Se
 
     # ---- 签名信任：启动时问一次（W 2026-10-05）----
     def _codesign_offer_start(self):
-        """冻结运行、自身带签名、且**还没在本机被信任**时，问一次要不要加入信任。
+        """检测本机签名的信任状态，并在**还没问过**时问一次要不要列入。
 
         为什么是"问一次"而不是自动加入：本程序是**分发**给别人的，它没法判断自己是不是
         被重打包的副本 —— 静默写入等于替用户给"任何一份自称 LLM Chat 的东西"发一张长期
         通行证（边界见 `05` §4.1 与 `99` F5）。所以把成本压到"一次点击"，判断权留在用户手里。
 
         检测走后台线程（PowerShell 起一次要几百毫秒），结果回主线程走 `_ui_q`（坑 54）。
+        两条进来：非首跑在启动流程里直接调；**首跑是等遮罩引导收尾后才调**（W 2026-10-05，
+        两个浮层叠在一起很糟）。`started` 保证只跑一次。
+
+        结果存进 `self._codesign_info`：开发者选项那页靠它决定"用户级那个按钮还显示不显示"。
         """
-        if self.cfg.get("codesign_prompt"):
-            return                       # 问过了（选"加入"还是"不用了"都算），不再打扰
         if codesign.self_exe() is None:
             return                       # 源码运行：没有签名可谈
+        if self._codesign.get("started"):
+            return
+        self._codesign["started"] = True
 
         def work():
             try:
@@ -238,23 +247,27 @@ class App(ChatMixin, ImageGenMixin, VideoGenMixin, ServiceMixin, ModelsMixin, Se
         threading.Thread(target=work, daemon=True).start()
 
     def _codesign_notify(self, info):
-        """`_codesign_offer_start` 的后台结果回主线程：该问才问，问完就记账。"""
+        """后台结果回主线程：先记下状态，再决定要不要问（问完记账，不再打扰）。"""
+        self._codesign_info = info       # 可能为 None（没签名 / 读不出来）
         if not info or info.get("trusted"):
             return                       # 没签名 / 已经信任：什么都不用做，也不记账
+        if self.cfg.get("codesign_prompt"):
+            return                       # 问过了（确认或取消都算）
         if self._closing:
             return
         self.cfg["codesign_prompt"] = True
-        config.save_config(self.cfg)     # 先记账：点"不用了"同样不再问
+        config.save_config(self.cfg)     # 先记账：点"取消"同样不再问
         if not messagebox.askyesno(
                 "把本软件签名列入本机可信名单",
-                "本软件带自签名证书。加入信任后，以后从 GitHub 下载的新版"
-                "不会再被 SmartScreen 拦一下。\n\n"
+                "当前本软件签名未进入本机可信名单，自动更新功能可能无法使用，"
+                "请确认将签名写入本机可信名单\n\n"
                 "请确保该软件是从 GitHub 上直接下载的，\n"
-                "否则将签名列入可信名单是一件很危险的事。\n\n"
-                "（只写进当前用户，不影响这台机器的其他 Windows 用户）"):
+                "否则将签名列入可信名单是一件很危险的事\n\n"
+                "如取消，后续仍可点击 5 下版本号进入开发者模式进行授权"):
             return
         ok, why = codesign.trust()
         if ok:
+            self._codesign_info = dict(info, trusted=True)
             self._append("[签名] 已把本软件的签名列入本机可信名单（当前用户）。\n", "meta")
         else:
             self._append("[签名] 列入可信名单失败：%s\n" % why, "meta")
@@ -373,6 +386,12 @@ class App(ChatMixin, ImageGenMixin, VideoGenMixin, ServiceMixin, ModelsMixin, Se
             except Exception:
                 pass
             self._guide = None
+            # 遮罩引导收尾之后才问签名（W 2026-10-05）：首跑那次两个浮层叠在一起很糟，
+            # 所以首跑不在启动流程里问，留到这儿。内部有"只跑一次 + 问过就不再问"的判据。
+            try:
+                self._codesign_offer_start()
+            except Exception:
+                pass
 
         try:
             self.root.lift()           # 主窗口先回到最前，遮罩才有东西可盖
