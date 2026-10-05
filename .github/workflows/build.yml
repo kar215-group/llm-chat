@@ -9,8 +9,10 @@
 #      标签里带 - 或 alpha/beta/rc/preview/dev 字样的（v0.0.1beta、v1.1.0-rc1）自动标 prerelease
 #      若该 Release 已由人在网页上建好，只补传/覆盖 zip 附件，不会因"已存在"而报错
 #
-# 不需要在仓库 Settings 里配任何 secret：建 Release 用的是工作流自带的
-# GITHUB_TOKEN（靠上面的 permissions: contents: write 授权）。
+# 建 Release 用的是工作流自带的 GITHUB_TOKEN（靠 permissions: contents: write 授权）。
+# **唯一用到 secret 的是末尾「签名并发布」那个 job** —— 它用环境 release-signing 里的
+# CODESIGN_PFX_BASE64 / CODESIGN_PFX_PASSWORD 给 exe 签名；该环境配了 required reviewer，
+# 所以每次打 tag 都要人工批准才会往下走（W 2026-10-05 定）。
 #
 # 版本一致性：tag 去掉开头的 v 之后必须等于 llm_console/core/config.py 里的
 # APP_VERSION，对不上直接失败——避免"Release 写着 v1.2.0、里面 exe 是 1.1.0"。
@@ -196,12 +198,108 @@ jobs:
           retention-days: 30
           if-no-files-found: error
 
-      - name: 建 Release 并挂 zip（仅 tag 触发）
-        if: startsWith(github.ref, 'refs/tags/v')
+  # ---------------------------------------------------------------- 签名与发布
+  # 只有这一个 job 声明 environment（required reviewer = W），所以**只有动到签名密钥
+  # 的这一段需要人工批准**；上面的 build 与普通的手动打包（workflow_dispatch）都不碰它。
+  # 只有打 tag 才会走到这里，手动 Run 只出 artifact。
+  release:
+    name: 签名并发布（需人工批准）
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: windows-latest
+    environment: release-signing
+    timeout-minutes: 10
+    steps:
+      - name: 取打包产物（build 的 zip artifact）
+        uses: actions/download-artifact@v4
+        with:
+          name: llm-chat-windows-x64-${{ github.sha }}
+          path: in
+
+      - name: 解出 exe 并用 PFX 签名
+        shell: bash
+        env:
+          PFX_B64: ${{ secrets.CODESIGN_PFX_BASE64 }}
+          PFX_PW: ${{ secrets.CODESIGN_PFX_PASSWORD }}
+        run: |
+          set -euo pipefail
+          STAGE="llm-chat-${GITHUB_REF_NAME}-windows-x64"
+          mkdir -p work
+          echo "$PFX_B64" | base64 -d > codesign.pfx
+          python - <<'PY'
+          import glob, zipfile
+          z = sorted(glob.glob('in/*.zip'))[0]
+          zipfile.ZipFile(z).extractall('work')
+          print('extracted:', z)
+          PY
+          ls -la "work/$STAGE"
+          # runner 自带 Windows SDK；挑版本号最高的那份 x64 signtool
+          SIGNTOOL=$(ls "/c/Program Files (x86)/Windows Kits/10/bin/"*/x64/signtool.exe 2>/dev/null | sort -V | tail -1 || true)
+          if [ -z "$SIGNTOOL" ]; then echo "::error::runner 上找不到 signtool.exe"; exit 1; fi
+          echo "signtool: $SIGNTOOL"
+          "$SIGNTOOL" sign /f codesign.pfx /p "$PFX_PW" /fd SHA256 \
+            /tr http://timestamp.digicert.com /td SHA256 "work/$STAGE/llm-chat.exe"
+          echo "signed"
+
+      # ⚠ 这一段是 powershell：**不能出现任何非 ASCII 字符**（含注释）—— Actions 把 run
+      # 写成 UTF-8 无 BOM 的临时 .ps1，而 Windows PowerShell 5.1 按系统 ANSI 码页读它，
+      # 中文会把引号 / 大括号吃掉变成 ParserError（2026-09-30 踩过，见文件上方注释）。
+      - name: 校验签名（确实带签名，且是预期那张证书）
+        shell: powershell
+        env:
+          EXPECTED_THUMBPRINT: 4D93D3047D5697A81A7F19F20D3A2C1EC545968A
+        run: |
+          $stage = "llm-chat-" + $env:GITHUB_REF_NAME + "-windows-x64"
+          $exe = "work\$stage\llm-chat.exe"
+          $sig = Get-AuthenticodeSignature $exe
+          Write-Host "Status     = $($sig.Status)"
+          Write-Host "Subject    = $($sig.SignerCertificate.Subject)"
+          Write-Host "Thumbprint = $($sig.SignerCertificate.Thumbprint)"
+          if (-not $sig.SignerCertificate) { Write-Error "exe is not signed"; exit 1 }
+          if ($sig.SignerCertificate.Thumbprint -ne $env:EXPECTED_THUMBPRINT) {
+            Write-Error "unexpected signing certificate thumbprint"; exit 1
+          }
+
+      # 硬判据：签过名的 exe 必须还能跑（签名是往文件尾追加数据，理论上不动 PE 结构，
+      # 但 PyInstaller onefile 靠文件尾的 cookie 找自己的 archive —— 这条自检就是钉它）。
+      - name: 签名后自检（signed exe must still run）
+        shell: powershell
+        run: |
+          $stage = "llm-chat-" + $env:GITHUB_REF_NAME + "-windows-x64"
+          $exe = "work\$stage\llm-chat.exe"
+          $out = Join-Path $env:RUNNER_TEMP "signed-selfcheck.out"
+          Remove-Item $out -ErrorAction SilentlyContinue
+          $p = Start-Process -FilePath $exe -ArgumentList "--selfcheck" -PassThru -RedirectStandardOutput $out
+          if (-not $p.WaitForExit(60000)) {
+            Write-Host "no exit within 60s; kill it and judge by captured output"
+            try { $p.Kill() | Out-Null; $p.WaitForExit(5000) | Out-Null } catch {}
+          }
+          Start-Sleep -Milliseconds 500
+          $txt = if (Test-Path $out) { Get-Content $out -Raw } else { "" }
+          Write-Host "--- signed selfcheck output ---"
+          Write-Host $txt
+          if ($txt -match "SELFCHECK OK") { exit 0 }
+          Write-Error "signed exe selfcheck did not report OK"
+          exit 1
+
+      - name: 重新打 zip（用签过名的 exe）
+        shell: bash
+        run: |
+          set -euo pipefail
+          STAGE="llm-chat-${GITHUB_REF_NAME}-windows-x64"
+          rm -f codesign.pfx
+          mkdir -p out
+          rm -f "out/$STAGE.zip"
+          cd work
+          python -c "import shutil,sys; shutil.make_archive('../out/'+sys.argv[1],'zip','.',sys.argv[1])" "$STAGE"
+          ls -la ../out
+
+      - name: 建 Release 并挂 zip（Release 已存在则只覆盖附件）
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          set -euo pipefail
           cat > notes.md <<'MD'
           ### 怎么装
           1. 下载 zip，解压出 `llm-chat.exe`。
@@ -211,7 +309,7 @@ jobs:
           3. 双击运行。首次会在同目录生成 `gui_config.json`（配置）与 `secrets.json`（云端密钥）。
 
           ### 注意
-          - 本 exe **未做代码签名**，Windows SmartScreen 第一次可能拦一下：点「更多信息」→「仍要运行」。
+          - 本 exe 带自签名证书；**没把它列入系统信任列表**的机器，SmartScreen 第一次仍可能拦一下：点「更多信息」→「仍要运行」。
           - 单文件 exe 启动时会往 `%TEMP%` 解一份运行库，属正常行为。
           - 引擎与模型权重都不在安装包里，需自行下载，见 README。
           MD

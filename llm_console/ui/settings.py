@@ -9,8 +9,8 @@ import time
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog, font as tkfont
 
-from ..core import (capability, cloudjobs, engine_install, hardware, providers, sdprofile,
-                   secrets, textfile, updater)
+from ..core import (capability, codesign, cloudjobs, engine_install, hardware, providers,
+                    sdprofile, secrets, textfile, updater)
 from ..core.config import (APP_DIR, APP_VERSION, CFG_VERSION, DEFAULT_CONFIG,
                            FLOAT_KEYS, INT_KEYS, STR_KEYS, cloud_media_dir,
                            gen_api_key, save_config)
@@ -2588,7 +2588,8 @@ class SettingsMixin:
         # ---- 开发者页（隐藏入口：关于页版本号连点 5 次，见 `DEV_NAV_ITEM`）----
         @section("dev", "dev")
         def _t_dev(t_dev, r_dev):
-            """开发者选项：关掉这个模式 / 填 GitHub 令牌 / 把本页填过的东西清回默认。
+            """开发者选项：关掉这个模式 / 填 GitHub 令牌 / 把本软件签名列入本机可信名单 /
+            把本页填过的东西清回默认。
 
             **不放 "?"**（W 2026-10-04 点名）：目标用户是开发者，这一页每件事都自解释。
             文案按"开发者"口吻压缩：只留状态与怎么重新进来，限额/冷却这类数字属于
@@ -2682,6 +2683,35 @@ class SettingsMixin:
                 self._dev_upd_start()       # 令牌清空了 → 后台定时器停掉
                 msg_lab.set("已重置开发者选项。")
 
+            def trust_sign():
+                """把本程序 exe 的签名证书列入**当前用户**的受信任根（免管理员）。
+
+                顺序：先读现在这份 exe 有没有签名 / 是否已列入 → 把危险点摆给用户确认 →
+                确认后才动手。危险点是「信了这张证书 = 这台机器会信所有用它签的东西」，
+                所以那一句必须原样说给用户听，不能替他跳过（`core/codesign.py` 开头有边界说明）。
+                """
+                info = codesign.read_cert()
+                if info is None:
+                    msg_lab.set("列入失败：本程序这份 exe 没有签名"
+                                "（源码运行、或装的是未签名的构建）。")
+                    return
+                if info.get("trusted"):
+                    msg_lab.set("这张签名证书已经在本机可信名单里了，不用再列一次。")
+                    return
+                if not messagebox.askyesno(
+                        "将本软件签名列入本机可信签名",
+                        "请确保该软件是从 GitHub 上直接下载的，\n"
+                        "否则将签名列入可信名单是一件很危险的事。\n\n"
+                        "要列入的证书：\n%s\n指纹：%s"
+                        % (info.get("subject") or "（读不出主体）",
+                           info.get("thumbprint") or "")):
+                    return
+                good, why = codesign.trust()
+                if good:
+                    msg_lab.set("已把本软件的签名列入本机可信名单（当前用户）。")
+                else:
+                    msg_lab.set("列入失败：%s" % why)
+
             # 控件放在回调之后建：`command=名字` 是建控件那一刻就要绑定的（坑 115）
             i = r_dev["i"]
             r_dev["i"] += 1
@@ -2701,6 +2731,14 @@ class SettingsMixin:
                        command=fill_token).pack(side="left", padx=(0, 6))
             ttk.Button(brf, text="重置开发者选项",
                        command=reset_dev).pack(side="left")
+
+            # 「把本软件签名列入本机可信签名」单独一行：按钮字比上面三个都长，挤一行会顶到右界
+            i = r_dev["i"]
+            r_dev["i"] += 1
+            srf = ttk.Frame(t_dev)
+            srf.grid(row=i, column=0, columnspan=3, sticky="w", pady=(2, 6))
+            ttk.Button(srf, text="将本软件签名列入本机可信签名",
+                       command=trust_sign).pack(side="left")
 
             for var, fg in ((tok_lab, "#5a6a7a"), (msg_lab, "#1a7f37")):
                 i = r_dev["i"]
