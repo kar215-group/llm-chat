@@ -2442,10 +2442,12 @@ class SettingsMixin:
                          % (updater.display_version(info.get("tag") or cur), ch_text_)
                          + note, "#1a7f37")
                 elif state == updater.STATE_AHEAD:
-                    # 报实话：不并进「已是最新」（多半是自己编的版本还没打 tag）
-                    _say("本机 %s 比线上最新的 %s 还新（%s）。"
+                    # 报实话：不并进「已是最新」（多半是自己编的版本还没打 tag）；
+                    # 彩蛋（W 2026-10-05）：本机比线上最新的还新时，文案末尾追一句
+                    # 「莫非你是测试用户！」—— 只看本次返回结果，不额外去查另一个通道。
+                    _say("本机 %s 比线上最新的 %s 还新（%s）。%s"
                          % (cur, updater.display_version(info.get("tag") or "？"),
-                            ch_text_) + note, "#b06000")
+                            ch_text_, updater.AHEAD_EGG) + note, "#b06000")
                 else:
                     # msg 自带"检查更新失败："前缀，这里不再叠一层（2026-10-03）
                     msg = info.get("msg") or "检查更新失败：原因未知。"
