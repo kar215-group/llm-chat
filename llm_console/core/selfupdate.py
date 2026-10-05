@@ -156,6 +156,25 @@ def extract_exe(zip_path, root):
     return exe, ""
 
 
+def child_env():
+    """给「本程序起的子进程」备一份干净环境 —— 必须擦掉 PyInstaller onefile 的痕迹。
+
+    **坑（2026-10-05 实测踩到，W 报的「能替换成功、手动双击也正常，就是自动打开起不来」）**：
+    onefile 的 bootloader 会把解压目录写进 `_MEIPASS2`、把「我是第几层子进程」写进
+    `_PYI_PARENT_PROCESS_LEVEL`。子进程看到这两个变量就**直接复用父进程那份解压目录、不再
+    自己解压**；而父进程一退出就把那个目录删掉 —— 于是新进程恰好死在找不到
+    `_tcl_data\\init.tcl` 上（日志里会看到 `_MEIxxxxx` 这种临时目录名）。手动双击没有父进程
+    可继承，所以没事。
+
+    擦掉这两个（连同 `TCL_LIBRARY` / `TK_LIBRARY`，让新版自己指到自己的目录），其余变量
+    （PATH 等）原样带下去。返回的是**副本**，不动本进程的 `os.environ`。
+    """
+    env = dict(os.environ)
+    for k in ("_MEIPASS2", "_PYI_PARENT_PROCESS_LEVEL", "TCL_LIBRARY", "TK_LIBRARY"):
+        env.pop(k, None)
+    return env
+
+
 def smoke_test(exe_path, expected, timeout=SMOKE_TIMEOUT, runner=None):
     """新版能不能起来：跑 `<新版> --version`，退出 0 就算过 → `(True, "")`。
 
@@ -163,10 +182,14 @@ def smoke_test(exe_path, expected, timeout=SMOKE_TIMEOUT, runner=None):
     版本号对得上更好、对不上不拦**：`--windowed` 的 exe 没有控制台，某些环境下 stdout 是
     空的（`ui/app._say` 拿到 None 就静默）—— 退出码 0 已经证明 onefile 解包 + Python 起
     + 整条 import 链都是好的，这才是烟测要回答的问题。`runner` 可注入（自检不跑真进程）。
+
+    同样要带 `child_env()`：烟测也是子进程，不清环境就是"复用本进程的解压目录"那种局面，
+    测的不是新 exe **真能独立启动**这件事（`--version` 不建窗口，父目录还在时照样能过）。
     """
     run = runner or subprocess.run
     try:
-        r = run([exe_path, "--version"], capture_output=True, timeout=timeout)
+        r = run([exe_path, "--version"], capture_output=True, timeout=timeout,
+                env=child_env())
     except Exception as e:
         return False, "新版启动自检没跑起来（%s），不敢替换正在用的程序。" % e
     if getattr(r, "returncode", 1) != 0:
@@ -234,10 +257,15 @@ def apply_update(new_exe, cur_exe):
 
 
 def launch(cur_exe, spawner=None):
-    """拉起新 exe → `(ok, why)`。`spawner` 可注入（自检不真开进程）。"""
+    """拉起新 exe → `(ok, why)`。`spawner` 可注入（自检不真开进程）。
+
+    ⚠ **一定要带 `child_env()`**：新旧两份都是 onefile，不清环境的话新进程会复用**本进程**
+    的解压目录，等本进程退出把它一删，新进程就起不来了 —— 这正是 2026-10-05 那次「更新能
+    替换成功、手动双击也正常，就是自动打开报 `Can't find a usable init.tcl`」的根因。
+    """
     p = spawner or subprocess.Popen
     try:
-        p([cur_exe], cwd=os.path.dirname(cur_exe) or None)
+        p([cur_exe], cwd=os.path.dirname(cur_exe) or None, env=child_env())
         return True, ""
     except Exception as e:
         return False, str(e)
