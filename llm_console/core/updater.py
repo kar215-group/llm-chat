@@ -31,6 +31,8 @@ import urllib.request
 
 from . import config
 from .config import APP_DIR, USER_AGENT
+# 进页冷却的判据统一在 core/throttle（模型补全那边共用同一处），这里转出同名符号
+from .throttle import cooldown_left
 
 # 对外仓库坐标（公开仓库，匿名 API 可读）
 REPO = "kar215-group/llm-chat"
@@ -103,7 +105,7 @@ class FileCache(Cache):
     """`Cache` 的**落盘**版：ETag 与上次那份数组一起写进 `<APP_DIR>/upd_cache.json`。
 
     为什么内存那份不够（W 2026-10-04）：匿名额度 60 次/小时是**按 IP 跨进程**算的，
-    而内存缓存进程退出即清 —— 于是"重启程序 → 点一次刷新版本"必然又吃 1 次额度，
+    而内存缓存进程退出即清 —— 于是"重启程序 → 点一次检查更新"必然又吃 1 次额度，
     一天几十次就见底。落盘之后重启也能带 `If-None-Match`，拿到 304（不计额度）。
 
     写盘一律走 `config.atomic_write_json`（先写 .tmp 再 `os.replace`，不抛）。
@@ -211,20 +213,9 @@ def channel_label(channel):
 
 
 # ---------------------------------------------------------------- 冷却（进页自动查的节流）
-
-def cooldown_left(last_at, now, cooldown=COOLDOWN):
-    """距"允许下一次自动检查"还差几秒；`<= 0` = 现在就可以查。
-
-    `last_at` / `now` 都是**墙钟秒**（`time.time()`），不是单调时钟 —— 界面还要用它
-    把这行写成"上次检查 14:32"，两种语义不能混用（所以这里不做时间源抽象）。
-    `last_at` 为 0 / None（从没查过）时返回 0：第一次进页总能查。
-    """
-    if not last_at:
-        return 0
-    elapsed = float(now) - float(last_at)
-    if elapsed < 0:        # 系统时间往回拨过：当成"刚刚查过"，别把冷却拖成无穷（手动仍可查）
-        elapsed = 0.0
-    return max(0.0, float(cooldown) - elapsed)
+#
+# `cooldown_left` 实体已搬到 `core/throttle`（模型补全要用同一套判据），这里只转出符号：
+# 别在别处再写一份 —— 冷却口径只有一处（W 2026-10-05）。
 
 
 # ---------------------------------------------------------------- 取 Release 列表

@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""llm_console.core.engine_install — 引擎获取：找资产 → 选档 → 下载校验 → 解压安装
+"""llm_console.core.engine_install — 引擎管理：找资产 → 选档 → 下载校验 → 解压安装 + 定向查找
 
 **只依赖标准库 + `core.updater`**（GitHub 资产清单那一层已经写过 ETag/304 与令牌），
 不 import tkinter（铁律 1）。界面在 `ui/settings.py:_t10`，本模块只管事实与文件系统。
@@ -361,7 +361,7 @@ def _cache(repo):
     落盘后重启也能带 `If-None-Match` 拿 304（**不计入额度**）。
 
     **这一页没有任何自动检查**（W 2026-10-04：不显示未主动触发的版本提示），
-    所以 ETag 省钱的地方就在"用户自己反复点刷新版本"与"重启后再点"这两处。
+    所以 ETag 省钱的地方就在"用户自己反复点检查更新"与"重启后再点"这两处。
     """
     if repo not in _CACHES:
         c = updater.FileCache(os.path.join(
@@ -644,6 +644,103 @@ def installed(engine, dest_dir=None):
     d = dest_dir or default_dir(engine)
     exe = os.path.join(d, exe_name(engine))
     return exe if os.path.isfile(exe) else ""
+
+
+def find_exe(engine, roots=None, max_depth=3):
+    """在 `roots`（默认 = 程序目录 `APP_DIR`）里递归找**本引擎**的可执行文件；找不到返回空串。
+
+    界面「自动定向」用它：把软件所在文件夹扫一遍，找出用户自己放/自己解压的引擎。
+
+    为什么按 **exe 名**找而不是按目录名：两个引擎（`llama-server.exe` / `sd-cli.exe`）可能与
+    模型文件同处一个目录，也可能各自在自己的子目录里 —— 只有"这个引擎的可执行文件叫什么"
+    是可靠判据（`ENGINES[engine]["exe"]` 一处）。两个引擎各调一次本函数，所以"同处一个目录"
+    时也各认各的、不会张冠李戴。
+
+    深度受限（默认 3）：程序目录下常有 `models/` 这类大目录，全树遍历没必要；引擎要么在根，
+    要么在 `engines/<engine>` 这种浅层。隐藏目录与 `*.old` / `*.new`（安装换目录的中间态）
+    一律跳过 —— 那里可能有半份引擎，指过去反而启动不了。
+    """
+    exe = exe_name(engine)
+    if not exe:
+        return ""
+    want = exe.lower()
+    for root in (list(roots) if roots is not None else [APP_DIR]):
+        if not root or not os.path.isdir(root):
+            continue
+        base = os.path.abspath(root)
+        for cur, dirs, files in os.walk(base):
+            rel = os.path.relpath(cur, base)
+            depth = 0 if rel == os.curdir else rel.count(os.sep) + 1
+            if depth >= max_depth:
+                dirs[:] = []          # 不再往下走，但这一层仍要查
+            dirs[:] = sorted(d for d in dirs
+                             if not d.startswith(".") and not d.endswith((".old", ".new")))
+            for n in files:
+                if n.lower() == want:
+                    return os.path.join(cur, n)
+    return ""
+
+
+def path_key(engine):
+    """该引擎在配置里存哪一项：llama 存 `exe`（**完整路径**）、sd 存 `sd_dir`（**目录**）。"""
+    return "exe" if engine == "llama" else "sd_dir"
+
+
+def configured_exe(engine, cfg):
+    """配置里指向的那个可执行文件**确实存在**时返回它的路径，否则返回空串。
+
+    只管"就位了没有"这一件事：界面的四态状态行还要分"没指路 / 指了路但找不到"，
+    那两种措辞留在界面（`_state_of`）；而"首次打开的自动扫描要不要去找它"问这里。
+    """
+    if engine == "llama":
+        p = str((cfg or {}).get("exe") or "").strip()
+        return p if p and os.path.isfile(p) else ""
+    d = str((cfg or {}).get("sd_dir") or "").strip()
+    if not d:
+        return ""
+    p = os.path.join(d, exe_name("sd"))
+    return p if os.path.isfile(p) else ""
+
+
+def set_dir(cfg, engine, path):
+    """把引擎落点写进该引擎的指路项，返回写回的值。
+
+    `path` 可以是那个可执行文件、也可以是它所在的目录（两种都由这里归一）：
+    llama 那一项存 **exe 完整路径**、sd 那一项存 **目录** —— 形状不同是既有的，
+    本函数只按形状写、不擅自改形状。**只改传入的 cfg，不落盘**（写盘由调用方决定）。
+    """
+    p = str(path or "").strip()
+    if not p:
+        return ""
+    # 是"本引擎的 exe"就取它所在目录，否则当目录用。判据看**名字**、不看目存在与否：
+    # 落点目录可能还没建出来（自检里就是拿一个不存在的 dest 调的），按 isdir 判会多剥一层。
+    if os.path.basename(p).lower() == exe_name(engine).lower():
+        folder = os.path.dirname(p)
+    else:
+        folder = p
+    if not folder:
+        return ""
+    if engine == "llama":
+        cfg["exe"] = os.path.join(folder, exe_name("llama"))
+    else:
+        cfg["sd_dir"] = folder
+    return cfg[path_key(engine)]
+
+
+def auto_locate(engine, cfg=None, app_dir=None, max_depth=3):
+    """「自动定向」的判据：先在**程序目录**找，扫不到再退**当前模型目录**
+    （有些用户把引擎与模型放在一起）。返回本引擎可执行文件的路径，找不到返回空串。
+
+    **只读、不写配置** —— 写回指路由调用方决定：界面「自动定向」按钮与"首次打开的
+    自动扫描"共用这一处判据（W 2026-10-05），别各写一遍（坑 128）。
+    `app_dir` 可显式传（自检把它指到临时目录，免得去扫真仓库）。
+    """
+    root = os.path.abspath(app_dir or APP_DIR)
+    roots = [root]
+    md = str((cfg or {}).get("models_dir") or "").strip()
+    if md and os.path.isdir(md) and os.path.normpath(md) != os.path.normpath(root):
+        roots.append(md)
+    return find_exe(engine, roots=roots, max_depth=max_depth)
 
 
 def mirror_url(url, mirror=""):

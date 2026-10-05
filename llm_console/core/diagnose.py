@@ -247,7 +247,8 @@ def _apply_paths(out, cloud_ok):
                      % ("就绪" if local_ok else "未就绪",
                         "就绪" if cloud_ok else "未就绪"),
                      "" if (local_ok or cloud_ok) else
-                     "想走本地：在 设置 → 本地模型 → 模型文件与引擎 打开下载页，模型放进模型目录；"
+                     "想走本地：在 设置 → 本地模型 → 模型文件与引擎 点「检查更新 → 更新引擎」"
+                     "装引擎，或用「自动定向」指到已有那一份，模型放进模型目录；"
                      "想走云端：在 设置 → 云端模型 → 服务商与密钥 填密钥，再到「选择模型」里勾上要用那几个。"
                      "两条只要挑通一条。", ("settings", "关于与诊断 → 诊断")))
     return out
@@ -361,7 +362,8 @@ def run_checks(cfg, proxy_running=False, server_running=False, probe_gpu=True):
         out.append(_c("server_exe", GROUP_ENGINE, FAIL, "找不到推理引擎 llama-server.exe",
                       exe,
                       "引擎不随本程序分发（许可与体积原因）。在 设置 → 本地模型 → 模型文件与引擎 "
-                      "打开 llama.cpp 的下载页，取 Windows 的 CUDA 包，整包解压到本程序同目录。",
+                      "点「检查更新」→「更新引擎」装 llama.cpp（CUDA 档会连运行库一起下），"
+                      "或用「自动定向 / 手动定向」指到已经放在本机的那一份。",
                       ("open_dir", app_dir)))
     else:
         out.append(_c("server_exe", GROUP_ENGINE, OK, "推理引擎已就位", exe))
@@ -476,8 +478,8 @@ def run_checks(cfg, proxy_running=False, server_running=False, probe_gpu=True):
     if not sd or not os.path.isfile(cli):
         out.append(_c("sd_cli", GROUP_MEDIA, NA, "本地生图 / 生视频引擎",
                       "没装 stable-diffusion.cpp（只有想用本地生图或生视频时才需要）",
-                      "要用的话在 设置 → 本地模型 → 模型文件与引擎 打开 sd.cpp 的下载页，"
-                      "整包解压后到 设置 → 本地模型 → 生图 里指路。",
+                      "要用的话在 设置 → 本地模型 → 模型文件与引擎 用「检查更新 → 更新引擎」"
+                      "装 sd.cpp（或「自动定向」指到已有目录），装完到 设置 → 本地模型 → 生图 里指路。",
                       ("settings", "本地模型 → 模型文件与引擎")))
     else:
         out.append(_c("sd_cli", GROUP_MEDIA, OK, "本地生图 / 生视频引擎", cli))

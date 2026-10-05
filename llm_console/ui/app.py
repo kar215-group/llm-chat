@@ -13,7 +13,8 @@ from tkinter import ttk, scrolledtext, messagebox
 
 from ..core.config import (load_config, DEFAULT_CONFIG, APP_DIR, APP_VERSION,
                            CONFIG_PATH)
-from ..core import cloudjobs, config, crashlog, diagnose, providers, secrets, updater
+from ..core import (cloudjobs, config, crashlog, diagnose, engine_install, providers,
+                    secrets, throttle, updater)
 from ..core.models import display_name, has_local_chat
 from ..core.server import _query_serving_model, server_process_alive, server_state, stop_server
 from ..connection import cloud_media
@@ -70,6 +71,10 @@ class App(ChatMixin, ImageGenMixin, VideoGenMixin, ServiceMixin, ModelsMixin, Se
         #   render = 当前关于页那行状态的渲染函数（窗口关掉后指向死控件，靠 winfo_exists 兜）
         self._upd_check = {"at": 0.0, "busy": False, "last": None,
                            "cache": updater.Cache(), "render": None, "help": None}
+        # 「进 模型文件与引擎 页自动补全缺失项」的节流闸（W 2026-10-05）：与「检查更新」的
+        # 进页冷却共用 core.throttle 那套判据（同一处），只是冷却时长固定 10 分钟。
+        # 挂 App（不是窗口上）→ 关掉设置窗再开仍在，与 _upd_check 同一条口径。
+        self._model_scan = throttle.AutoThrottle(throttle.AUTO_SCAN_COOLDOWN)
         # 开发者模式（W 2026-10-04）：入口是"关于页那行版本号连点 5 次"，见 ui/settings.py。
         # **只在本次运行内有效**（W 点名：重启后回到普通界面）—— 所以它在这儿、不进配置文件；
         # 而开发者选项里填的**东西**（GitHub 令牌等）是持久的，关掉这个模式也不清。
@@ -145,12 +150,17 @@ class App(ChatMixin, ImageGenMixin, VideoGenMixin, ServiceMixin, ModelsMixin, Se
                                   "备好引擎与模型后在 设置 → 本地模型 API 里启用。"))
 
         threading.Thread(target=self._status_loop, daemon=True).start()
-        threading.Thread(target=self._precompute_ngl, daemon=True).start()
+        # 不再在启动时自动补全模型参数（W 2026-10-05）：改由「进 模型文件与引擎 页」按
+        # 10 分钟冷却触发一次（见 ui/models_ui._auto_scan_models + settings 的 files 进页钩子）。
         root.after(80, self._poll)
         self._dev_upd_start()        # 上次运行填过 GitHub 令牌 → 后台查更新这就接上
         self.input.focus_set()
         self._offer_cloud_recovery()
         self._offer_crash_notice()
+        # 首次打开（首次安装 / 升级后首次打开）先扫一遍引擎与模型，再考虑催办与引导 ——
+        # 顺序有讲究：引导第一屏的缺件清单与输出栏那句催办都读"引擎在不在"，
+        # 扫描（尤其是自动定向）跑在它们前面，用户已经配好的那份才会被判成"已配置"。
+        self._first_open_scan()
         self._offer_engine_hint()
 
     def report_callback_exception(self, exc, val, tb):
@@ -207,11 +217,54 @@ class App(ChatMixin, ImageGenMixin, VideoGenMixin, ServiceMixin, ModelsMixin, Se
         except Exception:
             return []                    # 判据坏了就放欢迎页，别把引导一起拖死
 
+    def _is_first_open(self):
+        """这次打开算不算"首次"（首次安装，**或升级后首次打开**）—— 首次扫描问这里。
+
+        判据 = "配置文件以前不存在"（`self._first_run`）**或** `guide_done` 不是当前版本
+        （与新手引导同一处口径：`guide_done` 在看过/跳过引导时写当前 `APP_VERSION`）。
+        首次扫描用这个**并集**（升级后也扫一遍）；而"要不要自动弹引导"用它的**一半**
+        —— 只在真正的首跑弹，升级不重弹（见 `_first_run_flow`）。
+        """
+        return bool(self._first_run) or str(self.cfg.get("guide_done", "")) != APP_VERSION
+
+    def _first_open_scan(self):
+        """首次打开扫一遍引擎与模型（W 2026-10-05 第二轮）。
+
+        引擎：两份**都没就位**时按「自动定向」的判据找一次并写回指路 —— 判据 / 落点就是
+        `engine_install.auto_locate` / `set_dir`，与界面那个「自动定向」按钮**同一个函数**。
+        这一步**同步**做：引导第一屏的缺件判据下一刻就要算，异步的话会显示成"还没配好"。
+        用户已经指过路、只是文件不在时**不擅自改**（指路是他自己填的）。
+
+        模型：起后台线程补全缺失项（`_auto_scan_models`，带 10 分钟冷却，与手动按钮、
+        进页钩子共用同一处判据）。任何一步失败都不许拖住启动。
+        """
+        if not self._is_first_open():
+            return
+        try:
+            changed = False
+            for key in ("llama", "sd"):
+                if engine_install.configured_exe(key, self.cfg):
+                    continue                    # 已经就位，一个字都不动
+                found = engine_install.auto_locate(key, self.cfg, app_dir=APP_DIR)
+                if found:
+                    engine_install.set_dir(self.cfg, key, os.path.dirname(found))
+                    changed = True
+            if changed:
+                config.save_config(self.cfg)
+        except Exception:
+            pass
+        try:
+            self._auto_scan_models()
+        except Exception:
+            pass
+
     def _first_run_flow(self):
-        """首跑：把"还缺什么"写进引导第一页，然后放一遍遮罩引导。
+        """首跑：放一遍遮罩引导。
 
         只在"这次真的是首跑"（配置文件之前不存在）且没看过当前版本的引导时自动放；
         升级不重弹 —— 重看入口常驻 设置 → 关于与诊断。
+        **自动弹只给"真正的首跑"这一条路**：配置文件之前不存在 **且** 没看过当前版本的
+        引导（`_is_first_open()` 里那半"升级后首次打开"只触发首次扫描，不重弹引导）。
         诊断**不探显卡**：首跑时配置里还没有 GPU 信息，探一次最坏要等 nvidia-smi
         的 10 秒超时，而那件事跟"缺不缺引擎和模型"无关（坑 4：外部命令别挡在界面上）。
         """

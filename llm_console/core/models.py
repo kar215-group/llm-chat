@@ -104,6 +104,35 @@ def _is_mmproj(name):
     """mmproj-*.gguf 是视觉投影器组件，不是独立模型，不进入模型列表。"""
     return str(name).lower().startswith("mmproj")
 
+
+def extra_sources(cfg):
+    """「手动定向模型」加入的来源（文件夹或 `.gguf` 完整路径），只保留**仍存在**的。
+
+    这些路径只登记在配置里（`extra_models`），**不移动任何文件**；扫描时按"额外的模型目录 /
+    额外的模型文件"处理（见 `scan_models` / `video_scan_dirs`）。已删掉的项在这里滤掉，
+    免得清单越攒越脏。
+    """
+    raw = (cfg or {}).get("extra_models")
+    if not isinstance(raw, (list, tuple)):
+        return []                      # 配置被写坏（不是列表）时当没有，别让整条扫描一起炸
+    out = []
+    for p in raw:
+        p = os.path.normpath(str(p or "").strip())
+        if p and p not in out and (os.path.isfile(p) or os.path.isdir(p)):
+            out.append(p)
+    return out
+
+
+def extra_scan_dirs(cfg):
+    """额外来源覆盖到的**目录**（文件夹本身，或某个 `.gguf` 所在目录），供按目录扫描的路径复用。"""
+    out = []
+    for p in extra_sources(cfg):
+        d = p if os.path.isdir(p) else os.path.dirname(p)
+        d = os.path.normpath(d)
+        if d and d not in out:
+            out.append(d)
+    return out
+
 # ------------------------------------------------ 视频生成链路的组件判定
 VIDEO_SUBDIR = "生视频"            # models_dir 下存放视频模型的子文件夹（不存在时自动回退顶层扫描）
 
@@ -143,6 +172,10 @@ def video_scan_dirs(cfg):
                 out.append(fp)
     except Exception:
         pass
+    # 手动定向加入的目录也按"视频组件扫描目录"处理（W 2026-10-05）
+    for d2 in extra_scan_dirs(cfg):
+        if d2 != img_dir and d2 not in out:
+            out.append(d2)
     return out
 
 def scan_video_models(cfg):
@@ -161,6 +194,15 @@ def scan_video_models(cfg):
                 vids.append(p)
             elif role == "encoder":
                 encs.append(p)
+    # 手动定向加入的**单个文件**单独判一次（文件夹来源已在上面的目录扫描里覆盖）
+    for p in extra_sources(cfg):
+        if not os.path.isfile(p) or _is_mmproj(os.path.basename(p)):
+            continue
+        role = video_component_role(p)
+        if role == "video" and p not in vids:
+            vids.append(p)
+        elif role == "encoder" and p not in encs:
+            encs.append(p)
     return vids, encs
 
 def scan_models(cfg):
@@ -219,6 +261,34 @@ def scan_models(cfg):
             image.append(p)
         elif p in pairs and gguf_is_chat_capable(p):
             chat.append(p)
+    # 手动定向加入的来源（W 2026-10-05）：文件夹按"一个目录"并入，单文件按它自己判。
+    # **只登记、不动文件**；判据与上面完全一致（不另写一套）。
+    for p in extra_sources(cfg):
+        if os.path.isfile(p):
+            if is_diffusion_file(p):
+                if p not in image:
+                    image.append(p)
+            elif (not _is_mmproj(os.path.basename(p))
+                  and str(p).lower().endswith(".gguf")
+                  and gguf_is_chat_capable(p) and p not in chat):
+                chat.append(p)
+            continue
+        for n in _ggufs(p):
+            fp = os.path.join(p, n)
+            if _chat_ok(p, n) and fp not in chat:
+                chat.append(fp)
+        try:
+            names = sorted(os.listdir(p))
+        except Exception:
+            names = []
+        for n in names:
+            fp = os.path.join(p, n)
+            if not os.path.isfile(fp) or _is_mmproj(n):
+                continue
+            if not str(n).lower().endswith(sdprofile.DIFFUSION_EXTS):
+                continue
+            if is_diffusion_file(fp) and fp not in image:
+                image.append(fp)
     return d, chat, image
 
 def has_local_chat(cfg):
@@ -263,6 +333,10 @@ def find_vl_pairs(cfg):
     if (os.path.isdir(img_dir)
             and os.path.normpath(img_dir) not in [os.path.normpath(f) for f in folders]):
         folders.append(img_dir)
+    # 手动定向加入的目录也要参与 mmproj 配对（否则那些目录里的可看图模型认不出投影器）
+    for d2 in extra_scan_dirs(cfg):
+        if d2 not in [os.path.normpath(f) for f in folders]:
+            folders.append(d2)
     pairs = {}
     for folder in folders:
         try:

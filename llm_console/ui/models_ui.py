@@ -1,11 +1,11 @@
 # -*- coding: utf-8 -*-
-"""llm_console.ui.models_ui — 界面 Mixin：模型菜单与切换、模型管理页动作、后台预计算"""
+"""llm_console.ui.models_ui — 界面 Mixin：模型菜单与切换、模型管理页动作、进页后台补全与手动定向"""
 
 import os
 import threading
 import time
 import tkinter as tk
-from tkinter import ttk, messagebox, font as tkfont
+from tkinter import ttk, messagebox, filedialog, font as tkfont
 
 from ..core import capability, localmodels, providers, secrets
 from ..core.config import save_config
@@ -606,16 +606,26 @@ class ModelsMixin:
         if changed:
             save_config(self.cfg)
 
-    def _precompute_ngl(self):
-        """打开页面后的后台自动补全（与手动「扫描并补全缺失项」共用同一实现）。"""
-        time.sleep(1.5)   # 等界面稳定，避免和状态线程首探抢 IO
-        self._scan_and_fill(force=False)
+    def _auto_scan_models(self):
+        """进「模型文件与引擎」页时自动**补全缺失项**一次（与手动按钮共用 `_scan_and_fill`）。
+
+        W 2026-10-05：原来这是启动时跑一次（`_precompute_ngl`），现在改成"进页跑一次 + 10 分钟
+        冷却"——**判据与冷却读数只在 core.throttle 一处**（与「检查更新」的进页冷却共用那套），
+        这是本项的会话状态（挂在 App 上，关掉设置窗再开仍在）。
+        手动点「补全缺失项」不受冷却限制（用户亲手点的动作不该被节流拦住）。
+        """
+        th = getattr(self, "_model_scan", None)
+        if th is None or not th.due():
+            return
+        th.mark()
+        self._append("\n[模型管理] 自动补全缺失项…\n", "meta")
+        threading.Thread(target=self._scan_and_fill, args=(False,), daemon=True).start()
 
     # ---- 模型目录扫描与自动配置补全（自动线程 / 手动按钮共用）----
     def _scan_and_fill(self, force=False):
         """扫描模型目录，补全/重算 ngl、主页面 ctx、agent ctx、mmproj 记录。
 
-        force=False：只补缺（手动改过的记录不覆盖）——打开页面时自动执行；
+        force=False：只补缺（手动改过的记录不覆盖）——进页自动 / 手动「补全缺失项」都走它；
         force=True ：调用方已清空相应记录，全部重算（手动「全部重新计算」）。
         """
         self._ensure_hw_info()
@@ -691,10 +701,81 @@ class ModelsMixin:
             for k in ("model_ngl", "model_ctx", "model_ctx_api", "model_mmproj"):
                 self.cfg[k] = {}
             save_config(self.cfg)
-        self._append("\n[模型管理] 开始%s扫描模型目录…\n"
-                     % ("重新" if force else "补全"), "meta")
+        self._append("\n[模型管理] 开始%s…\n"
+                     % ("全部重新计算模型参数" if force else "补全缺失项"), "meta")
         threading.Thread(target=self._scan_and_fill, args=(force,),
                          daemon=True).start()
+
+    # ---- 手动定向模型（登记额外来源，不动文件；W 2026-10-05）----
+    def _manual_point_model(self):
+        """「手动定向模型」：选一个文件夹或一个模型文件加入来源。
+
+        文件夹按"一个目录"并入扫描（里面能聊天的 .gguf 与生图 / 生视频权重一起收），
+        单文件按它自己的类型收进对应清单。**只登记路径、不移动文件**（判据在
+        `models.extra_sources`，扫描侧 `scan_models` / `video_scan_dirs` 会认）。
+        """
+        if self._svc_busy or self._busy or self._img_busy:
+            messagebox.showinfo("手动定向模型",
+                                "当前有任务正在进行（生成/生图/服务操作），\n"
+                                "请等任务结束、服务停止后再加入模型来源。")
+            return
+        host = self.root
+        w = getattr(self, "_settings_win", None)
+        try:
+            if w is not None and w.winfo_exists():
+                host = w
+        except Exception:
+            host = self.root
+        d = tk.Toplevel(host)
+        d.withdraw()                    # 先藏起来，摆正了再显示（否则左上角闪一下）
+        d.title("手动定向模型")
+        ttk.Label(d, text="加入一个模型来源（只登记路径，不移动文件）",
+                  font=("Microsoft YaHei UI", 10, "bold")).pack(
+            anchor="w", padx=14, pady=(12, 2))
+        ttk.Label(d, text="文件夹：把里面能聊天的 .gguf 与生图 / 生视频权重一起收进来；\n"
+                          "单个文件：按它自己的类型收进对应清单。",
+                  foreground="#808080", justify="left",
+                  font=("Microsoft YaHei UI", 9)).pack(anchor="w", padx=14)
+
+        def _pick_dir():
+            p = filedialog.askdirectory(title="选择模型文件夹", parent=d)
+            if p:
+                d.destroy()
+                self._register_extra_model(p)
+
+        def _pick_file():
+            p = filedialog.askopenfilename(
+                title="选择模型文件", parent=d,
+                filetypes=[("模型文件", "*.gguf *.safetensors *.sft *.ckpt *.pt *.bin"),
+                           ("全部文件", "*.*")])
+            if p:
+                d.destroy()
+                self._register_extra_model(p)
+
+        bf = ttk.Frame(d)
+        bf.pack(padx=14, pady=(10, 14), anchor="e")
+        ttk.Button(bf, text="选择文件夹…", command=_pick_dir).pack(side="left", padx=(0, 6))
+        ttk.Button(bf, text="选择模型文件…", command=_pick_file).pack(side="left", padx=(0, 6))
+        ttk.Button(bf, text="取消", command=d.destroy).pack(side="left")
+        widgets.center_on(d, host)
+        d.deiconify()
+
+    def _register_extra_model(self, path):
+        """把选中的路径写进 `extra_models` 并立刻补一次参数（用户亲手加的动作不受冷却限制）。"""
+        p = os.path.normpath(str(path or "").strip())
+        if not p:
+            return
+        lst = list(self.cfg.get("extra_models") or [])
+        if p in lst:
+            messagebox.showinfo("手动定向模型", "这个来源已经在列表里了：\n%s" % p)
+            return
+        lst.append(p)
+        self.cfg["extra_models"] = lst
+        save_config(self.cfg)
+        self._append("\n[模型管理] 已加入模型来源：%s\n" % p, "meta")
+        messagebox.showinfo("手动定向模型",
+                            "已加入：\n%s\n\n文件没有移动 —— 扫描与模型菜单会认它。" % p)
+        threading.Thread(target=self._scan_and_fill, args=(False,), daemon=True).start()
 
     def _reindex_after_tidy(self):
         """整理移动后：清理失效记录并按新位置重新配对 mmproj。"""

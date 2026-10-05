@@ -7,7 +7,7 @@ import os
 import threading
 import time
 import tkinter as tk
-from tkinter import ttk, messagebox, font as tkfont
+from tkinter import ttk, messagebox, filedialog, font as tkfont
 
 from ..core import (capability, cloudjobs, engine_install, hardware, providers, sdprofile,
                    secrets, textfile, updater)
@@ -61,19 +61,24 @@ NAV_SPEC = [
          "title": "模型文件管理",
          "help": "扫描模型目录、补全每个模型缺的层数 / 上下文 / 视觉投影器记录，"
                  "以及把散落的模型文件整理成「一个模型一个文件夹」。\n"
+                 "进这一页会自动补全一次（10 分钟内不重复）；缺归属的文件可用"
+                 "「手动定向模型」把文件夹或单个 .gguf 加进来。\n"
                  "整理是**先预览、后执行，只移动不删除**；判不出归属的文件保持原位。"},
-        # 「模型文件管理」与「获取引擎」本来就同一页，左栏合成一项（W 2026-10-02：两项
+        # 「模型文件管理」与「引擎管理」本来就同一页，左栏合成一项（W 2026-10-02：两项
         # 各自一行是重复劳动）。`nav_hide` 让它不在左栏成行，但区块照旧建、jump="eng"
         # 照旧滚得到（输出栏「去配置引擎」用的就是它），高亮记在「模型文件与引擎」那行。
-        {"key": "eng", "label": "获取引擎", "page": "files", "section": "eng",
+        {"key": "eng", "label": "引擎管理", "page": "files", "section": "eng",
          "nav_hide": "files",
-         "title": "获取引擎（llama.cpp 与 sd.cpp）",
+         "title": "引擎管理",
          "help": "这一屏解决「还没装引擎」：说清现在缺哪一个、可以选哪几档、"
                  "点一下装到程序目录的 engines 里。\n"
+                 "引擎已在自己机器上、只是换了位置：用「自动定向」扫软件所在文件夹，"
+                 "或用「手动定向」指到那个文件夹 —— 两个引擎与模型文件同处一个目录也认得出。\n"
                  "CUDA 档要连运行库一起下（几百 MB），所以下之前会先说清多大；"
                  "装完回「服务参数」把路径指过去。\n"
-                 "网络不通下不动时，还有「打开下载页 / 复制下载链接」两条路 —— "
-                 "那两条拿到的就是选中档位的安装包直链。"},
+                 "「检查更新」联网查可用版本，查到新版本它自己变成「更新引擎」，"
+                 "装的过程中可点「取消安装」；网络不通下不动时还有「复制下载链接」"
+                 "（给的是选中档位的安装包直链）。"},
     ]},
     {"key": "g_cloud", "label": "云端模型", "children": [
         {"key": "c_prov", "label": "服务商与密钥", "page": "cloud", "section": "prov",
@@ -2696,23 +2701,26 @@ class SettingsMixin:
         #      这一段的锚点靠 nav_hide 走 jump="eng" 定位）----
         @section("files", "eng")
         def _t10(t10, r10):
-            """本地引擎的获取：说清现状 + 给出可选档位 + 一键装到程序目录的 engines 下。
+            """引擎管理：说清哪个引擎就位了没有 + 可选档位 + 一键装到程序目录的 engines 下。
 
-            **口径变更（W 2026-10-04）**：原来这里只导航不下载（`09` §1「引擎只给入口」）。
-            W 裁定分三期，本轮落前两期 —— ①「复制下载链接」改为复制**选中档位的资产直链**、
-            「打开下载页」指向**具体那一次发布**；②新增「自动安装引擎」（选档 → 下载 →
-            校验 → 解压 → 换目录）。**第三期「自动更新 / 原地升级」W 已裁定不做**（原话：
-            "不增加自动更新引擎的功能，因为引擎版本一般比较稳定，不需要改动"，`16` §18）。
-            **这一页不注册任何 `enter_hooks`**：开页一次网络请求都不发，版本清单只在用户
-            主动点「刷新版本」时拉 —— 想固定引擎版本的用户走「打开下载页 / 复制下载链接」。
+            **口径（W 2026-10-05 第二轮重构）**：
+              · 「自动定向」= 扫软件所在文件夹（扫不到再扫当前模型目录）找出本机的引擎；
+                「手动定向」= 用户自己指一个文件夹。两个引擎与模型文件同处一个目录也各认各的
+                —— 判据是 `engine_install.find_exe`：**按 exe 名**找，不看目录名。
+              · 「检查更新」联网查可用版本；查到比**已装版本**更新的就原地变成「更新引擎」，
+                点它开始下载安装、按钮再变成「取消安装」；已是最新则维持「检查更新」。
+                已装版本记在 `cfg["engine_installed"]`（自动安装成功时写入；手动定向 / 用户
+                自己放的引擎不记 ⇒ 被当成"可能有新版"，程序无从知道他那份是什么版本）。
+              · 「打开下载页」已删（W 2026-10-05）：下不动就「复制下载链接」，拿到的就是
+                选中档位的安装包直链（没查过版本才退回发布列表页）。
 
-            为什么装完**不自动改配置**：`exe` / `sd_dir` 是用户自己指的路径，程序替他改
-            就等于替他做决定（`15` §2 第 4 条同一条纪律）。装完只报出路径与该去哪儿指。
+            **开页零请求**（这条没变）：不注册 `enter_hooks`，不点「检查更新」不联网；
+            版本清单也不自动提示 —— ETag 只省额度，不变成提示。
 
-            网络：`github.com` 在部分网络下不通（`07` §4），所以每个入口都还有
-            「打开下载页 / 复制链接」两条退路，自动安装失败不许把人堵死。
+            定向与安装**会**替用户写 `exe` / `sd_dir`：定向本身就是"用户要求定位引擎"；
+            安装成功后指向刚装的那份是 W 2026-10-05 明确要求的（**推翻了** `15` §2 第 4 条
+            "装完只报路径、不自动改配置"，已登记 `99`）。
             """
-            import webbrowser
             # (键, 标题, 用户在配置里填的那项, 真正要存在才行的文件, 该放哪儿, 目录怎么称呼, 指路在哪, 额外说明)
             engines = [
                 ("llama",
@@ -2738,31 +2746,54 @@ class SettingsMixin:
             def _state_of(cfg_of, exe_of):
                 # 判"没指路"要看**用户填的那一项**，不能拿拼出来的文件路径判空：
                 # sd 那项拼的是 os.path.join(sd_dir, 可执行文件名)，sd_dir 留空时得到
-                # 相对路径 "sd-cli.exe"，非空但也不存在 —— 报"指了路但找不到"就冤枉人了
+                # 相对路径 "sd-cli.exe"，非空但也不存在 —— 报"找不到文件"就冤枉人了
                 # （和坑 42 里 `os.path.join("", "output")` 在 CWD 建目录是同一个根子）。
+                # 四态里的"未就位 / 已就位"落在这里，"未就位"后面跟原因（W 2026-10-05）。
                 if not str(cfg_of() or "").strip():
-                    return "还没指路（「打开目标目录」会告诉你该放去哪儿）", "#b00020"
+                    return "未就位：还没指路（「打开目标目录」会告诉你该放去哪儿）", "#b00020"
                 exe = str(exe_of() or "")
                 if os.path.isfile(exe):
                     return "已就位：" + exe, "#1a7f37"
-                return "指了路但找不到这个文件：" + exe, "#b00020"
+                return "未就位：指了路但找不到该文件：" + exe, "#b00020"
 
             # ---- 这几个 helper **定义在循环之外**，全部显式收参。
             #
             # 为什么不能定义在循环里按默认参数绑（那正是下面注释里写的正确做法）：
             # 一旦循环内的函数**按名字**去调另一个循环内定义的函数，那个名字在运行时
             # 解析到的是**最后一次循环**的定义 —— 也就是两个引擎都去动 sd 那份。
-            # 2026-10-04 真踩过：点 llama 的「刷新版本」，写进状态行的是 sd 的版本行
-            # （坑 124 的同族，只是方向反过来）。
+            # 2026-10-04 真踩过：点 llama 的「检查更新」（当时叫「刷新版本」），写进状态行
+            # 的是 sd 的版本行（坑 124 的同族，只是方向反过来）。
             def _say(sv, stl, text="", color="#5a5a5a"):
                 sv.set(text)
                 stl.configure(foreground=color)
 
-            def _page_of(b, k):
-                """「打开下载页」开哪一页：查到版本就开**具体那一次发布**，否则退回发布列表页。"""
-                if b["builds"]:
-                    return b["builds"][0].get("page") or engine_install.page_url(k)
-                return engine_install.page_url(k)
+            def _newer_tag(b, k):
+                """查到的最新可用版本相对**已装版本**：新的返回 tag；已是最新 / 查不到返回空串。"""
+                builds = b.get("builds") or []
+                latest = str((builds[0].get("tag") if builds else "") or "")
+                if not latest:
+                    return ""
+                installed = str((self.cfg.get("engine_installed") or {}).get(k) or "")
+                if not installed:
+                    return latest          # 没记录 ⇒ 无从知道他那份是什么版本，当作可能有新版
+                ik, lk = engine_install.build_key(installed), engine_install.build_key(latest)
+                if ik and lk and ik >= lk:
+                    return ""              # 已装的不比线上旧（含"自己装过更新的 nightly"）
+                return latest
+
+            def _flavor_line(b, k, fv):
+                """「查询到新版本」那一行：版本 + 档位 + 体积（含不含运行库）。"""
+                if not b.get("builds"):
+                    return "查询到新版本：还没查过可用版本（先点「检查更新」）。"
+                build = engine_install.pick_build(b["builds"], fv.get())
+                fl = [f for f in engine_install.flavors_from(build) if f["id"] == fv.get()]
+                if not fl:
+                    return "查询到新版本：%s（这个档位当前版本没有可用包）" % (
+                        build.get("tag") or "？")
+                mb = fl[0]["size"] / 1048576.0
+                extra = "（含运行库）" if fl[0].get("extra") else ""
+                return "查询到新版本：%s · 档位 %s · %.0f MB%s" % (
+                    build.get("tag") or "？", fl[0].get("label") or fv.get(), mb, extra)
 
             def _plan_of(b, k, fv):
                 """当前选中的档位落成下载清单；没查过版本就返回 None（不猜）。"""
@@ -2773,20 +2804,9 @@ class SettingsMixin:
                     return None
                 return engine_install.plan(k, build, fv.get())
 
-            def _on_pick(b, k, fv, vv):
-                """换档位就换版本行：版本号 + 两个包加起来多大。"""
-                if not b["builds"]:
-                    vv.set("还没查过可用版本。")
-                    return
-                build = engine_install.pick_build(b["builds"], fv.get())
-                fl = [f for f in engine_install.flavors_from(build)
-                      if f["id"] == fv.get()]
-                if not fl:
-                    vv.set("这个档位当前版本没有可用包。")
-                    return
-                mb = fl[0]["size"] / 1048576.0
-                extra = "（含运行库）" if fl[0].get("extra") else ""
-                vv.set("最新可用：%s · %.0f MB%s" % (build.get("tag") or "？", mb, extra))
+            def _on_pick(b, k, fv, sv, stl):
+                """换档位就换状态行：版本号 + 档位 + 体积（"查询到新版本"这一态的家）。"""
+                _say(sv, stl, _flavor_line(b, k, fv))
 
             def _guard(b, k, co):
                 """装之前拦一下"正在被用"的那份引擎：覆盖它等于把跑着的服务弄坏。"""
@@ -2809,89 +2829,115 @@ class SettingsMixin:
                 th.grid(row=i, column=0, columnspan=3, sticky="w", pady=(10, 2))
                 tk.Label(th, text=title, font=("Microsoft YaHei UI", 10, "bold"),
                          background=widgets.default_bg(), anchor="w").pack(side="left")
-                widgets.HelpDot(th, "「自动安装引擎」会把压缩包整包解压（不要只放那一个 exe，"
+                widgets.HelpDot(th, "「更新引擎」会把压缩包整包解压（不要只放那一个 exe，"
                                      "同目录的运行库都要），落到程序目录下的 engines 里。\n"
                                      + note +
-                                     "\n装完回 设置 → %s 把路径指过去。"
-                                     "引擎本来就装在这台机器上、只是换了位置的，"
-                                     "改指路就行，不用重装。" % setting).pack(
-                    side="left", padx=(6, 0))
+                                     "\n引擎本来就装在这台机器上、只是换了位置的，"
+                                     "用「自动定向」按 exe 名找出来、或「手动定向」自己指，"
+                                     "都不用重装。").pack(side="left", padx=(6, 0))
+
+                # 状态行：四态文案（未就位 / 已就位 / 正在查 / 查询到新版本）**都写在这一行**，
+                # 不另设提示行（W 2026-10-05）。变量挂控件保活（坑 145 ①）。
                 st_var = tk.StringVar(value="")
                 st = ttk.Label(t10, textvariable=st_var, wraplength=600, justify="left",
                                foreground="#5a5a5a", font=("Microsoft YaHei UI", 9))
                 st.grid(row=r10["i"], column=1, columnspan=2, sticky="w", pady=(0, 2))
                 r10["i"] += 1
 
-                # ---- 档位行：下拉 + 版本回显 + 「刷新版本」。
-                #     单独占一行而不是塞进按钮那一排：`ScrollPage` 只竖滚不横滚（坑 106），
-                #     按钮排已经接近右界，再加两个控件必然越界（坑 76）。
-                #     变量一律挂控件保活，否则被 GC 后 Label 静默变空（坑 145 ①）。
-                flavor_var = tk.StringVar(value="")
-                ver_var = tk.StringVar(value="还没查过可用版本。")
-                frow = ttk.Frame(t10)
-                frow.grid(row=r10["i"], column=0, columnspan=3, sticky="w", pady=(2, 2))
-                r10["i"] += 1
-                ttk.Label(frow, text="档位").pack(side="left", padx=(0, 4))
-                flavor_cb = ttk.Combobox(frow, textvariable=flavor_var, state="readonly",
-                                         width=24, values=[])
-                # 构造时就绑 textvariable（坑 112：只 set 变量而没绑，界面是空的而数据是对的）
-                flavor_cb.pack(side="left", padx=(0, 6))
-                ttk.Label(frow, textvariable=ver_var, foreground="#5a5a5a",
-                          font=("Microsoft YaHei UI", 9)).pack(side="left")
-                btn_ver = ttk.Button(frow, text="刷新版本", width=10)
-                btn_ver.pack(side="left", padx=(6, 0))
-
-                # ---- 循环里定义的回调一律把当轮的值绑成默认参数：不绑的话两个引擎的按钮
-                #      都会指到最后一个（闭包按变量名取，取到的是循环结束后的那一份，坑 124）
-                def refresh(_e=None, co=cfg_of, so=exe_of, sv=st_var, stl=st):
-                    t_, color = _state_of(co, so)
-                    sv.set(t_)
-                    stl.configure(foreground=color)
-
+                # 按钮分两行（W 2026-10-05 第二轮）：上一行是四个"其他按钮"（复制下载链接 /
+                # 自动定向 / 手动定向 / 打开目标目录），下一行**只放**合并按钮「检查更新」——
+                # 它右边挂档位下拉，**点过「检查更新」才显示**。`ScrollPage` 只竖滚不横滚
+                # （坑 106），但这四个按钮按字符宽实测仍在可视区内（自检里有一条右界断言）。
                 bf = ttk.Frame(t10)
-                bf.grid(row=r10["i"], column=1, columnspan=2, sticky="w", pady=(0, 4))
+                bf.grid(row=r10["i"], column=1, columnspan=2, sticky="w", pady=(2, 2))
                 r10["i"] += 1
-                # 第二排（安装那一排）也在这里建：行的先后照旧，6 个按钮挤一排必然
-                # 越出右界（`ScrollPage` 只竖滚不横滚 —— 坑 76 / 106）。
-                # **必须早于 `do_install` 定义**：它要把这两个按钮绑成默认参数，
-                # 按钮建在后面的话那两个默认参数拿到 None，一装就 AttributeError，
-                # 界面看着像"点了没反应"。
-                inf = ttk.Frame(t10)
-                inf.grid(row=r10["i"], column=1, columnspan=2, sticky="w", pady=(0, 6))
+                vf = ttk.Frame(t10)
+                vf.grid(row=r10["i"], column=1, columnspan=2, sticky="w", pady=(0, 6))
                 r10["i"] += 1
-                btn_dl = ttk.Button(inf, text="自动安装引擎", width=13)
-                btn_dl.pack(side="left", padx=(0, 6))
-                btn_cancel = ttk.Button(inf, text="取消安装", width=10, state="disabled")
-                btn_cancel.pack(side="left")
 
-                # 这一行引擎的会话状态：可用版本 / 正在装 / 取消标志
-                box = {"builds": [], "busy": False, "stop": None}
+                flavor_var = tk.StringVar(value="")
+                btn_act = ttk.Button(vf, text="检查更新", width=12)
+                btn_act.pack(side="left")
+                # 档位下拉先建不 pack：**点过「检查更新」才 pack 出来**（W 2026-10-05）。
+                # 构造时就绑 textvariable（坑 112：只 set 变量而没绑，界面是空的而数据是对的）。
+                flavor_lbl = ttk.Label(vf, text="档位", foreground="#5a5a5a",
+                                       font=("Microsoft YaHei UI", 9))
+                flavor_cb = ttk.Combobox(vf, textvariable=flavor_var, state="readonly",
+                                         width=16, values=[])
+                shown = {"v": False}
 
-                def load_versions(_e=None, b=box, cb=flavor_cb, vv=ver_var, k=key,
-                                  sv=st_var, stl=st, btn=btn_ver, fv=flavor_var,
-                                  rf=refresh):
-                    """点「刷新版本」才联网（开页不联网：首屏与无头自检都不该被网络拖累）。
+                def _show_flavor(lbl=flavor_lbl, cb=flavor_cb, sh=shown):
+                    if sh["v"]:
+                        return
+                    sh["v"] = True
+                    lbl.pack(side="left", padx=(10, 4))
+                    cb.pack(side="left")
 
-                    令牌在主线程取快照再进子线程 —— 子线程不读 Tk 变量、也不自己读盘（坑 54）。
+                # 这一行引擎的会话状态：可用版本 / 正在装 / 取消标志 / 当前模式。
+                # mode：idle（未就位或已就位）· checking（正在查）· ready（查到新版本）·
+                #       installing（正在下载安装）。按钮文字与状态行都由 `_render` 按它刷。
+                box = {"builds": [], "busy": False, "stop": None, "mode": "idle",
+                       "checked": False}
+
+                def _render(b=box, co=cfg_of, so=exe_of, sv=st_var, stl=st, btn=btn_act,
+                            fv=flavor_var, k=key):
+                    """按当前 mode 刷按钮文字与状态行（四态文案的唯一出口）。"""
+                    mode = b.get("mode") or "idle"
+                    if mode == "checking":
+                        _say(sv, stl, "正在查…", "#b58900")
+                        btn.configure(text="检查更新", state="disabled")
+                        return
+                    if mode == "ready":
+                        _say(sv, stl, _flavor_line(b, k, fv))
+                        btn.configure(text="更新引擎", state="normal")
+                        return
+                    if mode == "installing":
+                        btn.configure(text="取消安装", state="normal")
+                        return
+                    text, color = _state_of(co, so)
+                    if b.get("checked") and text.startswith("已就位"):
+                        text += "（已是最新）"      # 查过且没有更新版本
+                    _say(sv, stl, text, color)
+                    btn.configure(text="检查更新", state="normal")
+
+                def _apply_dir(kk, folder):
+                    """把选中的文件夹写回该引擎的指路项，并把已建的输入框一起回填。
+
+                    形状归一（llama 存 exe 路径 / sd 存目录）在 `engine_install.set_dir` 一处
+                    —— **首次打开的自动扫描走的是同一个函数**，不在这里再写一遍（坑 128）。
+                    回填是为了免得底部「保存」把旧值又写回去（那个页可能已经建过输入框）。
+                    """
+                    engine_install.set_dir(self.cfg, kk, folder)
+                    save_config(self.cfg)
+                    key2 = engine_install.path_key(kk)
+                    var = v.get(key2) if isinstance(v, dict) else None
+                    if var is not None:
+                        try:
+                            var.set(self.cfg[key2])
+                        except Exception:
+                            pass
+
+                def do_check(_e=None, b=box, k=key, cb=flavor_cb, fv=flavor_var,
+                             sv=st_var, stl=st, rf=_render, sf=_show_flavor):
+                    """点「检查更新」才联网（开页不联网：首屏与无头自检都不该被网络拖累）。
+
+                    令牌与显卡型号都在主线程取快照再进子线程（子线程不读 Tk 变量、不翻配置，坑 54）。
                     """
                     if b["busy"]:
                         return
                     tok = secrets.get_github_token()
-                    # 显卡型号也在主线程取快照（同上：子线程不翻配置）。有值就不必 spawn
-                    # nvidia-smi（适配器枚举那一级照走，毫秒级、不 spawn）。
+                    # 有值就不必 spawn nvidia-smi（适配器枚举那一级照走，毫秒级、不 spawn）
                     hw = {"gpu_name": str(self.cfg.get("gpu_name") or "")}
                     b["busy"] = True
-                    btn.configure(state="disabled")
-                    _say(sv, stl, "正在查可用版本…")
+                    b["mode"] = "checking"
+                    rf()
 
-                    def done(builds, why, kinds, kk=k, bb=b, cb=cb, vv=vv, sv=sv, stl=stl,
-                             btn=btn, fv=fv, rf=rf):
+                    def done(builds, why, kinds, kk=k, bb=b, cb=cb, vv=fv, sv=sv, stl=stl,
+                             rf=rf, sf=sf):
                         bb["busy"] = False
-                        try:
-                            btn.configure(state="normal")
-                        except Exception:
-                            pass
                         if not builds:
+                            bb["mode"] = "idle"
+                            rf()
                             _say(sv, stl, why or "没查到带本平台安装包的版本。", "#b00020")
                             return
                         bb["builds"] = builds
@@ -2899,16 +2945,15 @@ class SettingsMixin:
                         cb.configure(values=ids)
                         if ids:
                             # 默认档位按本机显卡挑（W 2026-10-04）：没有 N 卡时不许默认 CUDA
-                            # ——原来直接拿显示序第一项当默认，而显示序把 CUDA 排最前，没 N 卡
-                            # 的用户一进页面就选中一个装上必然启动失败的档位。显示序本身不动，
-                            # 只改默认值；判据在 `engine_install.recommend_flavor`（一处）。
-                            fv.set(engine_install.recommend_flavor(builds[0], kinds) or ids[0])
-                        # 显式传当轮的那几个对象：`_on_pick` 定义在循环之外，
-                        # 不传就是 None（它只收显式参数，不吃默认参数）。
-                        _on_pick(bb, kk, fv, vv)
-                        # 状态行复原成本行引擎的现状（W 2026-10-04）：查版本只是顺带一问，
-                        # 那一行显示的是"引擎装没装 / 指没指路"，不能停在"正在查可用版本…"。
-                        # 查到的版本号与体积由上面那行版本行显示，不挤在这一行里。
+                            # ——显示序把 CUDA 排最前只是"清单顺序"，默认值另算。判据在
+                            # `engine_install.recommend_flavor`（一处）。
+                            vv.set(engine_install.recommend_flavor(builds[0], kinds) or ids[0])
+                        sf()                       # 点过「检查更新」才显示档位下拉
+                        if _newer_tag(bb, kk):
+                            bb["mode"] = "ready"   # 状态行报「查询到新版本」，按钮变「更新引擎」
+                        else:
+                            bb["mode"] = "idle"
+                            bb["checked"] = True   # 查过且没有更新版本 → 状态行加"（已是最新）"
                         rf()
 
                     def work():
@@ -2928,17 +2973,7 @@ class SettingsMixin:
 
                     threading.Thread(target=work, daemon=True).start()
 
-                def open_page(_e=None, b=box, k=key):
-                    u = _page_of(b, k)
-                    try:
-                        if not webbrowser.open(u):
-                            raise RuntimeError("浏览器没响应")
-                    except Exception as e:
-                        messagebox.showwarning(
-                            "打开下载页", "打不开浏览器（%s）。\n把这个地址复制到浏览器里就行：\n%s"
-                            % (e, u))
-
-                def copy_link(_e=None, b=box, k=key, fv=flavor_var, sv=st_var):
+                def copy_link(_e=None, b=box, k=key, fv=flavor_var, sv=st_var, stl=st):
                     """复制**选中档位的安装包直链**；没查过版本才退回发布列表页。
 
                     原来复制的是发布列表页地址，用户贴过去还要自己翻哪个包；
@@ -2950,59 +2985,98 @@ class SettingsMixin:
                     try:
                         t10.winfo_toplevel().clipboard_clear()
                         t10.winfo_toplevel().clipboard_append(u)
-                        sv.set("安装包链接已复制，贴到浏览器地址栏就能开始下载。"
-                               if p and p["files"] else "发布页链接已复制。")
+                        _say(sv, stl, "安装包链接已复制，贴到浏览器地址栏就能开始下载。"
+                             if p and p["files"] else "发布页链接已复制。")
                     except Exception as e:
-                        messagebox.showwarning("复制链接", "复制失败（%s），"
-                                               "可以直接点「打开下载页」。" % e)
+                        messagebox.showwarning("复制链接", "复制失败（%s）。" % e)
+
+                def auto_dir(_e=None, k=key, sv=st_var, stl=st, b=box, rf=_render,
+                             ad=_apply_dir):
+                    """「自动定向」：扫软件所在文件夹（再退模型目录），按 **exe 名**找出本引擎。
+
+                    判据与落点都在 `engine_install.auto_locate` / `set_dir`（**首次打开的
+                    自动扫描走同一处**）。两个引擎各调一次（同处一个目录也不会张冠李戴）；
+                    找不到就把原因写进状态行，不弹窗堆噪音 —— 状态行本来就是四态文案的家。
+                    """
+                    if b["busy"]:
+                        return
+                    found = engine_install.auto_locate(k, self.cfg, app_dir=APP_DIR)
+                    if not found:
+                        _say(sv, stl, "未就位：没在软件目录（及模型目录）下找到 %s。"
+                             % engine_install.exe_name(k), "#b00020")
+                        return
+                    ad(k, os.path.dirname(found))
+                    b["mode"] = "idle"
+                    b["checked"] = False
+                    rf()
+
+                def manual_dir(_e=None, k=key, b=box, rf=_render, ad=_apply_dir):
+                    """「手动定向」：用户自己指一个文件夹（该引擎所在目录）。"""
+                    folder = filedialog.askdirectory(
+                        title="选择 %s 所在文件夹" % engine_install.exe_name(k),
+                        parent=t10.winfo_toplevel())
+                    if not folder:
+                        return
+                    exe = os.path.join(folder, engine_install.exe_name(k))
+                    if not os.path.isfile(exe) and not messagebox.askyesno(
+                            "手动定向",
+                            "这个文件夹里没有 %s。\n\n仍要指到这里吗？"
+                            % engine_install.exe_name(k)):
+                        return
+                    ad(k, folder)
+                    b["mode"] = "idle"
+                    b["checked"] = False
+                    rf()
 
                 def do_install(_e=None, b=box, k=key, sv=st_var, stl=st, fv=flavor_var,
-                               setting=setting, co=cfg_of, btn_dl=btn_dl,
-                               btn_cancel=btn_cancel):
+                               co=cfg_of, btn=btn_act, rf=_render, ad=_apply_dir,
+                               setting=setting):
+                    """点「更新引擎」：选档 → 下载校验 → 解压换目录；**装完指向新那份**。"""
                     p = _plan_of(b, k, fv)
                     if not p or not p["files"]:
                         # 同一句也写进状态行：无头自检看不见 messagebox，
-                        # 而"没刷新就点安装"这条规矩必须能被断言（也更像这页的口径）。
-                        _say(sv, stl, "还没查过可用版本 —— 先点「刷新版本」，再选一个档位。",
+                        # 而"没查过就点更新"这条规矩必须能被断言（也更像这页的口径）。
+                        _say(sv, stl, "还没查过可用版本 —— 先点「检查更新」，再选一个档位。",
                              "#b00020")
-                        messagebox.showinfo("自动安装引擎",
-                                            "先点「刷新版本」，再选一个档位。")
                         return
                     why = _guard(b, k, co)
-                    if why and not messagebox.askyesno("自动安装引擎", why + "\n\n仍要继续吗？"):
+                    if why and not messagebox.askyesno("更新引擎", why + "\n\n仍要继续吗？"):
                         return
                     dest = p["dir"]
                     tok = secrets.get_github_token()
                     b["stop"] = threading.Event()
                     b["busy"] = True
-                    btn_dl.configure(state="disabled")
-                    btn_cancel.configure(state="normal")
+                    b["mode"] = "installing"
+                    btn.configure(text="取消安装", state="normal")
                     _say(sv, stl, "准备下载 %s（%.0f MB）…"
                          % (p["files"][0]["name"], p["total"] / 1048576.0))
 
                     def emit(text):
                         self._ui_q.put(lambda: _say(sv, stl, text))
 
-                    def finish(ok, why_, exe, p=p, b=b, sv=sv, stl=stl, k=k,
-                               btn_dl=btn_dl, btn_cancel=btn_cancel, setting=setting,
-                               co=co):
+                    def finish(ok, why_, exe, p=p, b=b, sv=sv, stl=stl, k=k, btn=btn,
+                               rf=rf, ad=ad, setting=setting):
                         b["busy"] = False
-                        for w in (btn_dl, btn_cancel):
-                            try:
-                                w.configure(state="normal")
-                            except Exception:
-                                pass
                         if not ok:
+                            b["mode"] = "idle"
+                            rf()
                             _say(sv, stl, why_, "#b00020")
                             messagebox.showwarning(
-                                "自动安装引擎",
-                                "%s\n\n也可以点「打开下载页」自己下。" % why_)
+                                "更新引擎",
+                                "%s\n\n也可以点「复制下载链接」自己下。" % why_)
                             return
-                        _say(sv, stl, "已装好：" + exe, "#1a7f37")
+                        # 记下装上的版本（下次「检查更新」据此判「查询到新版本 / 已是最新」）
+                        # + **把路径指到刚装的那份**（W 2026-10-05 明确要求，见本函数口径）
+                        rec = dict(self.cfg.get("engine_installed") or {})
+                        rec[k] = p.get("tag") or ""
+                        self.cfg["engine_installed"] = rec
+                        ad(k, p.get("dir") or engine_install.default_dir(k))
+                        b["mode"] = "idle"
+                        b["checked"] = False
+                        rf()
                         messagebox.showinfo(
-                            "自动安装引擎",
-                            "已装到：\n%s\n\n回 设置 → %s 把路径指过去就能用。"
-                            % (exe, setting))
+                            "更新引擎",
+                            "已装好并指过去：\n%s\n\n回 设置 → %s 就能用它。" % (exe, setting))
 
                     def work():
                         tmp = engine_install.staging_dir()
@@ -3018,8 +3092,9 @@ class SettingsMixin:
                                 if not ok:
                                     got = False
                                     break
-                                f["path"] = dest_f
-                                files.append(f)
+                                f2 = dict(f)
+                                f2["path"] = dest_f
+                                files.append(f2)
                             if got:
                                 ok3, why3, exe3 = engine_install.install(
                                     k, files, dest, emit=emit, stop_flag=b["stop"],
@@ -3040,29 +3115,37 @@ class SettingsMixin:
 
                     threading.Thread(target=work_safe, daemon=True).start()
 
-                def do_cancel(_e=None, b=box, sv=st_var, stl=st, fv=flavor_var):
-                    if b["stop"] is None:
-                        return
-                    b["stop"].set()
-                    _say(sv=sv, stl=stl, text="正在取消…")
+                def do_click(_e=None, b=box, on_check=do_check, on_install=do_install):
+                    """「检查更新 / 更新引擎 / 取消安装」共用一个按钮：按当前 mode 分派。
 
-                ttk.Button(bf, text="打开下载页", width=12, command=open_page).pack(
-                    side="left", padx=(0, 6))
-                ttk.Button(bf, text="复制下载链接", width=13, command=copy_link).pack(
-                    side="left", padx=(0, 6))
+                    为什么要合并（W 2026-10-05）：三个动作是同一件事的三个阶段，拆成三个按钮
+                    既占地方、又要用户自己判断该点哪个。
+                    """
+                    mode = b.get("mode") or "idle"
+                    if mode == "ready":
+                        on_install()
+                    elif mode == "installing":
+                        if b["stop"] is not None:
+                            b["stop"].set()
+                    else:
+                        on_check()
+
+                # 顺序按 W 2026-10-05：复制下载链接 → 自动定向 → 手动定向 → 打开目标目录
+                ttk.Button(bf, text="复制下载链接", width=13,
+                           command=copy_link).pack(side="left", padx=(0, 6))
+                ttk.Button(bf, text="自动定向", width=10,
+                           command=auto_dir).pack(side="left", padx=(0, 6))
+                ttk.Button(bf, text="手动定向", width=10,
+                           command=manual_dir).pack(side="left", padx=(0, 6))
                 ttk.Button(bf, text="打开目标目录", width=13,
                            command=lambda d=dir_of, w=what, s=setting: _open_outdir(
-                               d(), w, s)).pack(
-                    side="left", padx=(0, 6))
-                ttk.Button(bf, text="重新检测", width=10, command=refresh).pack(side="left")
-                btn_dl.configure(command=do_install)
-                btn_cancel.configure(command=do_cancel)
-                btn_ver.configure(command=load_versions)
-                # 包一层把当轮那四个对象绑进去：`_on_pick` 在循环之外，只收显式参数
+                               d(), w, s)).pack(side="left")
+                btn_act.configure(command=do_click)
+                # 包一层把当轮那几个对象绑进去（`_on_pick` 定义在循环之外，只收显式参数）
                 flavor_cb.bind("<<ComboboxSelected>>",
-                               lambda e=None, b=box, k=key, fv=flavor_var, vv=ver_var:
-                               _on_pick(b, k, fv, vv))
-                refresh()
+                               lambda e=None, b=box, k=key, fv=flavor_var,
+                               sv=st_var, stl=st: _on_pick(b, k, fv, sv, stl))
+                _render()
 
         # ---- 区块 8：模型文件管理（左栏「模型文件与引擎」那一项指到这里）----
         @section("files", "files")
@@ -3071,9 +3154,9 @@ class SettingsMixin:
                 # 只留"有多少个模型"：原来把层数 / context / mmproj / 未进菜单四个计数
                 # 也拼在这一行里（5 段用 ｜ 隔开），760px 的换行宽度根本兜不住，
                 # 必然折成两行、第一行尾巴还参差不齐（W 2026-10-04：删掉这些冗余计数）。
-                return ("当前：模型 %d 个（含可看图）\n"
-                        "打开软件时会自动补全缺失项；下方可手动触发，或整理文件结构。"
-                        % n_models)
+                # 「进这一页会自动补全…」那半句也删了（W 2026-10-05）：自动化不需要向
+                # 用户说明，底下那些按钮自己会说话。
+                return "当前：模型 %d 个（含可看图）" % n_models
 
             head_lbl = ttk.Label(t5, text="当前：正在读取模型目录…",
                                  foreground="#555555", wraplength=760, justify="left",
@@ -3097,20 +3180,28 @@ class SettingsMixin:
                 "「能聊天的 .gguf 编码器」常需要收起来。只改显示，不动文件。")
 
             fr = ttk.Frame(t5)
-            ttk.Button(fr, text="扫描并补全缺失项", width=18,
+            ttk.Button(fr, text="补全缺失项", width=18,
                        command=lambda: self._manual_scan(False)).pack(side="left", padx=(0, 6))
-            ttk.Button(fr, text="全部重新计算（覆盖）", width=18,
+            ttk.Button(fr, text="全部重新计算", width=18,
                        command=lambda: self._manual_scan(True)).pack(side="left")
-            row(t5, r5, "重新扫描", fr,
+            row(t5, r5, "匹配参数", fr,
                 "补全 = 只为缺记录的模型计算（不覆盖手动调整过的值）；"
-                "重新计算 = 清空全部自动记录后重算（含覆盖手调值，会二次确认）。")
+                "全部重新计算 = 清空全部自动记录后重算（含覆盖手调值，会二次确认）。"
+                "进这一页会自动补全一次（10 分钟内不重复）。")
 
             fr2 = ttk.Frame(t5)
             ttk.Button(fr2, text="整理模型文件夹", width=18,
-                       command=self._open_tidy_dialog).pack(side="left")
+                       command=self._open_tidy_dialog).pack(side="left", padx=(0, 6))
+            ttk.Button(fr2, text="手动定向模型", width=18,
+                       command=self._manual_point_model).pack(side="left")
             row(t5, r5, "文件整理", fr2,
                 "把模型目录顶层散落的模型与其配对 mmproj 归入各自子文件夹"
-                "（先预览、后执行；只移动不删除；名称无法判断归属的保持原位）。")
+                "（先预览、后执行；只移动不删除；名称无法判断归属的保持原位）。"
+                "「手动定向模型」把别处的文件夹或单个 .gguf 加进来源 —— 只登记，不动文件。")
+
+            # 进「模型文件与引擎」页自动补全一次（10 分钟冷却；与「检查更新」共用
+            # core.throttle 那一套判据）。手动按钮不受冷却限制（models_ui._manual_scan）。
+            enter_hooks.setdefault("files", []).append(self._auto_scan_models)
 
         # ---- 页面容器 / 区块构建 / 锚点定位（v39：替代原来的 Notebook + _fit）----
         def _make_page(page_id):

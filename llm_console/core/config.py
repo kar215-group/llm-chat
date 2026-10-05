@@ -30,7 +30,7 @@ CONFIG_PATH = os.path.join(APP_DIR, "gui_config.json")
 
 # 版本号：发版时改这一处（--selfcheck / --version 会打印它）。
 # GitHub Release 的 tag 要与它一致（tag 去掉开头的 v），Actions 工作流会做一致性校验。
-APP_VERSION = "1.0.5"
+APP_VERSION = "1.0.6beta1"
 
 CFG_VERSION = 2
 
@@ -173,6 +173,14 @@ DEFAULT_CONFIG = {
     # 出现更新的 tag 时照旧会弹（判据是"tag 变了"，不是"时间没到"）。
     # 注意：开发者模式**开关本身**不在这里 —— 它只在本次运行内有效（App._dev_mode）。
     "dev_upd_dismissed": "",
+    # ---- 引擎管理（设置 → 模型文件与引擎 →「引擎管理」；W 2026-10-05）----
+    # 记录"自动安装装上的那个版本"（key = engine → tag），用来判断「检查更新」查到的是
+    # 「查询到新版本」还是"已经是最新"。手动定向 / 用户自己放的引擎不写这里 ⇒ 会被当成
+    # "可能有新版"（程序无从知道他那份是什么版本）。
+    "engine_installed": {},
+    # ---- 手动定向的模型来源（设置 → 模型文件与引擎 →「文件整理 → 手动定向模型」）----
+    # 用户手动加入的文件夹或 .gguf 完整路径；**只登记、不动文件**，扫描时一并收进三组清单。
+    "extra_models": [],
 }
 
 INT_KEYS = ("port", "ngl", "ctx", "threads", "reasoning_budget",
