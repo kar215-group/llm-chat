@@ -15,7 +15,8 @@ from ..core.config import (load_config, DEFAULT_CONFIG, APP_DIR, APP_VERSION,
                            CONFIG_PATH)
 from ..core import (cloudjobs, config, crashlog, diagnose, engine_install, providers,
                     secrets, throttle, updater)
-from ..core.models import display_name, has_local_chat
+from ..core.models import (auto_locate_models_dir, dir_has_any_gguf, display_name,
+                           extra_sources, has_local_chat)
 from ..core.server import _query_serving_model, server_process_alive, server_state, stop_server
 from ..connection import cloud_media
 from ..connection.proxy import ProxyServer
@@ -232,10 +233,12 @@ class App(ChatMixin, ImageGenMixin, VideoGenMixin, ServiceMixin, ModelsMixin, Se
 
         引擎：两份**都没就位**时按「自动定向」的判据找一次并写回指路 —— 判据 / 落点就是
         `engine_install.auto_locate` / `set_dir`，与界面那个「自动定向」按钮**同一个函数**。
-        这一步**同步**做：引导第一屏的缺件判据下一刻就要算，异步的话会显示成"还没配好"。
+        模型目录：当前指的目录里**一个 `.gguf` 都没有**、又没手动定向来源时，按
+        `models.auto_locate_models_dir` 找一个装着模型的目录写回（廉价判据：只看文件名）。
+        这两步**同步**做：引导第一屏的缺件判据下一刻就要算，异步的话会显示成"还没配好"。
         用户已经指过路、只是文件不在时**不擅自改**（指路是他自己填的）。
 
-        模型：起后台线程补全缺失项（`_auto_scan_models`，带 10 分钟冷却，与手动按钮、
+        模型参数：起后台线程补全缺失项（`_auto_scan_models`，带 10 分钟冷却，与手动按钮、
         进页钩子共用同一处判据）。任何一步失败都不许拖住启动。
         """
         if not self._is_first_open():
@@ -248,6 +251,12 @@ class App(ChatMixin, ImageGenMixin, VideoGenMixin, ServiceMixin, ModelsMixin, Se
                 found = engine_install.auto_locate(key, self.cfg, app_dir=APP_DIR)
                 if found:
                     engine_install.set_dir(self.cfg, key, os.path.dirname(found))
+                    changed = True
+            if not extra_sources(self.cfg) and not dir_has_any_gguf(
+                    self.cfg.get("models_dir")):
+                found_dir = auto_locate_models_dir(self.cfg, app_dir=APP_DIR)
+                if found_dir:
+                    self.cfg["models_dir"] = found_dir
                     changed = True
             if changed:
                 config.save_config(self.cfg)

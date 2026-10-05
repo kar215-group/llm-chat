@@ -10,8 +10,7 @@ import tkinter as tk
 from tkinter import ttk
 
 from ..core import cloudjobs, config, providers, sdprofile
-from ..core.models import scan_models
-from ..core.media import build_img_cmd, resolve_img_files
+from ..core.media import build_img_cmd, resolve_img_files, resolve_img_model_path
 from ..connection import cloud_media
 
 
@@ -31,12 +30,11 @@ class ImageGenMixin:
                          "指向你部署的 sd.cpp（内含 sd-cli.exe）。\n"
                          % (cli or "（还没填目录）"), "error")
             return
-        img_file = self.cfg.get("img_model_file", "")
-        if not img_file:
-            _d, _c, images = scan_models(self.cfg)
-            img_file = os.path.basename(images[0]) if images else ""
-        diffusion = os.path.join(self.cfg.get("image_model_dir", ""), img_file) if img_file else ""
-        if not img_file or not os.path.isfile(diffusion):
+        # 扩散模型一律走统一出口（绝对路径）：菜单选中 → 默认生图模型 → 扫描到的第一个。
+        # 原来这里是"取 basename 再拼回 image_model_dir"，模型不在那个目录就必然报未找到
+        # （出厂默认 `image_model_dir` 为空时必坏，见 core/media.resolve_img_model_path）。
+        diffusion = resolve_img_model_path(self.cfg)
+        if not diffusion:
             self._append("\n[提示] 未找到生图模型：把扩散权重（.gguf / .safetensors / .ckpt）放进"
                          "生图模型目录，或在模型菜单里重新选一个。\n"
                          "  目录在 设置 → 生图 的「生图模型文件夹」里改。\n", "error")

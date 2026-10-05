@@ -6,6 +6,7 @@ import os
 import re
 
 from . import sdprofile
+from .config import APP_DIR
 from .gguf import gguf_is_chat_capable, gguf_structure
 
 
@@ -132,6 +133,65 @@ def extra_scan_dirs(cfg):
         if d and d not in out:
             out.append(d)
     return out
+
+
+def dir_has_any_gguf(path, subdirs=1):
+    """这个目录（含 `subdirs` 层子目录）里有没有任何 `.gguf` —— **只看文件名，不读 GGUF 头**。
+
+    廉价判据，给"当前指的这个模型目录还有没有必要去找别的"用：有就说明用户指的这条路
+    并非空指（哪怕里面的 gguf 是视频组件 / mmproj，也该由各自的链路去认，不该整体搬走）。
+    """
+    p = str(path or "").strip()
+    if not p or not os.path.isdir(p):
+        return False
+    if any(str(n).lower().endswith(".gguf") for n in _listdir(p)):
+        return True
+    if subdirs <= 0:
+        return False
+    for n in _listdir(p):
+        sub = os.path.join(p, n)
+        if os.path.isdir(sub) and dir_has_any_gguf(sub, subdirs - 1):
+            return True
+    return False
+
+
+def _listdir(path):
+    try:
+        return sorted(os.listdir(path))
+    except Exception:
+        return []
+
+
+def auto_locate_models_dir(cfg, app_dir=None, max_depth=3):
+    """模型目录的「自动定向」：在程序目录附近找一个**确实装着模型**的文件夹，返回路径或空串。
+
+    为什么需要：`models_dir` 的默认值是 `<程序目录>/models`，而模型的来源只有它 + 「手动定向
+    模型」那几项；用户把模型放在别的文件夹（程序目录下的 `GGUF/`、或自己另建的目录）时，
+    扫一百次也扫不到。引擎那一侧有 `engine_install.auto_locate`，模型这一侧之前没有 —— 补上。
+
+    判据（**只读文件名，不读 GGUF 头**）：在 `app_dir` 下找"直接子项里有 `.gguf`"的目录，
+    优先目录名叫 `models` 的，其次离根近的、再按路径名序；深度上限 `max_depth`。
+    **只读**：写不写回 `models_dir` 由调用方决定；找不到返回空串（不猜）。
+    """
+    base = os.path.abspath(app_dir or APP_DIR)
+    if not os.path.isdir(base):
+        return ""
+    cur = os.path.normpath(str((cfg or {}).get("models_dir") or ""))
+    cands = []
+    for root, dirs, files in os.walk(base):
+        rel = os.path.relpath(root, base)
+        depth = 0 if rel == os.curdir else rel.count(os.sep) + 1
+        if depth >= max_depth:
+            dirs[:] = []                      # 不再往下走，但这一层仍要看
+        dirs[:] = sorted(d for d in dirs
+                         if not d.startswith(".") and not d.endswith((".old", ".new")))
+        np = os.path.normpath(root)
+        if np != cur and any(str(f).lower().endswith(".gguf") for f in files):
+            cands.append((0 if os.path.basename(np).lower() == "models" else 1, depth, np))
+    if not cands:
+        return ""
+    cands.sort()
+    return cands[0][2]
 
 # ------------------------------------------------ 视频生成链路的组件判定
 VIDEO_SUBDIR = "生视频"            # models_dir 下存放视频模型的子文件夹（不存在时自动回退顶层扫描）

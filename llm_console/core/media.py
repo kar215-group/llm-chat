@@ -20,7 +20,8 @@ import os
 import shlex
 
 from . import sdprofile
-from .models import _is_mmproj, find_vl_pairs, scan_video_models, video_scan_dirs
+from .models import (IMAGE_SUBDIR, _is_mmproj, find_vl_pairs, scan_models,
+                     scan_video_models, video_scan_dirs)
 
 # 配套槽位拼进命令行的先后顺序。Qwen-Image 的实测 argv 是 vae→llm，保持不变；
 # 视频侧反过来（llm→vae→audio-vae）也是为了与 MiniMax-H3 改造前的 argv 逐字相同。
@@ -91,6 +92,53 @@ def family_of(cfg, path, kind, forced_key):
 
 
 # ------------------------------------------------------------------------ 生图
+
+def img_dir_of(cfg):
+    """生图目录：`image_model_dir` 优先，**留空 = `<模型目录>/生图`**。
+
+    这条兜底**与扫描侧同一口径**（`core.models.scan_models` / `video_scan_dirs` 都是这么算的）。
+    发送侧原来只读 `image_model_dir`，于是"留空"的出厂默认机器上会出现
+    **菜单里看得见生图模型、一发就报「未找到生图模型」** —— 扫描侧找得到、发送侧找不到，
+    两边判据分叉（坑 128 同族）。
+    """
+    c = cfg or {}
+    base = str(c.get("models_dir") or os.path.dirname(str(c.get("model") or "")) or ".")
+    return str(c.get("image_model_dir") or "") or os.path.join(base, IMAGE_SUBDIR)
+
+
+def resolve_img_model_path(cfg):
+    """这次生图该用哪个扩散模型 → **绝对路径**；定不出来返回空串。
+
+    发送侧拿扩散模型的唯一出口，顺序：
+      ① 菜单里选中的就是生图模型（`model_kind == "image"`，扫描给的就是绝对路径）→ 用它；
+      ② `img_model_file`：绝对路径且在 → 直接用；否则按 `img_dir_of` 拼一次；**给了名字却
+         找不到就返回空串**（显式设置该报错就报错，不偷偷换一个模型）；
+      ③ 扫描到的第一个生图模型（`scan_models` 返回的本来就是绝对路径）。
+
+    为什么不再"取 basename 再拼回生图目录"：模型不在那个目录里时（手动定向到别处、或
+    放在模型目录顶层）那样必然找不到，报出来的却是"未找到生图模型"（坑 42 同族：拼出
+    错路径 / 相对路径，症状与根因对不上）。
+    """
+    c = cfg or {}
+    cur = str(c.get("model") or "")
+    if str(c.get("model_kind") or "") == "image" and cur and os.path.isfile(cur):
+        return cur
+    name = str(c.get("img_model_file") or "").strip()
+    if name:
+        if os.path.isabs(name) and os.path.isfile(name):
+            return name
+        p = os.path.join(img_dir_of(c), name)
+        return p if os.path.isfile(p) else ""
+    try:
+        _d, _chat, images = scan_models(c)
+    except Exception:
+        images = []
+    for p in images or []:
+        if os.path.isfile(p):
+            return p
+    return ""
+
+
 def resolve_img_files(cfg, diffusion_path=None, family=None):
     """按模型族找齐生图需要的配套文件 → dict（含 family / basis / note）。
 
@@ -101,9 +149,8 @@ def resolve_img_files(cfg, diffusion_path=None, family=None):
     `img_t5_file` 留空 = 自动发现；填了（文件名或绝对路径）就以它为准。
     """
     if not diffusion_path:
-        img_file = str(cfg.get("img_model_file", "") or "")
-        base = str(cfg.get("image_model_dir", "") or "")
-        diffusion_path = os.path.join(base, img_file) if img_file and base else ""
+        # 不传主体路径时自己定（口径见 resolve_img_model_path）——别在这里再写一遍
+        diffusion_path = resolve_img_model_path(cfg)
     # family 可以是 sdprofile 的三元组，也可以只是家族 id 字符串（调用方常常只有一个）
     if isinstance(family, (tuple, list)) and len(family) == 3:
         fid, basis, why = family
@@ -200,7 +247,7 @@ def build_img_cmd(cfg, prompt, out_path, steps, size, diffusion_path, cfg_scale,
                 vis = find_vl_pairs(cfg).get(llm) or ""
             if not (vis and os.path.isfile(vis)) and prof.get("edit_needs"):
                 try:
-                    img_dir = cfg.get("image_model_dir", "")
+                    img_dir = img_dir_of(cfg)      # 与上面同一口径（留空 = <模型目录>/生图）
                     vis = next((os.path.join(img_dir, n) for n in sorted(os.listdir(img_dir))
                                 if _is_mmproj(n) and n.lower().endswith(".gguf")), "")
                 except Exception:
