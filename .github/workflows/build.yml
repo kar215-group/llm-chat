@@ -208,6 +208,13 @@ jobs:
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: windows-latest
     environment: release-signing
+    # ⚠ 声明 environment 的 job **必须**能建 / 更新 deployment，否则 GitHub 没法把这个 job
+    # 挂进环境的审批队列 —— 表现是 job 永远停在 queued（if 已通过、deployment 也建了，
+    # 但没有 status 记录、pending_deployments 一直空）。workflow 级那个 `contents: write`
+    # 会把其余权限一律压成 none，所以这里得显式补上 deployments。
+    permissions:
+      contents: write
+      deployments: write
     timeout-minutes: 10
     steps:
       - name: 取打包产物（build 的 zip artifact）
