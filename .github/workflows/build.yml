@@ -217,6 +217,14 @@ jobs:
       deployments: write
     timeout-minutes: 10
     steps:
+      # gh 必须在**一个 git 仓库里**才能跑（它靠 remote 解析目标仓库 / 校验标签）。
+      # 这个 job 原来只下载 artifact、没有 checkout，于是 `gh release create` 直接死在
+      # "failed to run git: fatal: not a git repository"（v1.0.6beta4 第三次推送踩到）。
+      - name: 取代码（gh 要有个 git 仓库才跑得起来）
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
       - name: 取打包产物（build 的 zip artifact）
         uses: actions/download-artifact@v4
         with:
