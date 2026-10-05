@@ -187,7 +187,7 @@ python -m PyInstaller --noconfirm --clean --onefile --windowed --name llm-chat \
   推荐把 `llm-chat.exe` 直接放进 `llama-server.exe` 所在的那一层目录 —— 配置默认按
   "与 exe 同目录"来找引擎和 `models/`，`gui_config.json` / `secrets.json` 也生成在那儿。
 - 自检：`llm-chat.exe --selfcheck`（退出码 0 = 打包路径与内置服务商都正常）、`--version`。
-- exe **未做代码签名**，第一次运行 SmartScreen 可能拦一下：「更多信息」→「仍要运行」。
+- exe 带**自签名**证书；没把它列入信任的机器，SmartScreen 第一次仍可能拦一下：「更多信息」→「仍要运行」。
 
 ## 第三方与许可
 
