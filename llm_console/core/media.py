@@ -32,7 +32,7 @@ _VIDEO_SLOT_ORDER = ("llm", "vae", "audio_vae", "t5xxl", "clip_l", "clip_g",
                      "tokenizer", "connectors", "audio_encoder", "high_noise", "taesd")
 
 # MiniMax-H3 在 CFG>1 时必须能编码出负向提示词，空串会直接失败；
-# 配置里留空时用这个兜底值（内容可在 设置 → 生视频 改）。
+# 配置里留空时用这个兜底值（内容可在 设置 → 本地模型 → 生视频（sd.cpp） 改）。
 DEFAULT_VIDEO_NEG_PROMPT = ("worst quality, low quality, blurry, distorted, deformed, "
                             "watermark, text, static, jittery")
 

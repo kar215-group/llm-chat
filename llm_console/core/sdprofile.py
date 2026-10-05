@@ -10,7 +10,8 @@ Qwen-Image 的参数组合（`--llm` + `--flow-shift 3` + `euler` + `te=cpu`）�
 这一层把三件事抽成表：**需要哪些配套文件（槽位）**、**该传哪些参数**、**能不能吃参考图**。
 判据按可信度分三层，越靠前越硬：
 
-  1. 人工覆盖（设置 → 生图 / 生视频 的「模型族」下拉，存进 `img_family` / `vid_family`）
+  1. 人工覆盖（设置 → 本地模型 → 生图（sd.cpp）/ 生视频（sd.cpp） 的「模型族」下拉，存进
+     `img_family` / `vid_family`）
   2. **开发机实测过的张量名标记**（只有 Qwen-Image 与 MiniMax-H3 属于这层 —— 其余家族的
      张量名没法在开发机验证，不敢拿来自动判定，见坑 52"文档写了也要看是谁写的"）
   3. 文件名线索（Flux / SDXL / Wan 这些是**上游文档与 sd-cli --help 明确写过的形状**，
@@ -407,7 +408,8 @@ def detect_file(path, kind=None, forced="", name=None):
 # 没在开发机实测过的视频家族，其张量名只能当**辅助**：要求"文件名带线索 + 至少 N 个标记
 # 命中"才算视频主体。原因是 `patch_embedding` 这类名字在 PixArt / Flux 等图模型里也能见到，
 # 单凭张量名会把生图模型抢进视频列表。判错方向的代价是"这个视频模型进不了菜单"
-# ——那还有 设置 → 生视频 的手填文件名 这条出口救，比"生图模型莫名其妙消失"轻得多。
+# ——那还有 设置 → 本地模型 → 生视频（sd.cpp） 的手填文件名 这条出口救，比"生图模型莫名其妙
+# 消失"轻得多。
 UNVERIFIED_VIDEO = (
     ((b"patch_embedding", b"text_embedding", b"time_projection",
       b"blocks.0.self_attn.qkv"), 2, ("wan", "ti2v", "t2v", "i2v", "vace")),

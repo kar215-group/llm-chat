@@ -9,7 +9,7 @@
   app.ico      多尺寸（16/24/32/48/64/128/256）—— PyInstaller `--icon` 的输入，
                决定资源管理器 / 任务栏 / 桌面里 exe 自己长什么样。
   app_icon.py  两张 PNG 的 base64：`PNG_B64`（64px，喂标题栏与任务栏的
-               `tk.PhotoImage`）+ `LOGO_B64`（128px，设置 → 关于 那页的大标志）。
+               `tk.PhotoImage`）+ `LOGO_B64`（128px，设置 → 关于与诊断 那页的大标志）。
 
 为什么把图标内嵌成 base64 而不是发布一个 png 文件：单文件 exe 里 `__file__` 指向临时解包目录
 （坑 62 同族），外部资源要么跟着 `--add-data` 再算一遍 `_MEIPASS` 路径，要么就地找不到；
@@ -175,7 +175,7 @@ def main():
             '\n'
             '换图请改源图后重跑那条命令（源图不在了就用 `--from-ico` 从 app.ico 反推）。\n'
             '`PNG_B64` 给标题栏与任务栏（`ui/widgets.set_app_icon`），\n'
-            '`LOGO_B64` 给设置 → 关于 那页的大标志（`ui/widgets.app_logo`）。\n'
+            '`LOGO_B64` 给设置 → 关于与诊断 那页的大标志（`ui/widgets.app_logo`）。\n'
             '"""\n\n'
             '%s\n\n%s\n' % (blocks[0], blocks[1]))
     print("写入 %s  %d 字节" % (os.path.relpath(OUT_MOD, ROOT), os.path.getsize(OUT_MOD)))

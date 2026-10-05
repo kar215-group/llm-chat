@@ -82,7 +82,7 @@ class App(ChatMixin, ImageGenMixin, VideoGenMixin, ServiceMixin, ModelsMixin, Se
         self._dev_mode = False
         self._dev_tap = {"count": 0, "at": 0.0}    # 连点计数：上一次点击的时刻 + 已连了几下
         self._dev_upd = {"timer": None}            # 后台查更新的 after id（有令牌才不是 None）
-        self._diag_win = None         # 「诊断」次级页面（设置 → 关于 的按钮开的，放路径与一键诊断）
+        self._diag_win = None         # 「诊断」次级页面（设置 → 关于与诊断 的按钮开的，放路径与一键诊断）
         self._alias_tried = set()    # （备用）已尝试向模型请求别名的模型
         self._serving_model = None   # 当前服务实际加载的模型文件名（None=未知/未运行）
         self._pending_text = None    # 换载期间暂存的消息，就绪后自动发送
@@ -721,7 +721,7 @@ class App(ChatMixin, ImageGenMixin, VideoGenMixin, ServiceMixin, ModelsMixin, Se
                 self._write_err_seen = sig
                 self._sq.put(("note",
                               "[配置] 写不进去：%s（%s）—— 设置不会保存。"
-                              "把本程序换到一个可写的文件夹，或在 设置 → 关于 里点「一键诊断」。"
+                              "把本程序换到一个可写的文件夹，或在 设置 → 关于与诊断 里点「一键诊断」。"
                               % (os.path.basename(path), reason)))
             time.sleep(3)
 
@@ -918,7 +918,7 @@ class App(ChatMixin, ImageGenMixin, VideoGenMixin, ServiceMixin, ModelsMixin, Se
             messagebox.showinfo(
                 "发现新版本",
                 "GitHub 上有新版本：%s（本机 %s）。\n\n"
-                "到 设置 → 关于 点「检查更新」，那里能打开下载页。"
+                "到 设置 → 关于与诊断 点「检查更新」，那里能打开下载页。"
                 % (updater.display_version(tag), updater.display_version(APP_VERSION)))
         self._dev_upd_start()       # 续排下一次
 

@@ -3,7 +3,7 @@
 
 换图请改源图后重跑那条命令（源图不在了就用 `--from-ico` 从 app.ico 反推）。
 `PNG_B64` 给标题栏与任务栏（`ui/widgets.set_app_icon`），
-`LOGO_B64` 给设置 → 关于 那页的大标志（`ui/widgets.app_logo`）。
+`LOGO_B64` 给设置 → 关于与诊断 那页的大标志（`ui/widgets.app_logo`）。
 """
 
 PNG_B64 = (

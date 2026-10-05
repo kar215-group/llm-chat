@@ -4,7 +4,7 @@
 #
 # 工作台本身不含推理引擎：它调用 llama.cpp 的 llama-server 可执行文件。
 # 这个脚本负责"下载 + 解压 + 把 CUDA 运行库铺到同一个目录"，跑完把目录路径
-# 填进工作台的 设置 → 服务与引擎 → llama-server 路径 即可。
+# 填进工作台的 设置 → 本地模型 → 服务参数 → server 路径 即可。
 #
 # 用法：
 #   bash tools/deploy_llamacpp.sh                      # 装到 ./llama-engine
@@ -95,7 +95,7 @@ for root, dirs, files in os.walk(target):
 hit = [p for p in glob.glob(os.path.join(target, "**", need), recursive=True)]
 print("引擎位置：", hit[0] if hit else "!! 没找到 llama-server，请检查 FLAVOR/BUILD")
 if hit:
-    print("把它所在目录填进工作台的 设置 → llama-server 路径。")
+    print("把它所在目录填进工作台的 设置 → 本地模型 → 服务参数 → server 路径。")
 PYEOF
 
 echo "== 结果"

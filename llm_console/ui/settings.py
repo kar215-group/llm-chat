@@ -2697,7 +2697,7 @@ class SettingsMixin:
                     row=i, column=0, columnspan=3, sticky="w", pady=(0, 4))
             _refresh()
 
-        # ---- 区块 10：获取引擎（与「模型文件管理」同一页；左栏合成一项「模型文件与引擎」，
+        # ---- 区块 10：引擎管理（与「模型文件管理」同一页；左栏合成一项「模型文件与引擎」，
         #      这一段的锚点靠 nav_hide 走 jump="eng" 定位）----
         @section("files", "eng")
         def _t10(t10, r10):
@@ -2738,7 +2738,7 @@ class SettingsMixin:
                                       engine_install.exe_name("sd")),
                  lambda: str((self.cfg.get("sd_dir") or "").strip()),
                  "sd.cpp 引擎目录",
-                 "本地模型 → 生图",
+                 "本地模型 → 生图（sd.cpp）",
                  "生图与生视频共用这一个可执行文件，只是参数不同；"
                  "同目录还要有一堆运行库 dll。"),
             ]

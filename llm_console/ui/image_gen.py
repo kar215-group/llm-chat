@@ -26,7 +26,7 @@ class ImageGenMixin:
         sd = self.cfg.get("sd_dir", "")
         cli = os.path.join(sd, "sd-cli.exe")
         if not os.path.isfile(cli):
-            self._append("\n[提示] 未找到生图引擎 %s —— 请在 设置 → 生图 里把「sd.cpp 目录」"
+            self._append("\n[提示] 未找到生图引擎 %s —— 请在 设置 → 本地模型 → 生图（sd.cpp） 里把「sd.cpp 目录」"
                          "指向你部署的 sd.cpp（内含 sd-cli.exe）。\n"
                          % (cli or "（还没填目录）"), "error")
             return
@@ -37,7 +37,7 @@ class ImageGenMixin:
         if not diffusion:
             self._append("\n[提示] 未找到生图模型：把扩散权重（.gguf / .safetensors / .ckpt）放进"
                          "生图模型目录，或在模型菜单里重新选一个。\n"
-                         "  目录在 设置 → 生图 的「生图模型文件夹」里改。\n", "error")
+                         "  目录在 设置 → 本地模型 → 生图（sd.cpp） 的「生图模型文件夹」里改。\n", "error")
             return
         # 配套文件由模型族决定（Qwen-Image 要 LLM+VAE，Flux 要 clip_l+t5xxl+VAE，SDXL
         # 单文件就够了），所以按 sdprofile 的 require 预检；缺件就地报错，别把不存在
@@ -46,7 +46,7 @@ class ImageGenMixin:
         missing = sdprofile.missing_slots(files["family"], files)
         if missing:
             self._append("\n[提示] 这个生图模型（识别为 %s）缺配套文件：%s\n"
-                         "  放进生图模型目录，或在 设置 → 生图 的「配套文件」里指名。\n"
+                         "  放进生图模型目录，或在 设置 → 本地模型 → 生图（sd.cpp） 的「配套文件」里指名。\n"
                          % (sdprofile.label_of(files["family"]), "、".join(missing)), "error")
             return
         try:

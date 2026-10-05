@@ -96,7 +96,7 @@ def auto_detect(cfg):
             return UNKNOWN, "name-hint", ("名字看着像视觉模型，但云端接口不写能不能看图，"
                                           "不能只凭名字放行")
         return UNKNOWN, "none", ("云端各家接口都不写「能不能看图」，需要你在 "
-                                 "设置 → 云端模型 → 选择模型 里声明一次「图片输入」")
+                                 "设置 → 云端模型 → 服务商与密钥 →「选择模型…」里声明一次「图片输入」")
     if is_vl_model(cfg, cfg.get("model", "")):
         return YES, "mmproj", "找到配对的视觉投影器（mmproj），可以看图"
     return NO, "mmproj", "没找到配对的视觉投影器（mmproj），本地模型收不了图"

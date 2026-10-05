@@ -25,14 +25,14 @@ class VideoGenMixin:
         cli = os.path.join(sd, "sd-cli.exe")
         if not os.path.isfile(cli):
             self._append("\n[提示] 未找到生视频引擎 %s（生图与生视频共用 sd.cpp）—— "
-                         "请在 设置 → 生视频 里把「sd.cpp 目录」指向你部署的 sd.cpp，"
+                         "请在 设置 → 本地模型 → 生视频（sd.cpp） 里把「sd.cpp 目录」指向你部署的 sd.cpp，"
                          "并确认该版本支持视频生成。\n"
                          % (cli or "（还没填目录）"), "error")
             return
         files = resolve_video_files(self.cfg)
         if files["missing"]:
             self._append("\n[提示] 视频链路组件不全，缺：\n  · %s\n\n"
-                         "把文件放进「%s」后重新发一次即可（文件名可在 设置 → 生视频 里指定）。"
+                         "把文件放进「%s」后重新发一次即可（文件名可在 设置 → 本地模型 → 生视频（sd.cpp） 里指定）。"
                          "扩散主体、文本编码器、视频 VAE 缺一不可，VAE 最容易漏下。"
                          % ("\n  · ".join(files["missing"]),
                             self.cfg.get("video_model_dir") or "生视频"), "error")
