@@ -19,7 +19,7 @@ docs/flux.md、docs/wan.md 与 `sd-cli --help` 的原文（开发机没实测过
 import os
 import shlex
 
-from . import sdprofile
+from . import config, sdprofile
 from .models import (IMAGE_SUBDIR, _is_mmproj, find_vl_pairs, scan_models,
                      scan_video_models, video_scan_dirs)
 
@@ -92,6 +92,25 @@ def family_of(cfg, path, kind, forced_key):
 
 
 # ------------------------------------------------------------------------ 生图
+
+def _local_out_dir(cfg, key, sub):
+    """本地产物目录的公共判据：`key` 显式值优先（相对路径按**程序目录**解析，
+    别落进当前工作目录 —— 坑 42 同族），留空 = `<产物文件夹>/本地/<sub>`。"""
+    d = str((cfg or {}).get(key, "") or "").strip()
+    if d:
+        return d if os.path.isabs(d) else os.path.join(config.APP_DIR, d)
+    return os.path.join(config.output_root(cfg), "本地", sub)
+
+
+def img_out_dir(cfg):
+    """本地生图的**产物**目录 = `img_output_dir` 显式值，留空 = `<产物文件夹>/本地/image`。
+
+    2026-10-06 起不再写进 sd.cpp 部署目录（原来写死 `<sd_dir>/output`）：
+    引擎目录与产物混在一起既难清理，也逼着没部署 sd.cpp 的人面对一个莫名的相对路径。
+    判据只写这一处，界面直接调它。
+    """
+    return _local_out_dir(cfg, "img_output_dir", "image")
+
 
 def img_dir_of(cfg):
     """生图目录：`image_model_dir` 优先，**留空 = `<模型目录>/生图`**。
@@ -266,6 +285,12 @@ def build_img_cmd(cfg, prompt, out_path, steps, size, diffusion_path, cfg_scale,
 
 
 # ---------------------------------------------------------------------- 生视频
+
+def vid_out_dir(cfg):
+    """本地生视频的**产物**目录 = `vid_output_dir` 显式值，留空 = `<产物文件夹>/本地/video`。"""
+    return _local_out_dir(cfg, "vid_output_dir", "video")
+
+
 def _video_component_missing_label(name):
     return {"diffusion": "视频扩散主体（MiniMax-H3 量化 GGUF）",
             "llm": "文本编码器（sd-cli --llm）",

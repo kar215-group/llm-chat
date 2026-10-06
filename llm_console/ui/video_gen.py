@@ -9,7 +9,7 @@ import time
 from tkinter import ttk, messagebox
 
 from ..core import cloudjobs, config, providers
-from ..core.media import build_video_cmd, resolve_video_files
+from ..core.media import build_video_cmd, resolve_video_files, vid_out_dir
 from ..connection import cloud_media
 
 
@@ -37,6 +37,9 @@ class VideoGenMixin:
                          % ("\n  · ".join(files["missing"]),
                             self.cfg.get("video_model_dir") or "生视频"), "error")
             return
+        # "必闪退"档启动确认（2026-10-06）：摆在消费输入框之前，点否一个字都不丢（坑 133）
+        if not self._confirm_fatal_perf(files["diffusion"], "video", files=files):
+            return
         try:
             frames = max(1, int(self.cfg.get("vid_frames", 17) or 17))
         except Exception:
@@ -60,7 +63,7 @@ class VideoGenMixin:
         if ext not in ("webm", "avi", "webp"):
             ext = "webm"          # sd-cli 的单文件视频输出只认这三种容器
 
-        outdir = os.path.join(sd, "video")
+        outdir = vid_out_dir(self.cfg)   # <产物文件夹>/本地/video（2026-10-06 起）
         os.makedirs(outdir, exist_ok=True)
         out = os.path.join(outdir, time.strftime("vid_%Y%m%d_%H%M%S") + "." + ext)
 

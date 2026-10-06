@@ -104,31 +104,49 @@ def _trust_script(path):
     ) % (_q(path), _UNSIGNED)
 
 
+def read_cert_detail(exe=None, runner=None):
+    """读 exe 的签名证书 → `(info 或 None, why)`。
+
+    info 为 None 时 `why` 说明是哪一种"读不出来"（2026-10-06 补的区分，全静默的话
+    企业机上 PowerShell 被禁的用户既收不到询问、也收不到"判断不了"）：
+      · `why == ""`  —— 这份 exe 确实**没有签名**（不是故障，不用解释）；
+      · 非空人话    —— **这台机器判断不了**（工具调不动 / 退出码异常 / 结果认不出来），
+                        调用方应该把这句话说给用户，而不是装作什么都没发生。
+    `read_cert()` 是它的窄包装（老契约：拿不到一律 None）。
+    """
+    path = exe or self_exe()
+    if not path or not os.path.isfile(path):
+        return None, ""
+    try:
+        code, out = _run(_read_script(path), runner)
+    except Exception as e:                                     # 工具没跑起来
+        return None, "系统工具调不动（%s）" % e
+    out = (out or "").strip()
+    if not out:
+        return None, "系统工具没有任何输出"
+    if out == _UNSIGNED:
+        return None, ""
+    if code != 0:
+        return None, "系统工具返回错误（退出码 %s）" % code
+    try:
+        info = json.loads(out)
+    except Exception:
+        return None, "结果认不出来（可能被安全策略拦了）"
+    if not isinstance(info, dict) or not info.get("thumbprint"):
+        return None, "结果缺了指纹（可能被安全策略拦了）"
+    info["trusted"] = bool(info.get("trusted"))
+    info["trusted_machine"] = bool(info.get("trusted_machine"))
+    return info, ""
+
+
 def read_cert(exe=None, runner=None):
     """读 exe 的签名证书 → dict；**没有签名**或读不出来 → None。
 
     字段：`subject`（证书主体）、`thumbprint`（指纹）、`not_after`（到期日）、
-    `trusted`（是否已在本机「受信任的根」里）。
+    `trusted`（是否已在本机「受信任的根」里）。想区分"没签名"与"机器判不了"，
+    用 `read_cert_detail`。
     """
-    path = exe or self_exe()
-    if not path or not os.path.isfile(path):
-        return None
-    try:
-        code, out = _run(_read_script(path), runner)
-    except Exception:
-        return None
-    out = (out or "").strip()
-    if code != 0 or not out or out == _UNSIGNED:
-        return None
-    try:
-        info = json.loads(out)
-    except Exception:
-        return None
-    if not isinstance(info, dict) or not info.get("thumbprint"):
-        return None
-    info["trusted"] = bool(info.get("trusted"))
-    info["trusted_machine"] = bool(info.get("trusted_machine"))
-    return info
+    return read_cert_detail(exe, runner)[0]
 
 
 def trust(exe=None, runner=None):

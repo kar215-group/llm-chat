@@ -7,7 +7,7 @@ import time
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog, font as tkfont
 
-from ..core import capability, localmodels, providers, secrets
+from ..core import capability, localmodels, modelreq, providers, secrets
 from ..core.config import save_config
 from ..core.hardware import detect_gpu, detect_ram_gb
 from ..core.models import (ENGINE_LABEL, apply_tidy, display_name, engine_ready,
@@ -404,8 +404,10 @@ class ModelsMixin:
         win = tk.Toplevel(host)
         win.withdraw()          # 先藏起来，摆正了再显示（否则左上角闪一下）
         win.title("管理本地模型")
-        win.geometry("640x560")
-        win.minsize(520, 400)
+        # 780 宽（W 2026-10-06）：640 时"勾选框 + 文件名 + 右侧说明"这种长行被压得
+        # 只剩截断；窗口行有 fit_text 兜底（<Configure> 按新宽度重裁），加宽即恢复全文
+        win.geometry("780x560")
+        win.minsize(600, 400)
         win.transient(host)
 
         vars_ = {}
@@ -536,7 +538,7 @@ class ModelsMixin:
 
         def sync_note():
             n = sum(1 for v in vars_.values() if not v.get())
-            note.set("将隐藏 %d 个（点「确定」生效）" % n if n else "")
+            note.set("将隐藏 %d 个，点「确定」生效" % n if n else "")
 
         def sub_rows(parent, e, row_no):
             """生图 / 生视频主体下面的零件行（缩进一格）。
@@ -715,24 +717,31 @@ class ModelsMixin:
         if th is None or not th.due():
             return
         th.mark()
-        self._append("\n[模型管理] 自动补全缺失项…\n", "meta")
-        threading.Thread(target=self._scan_and_fill, args=(False,), daemon=True).start()
+        # 不在主页面预告/汇报（W 2026-10-06：例行输出不上对话区）；失败类提示仍保留
+        threading.Thread(target=self._scan_and_fill, args=(False, True),
+                         daemon=True).start()
 
-    # ---- 模型目录扫描与自动配置补全（自动线程 / 手动按钮共用）----
-    def _scan_and_fill(self, force=False):
+    # ---- 模型目录扫描与自动配置补全（自动线程 / 手动按钮共用 _scan_and_fill）----
+    def _scan_and_fill(self, force=False, quiet=False):
         """扫描模型目录，补全/重算 ngl、主页面 ctx、agent ctx、mmproj 记录。
 
         force=False：只补缺（手动改过的记录不覆盖）——进页自动 / 手动「补全缺失项」都走它；
         force=True ：调用方已清空相应记录，全部重算（手动「全部重新计算」）。
+        quiet=True ：**自动路径**（进页触发）—— 成功类提示一律不上主页面输出栏
+        （W 2026-10-06），只有失败（元数据解析不了 / 显存没探到）才开口；手动路径
+        照旧汇报，用户点了按钮就该有反馈。
         """
         self._ensure_hw_info()
         vram = float(self.cfg.get("vram_gb", 0) or 0)
         if not vram:
-            self._sq.put(("note",
-                          "未获取到显存容量（nvidia-smi 不可用），新模型将沿用当前 GPU 层数设置；"
-                          "可在 设置 → 服务参数 → 显存(GB) 手动填写。"))
-            return
-        _d, chat, _images = scan_models(self.cfg)
+            # 纯核显 / 没探到独显是**正常状态**不是故障（W 2026-10-06）：照常补全，
+            # GPU 层数按 0（纯 CPU）推算、ctx 由内存预算推导（compute_ngl / auto_ctx
+            # 同一口径）。手动路径提一句，自动路径不出声（例行输出不上对话区）。
+            if not quiet:
+                self._sq.put(("note",
+                              "未探测到显存容量：新模型按纯 CPU（GPU 层数 0）推算；"
+                              "有独立显卡时可在 设置 → 服务参数 → 显存(GB) 手动填写。"))
+        _d, chat, images = scan_models(self.cfg)
         # 补全结果先攒在内存里，最后**一次性**落盘：原来每补一项就 save_config 一次
         # （首跑 N 个模型 = 2N+1 次写盘，每次一份 .tmp + os.replace）。这一步跑在后台
         # 线程里，整批算完只要十几毫秒，所以"合并成一次写"既少占磁盘、也少和主线程的
@@ -750,9 +759,10 @@ class ModelsMixin:
             if force or mb not in (self.cfg.get("model_mmproj") or {}):
                 self.cfg.setdefault("model_mmproj", {})[mb] = proj
                 _dirty["v"] = True
-                self._sq.put(("note",
-                              "已识别可看图模型 %s（自动配对视觉投影器）。"
-                              % display_name(self.cfg, mp)))
+                if not quiet:
+                    self._sq.put(("note",
+                                  "已识别可看图模型 %s（自动配对视觉投影器）。"
+                                  % display_name(self.cfg, mp)))
         for p in chat:
             if self._closing:
                 _flush()
@@ -780,11 +790,34 @@ class ModelsMixin:
                     self.cfg.setdefault("model_ctx", {})[b] = ctxs["main"]
                     self.cfg.setdefault("model_ctx_api", {})[b] = ctxs["agent"]
                     _dirty["v"] = True
-                    self._sq.put(("note",
-                                  "已为模型 %s 匹配 context：主页面 %d / agent %d"
-                                  "（可在设置中调整）。"
-                                  % (display_name(self.cfg, p),
-                                     ctxs["main"], ctxs["agent"])))
+                    if not quiet:
+                        self._sq.put(("note",
+                                      "已为模型 %s 匹配 context：主页面 %d / agent %d"
+                                      "（可在设置中调整）。"
+                                      % (display_name(self.cfg, p),
+                                         ctxs["main"], ctxs["agent"])))
+
+        # ---- 性能分级（2026-10-06 W）：扫描发现的新模型评估一次，级别记进
+        # perf_reported（文件删掉的剪枝掉）。**评估结果不进输出栏**（W 第二轮）——
+        # 目前唯一的可见出口是启动 / 发送前 `_confirm_fatal_perf` 的 3 级弹窗（现场重算），
+        # 登记表为将来的查看界面备数据；评估读不到头也登记为 0，别每次扫描都重试坏文件。
+        try:
+            vids2, _enc2 = scan_video_models(self.cfg)
+        except Exception:
+            vids2 = []
+        paths_now = set(chat) | set(images) | set(vids2)
+        ram = float(self.cfg.get("ram_gb", 0) or 0)
+        try:
+            _reports, new_seen = modelreq.evaluate_new(
+                self.cfg, chat=chat, images=images, vids=vids2,
+                vram_gb=vram, ram_gb=ram, seen=self.cfg.get("perf_reported"))
+        except Exception:
+            new_seen = dict(self.cfg.get("perf_reported") or {})
+        for gone in [p for p in new_seen if p not in paths_now]:
+            new_seen.pop(gone, None)
+        if new_seen != (self.cfg.get("perf_reported") or {}):
+            self.cfg["perf_reported"] = new_seen
+            _dirty["v"] = True
         _flush()
 
     # ---- 模型管理（手动操作；自动线程与手动按钮共用 _scan_and_fill）----
@@ -795,7 +828,8 @@ class ModelsMixin:
                     "将清空所有模型的 层数/context/mmproj 自动记录并重新计算，\n"
                     "手动调整过的值也会被覆盖。确定继续？"):
                 return
-            for k in ("model_ngl", "model_ctx", "model_ctx_api", "model_mmproj"):
+            for k in ("model_ngl", "model_ctx", "model_ctx_api", "model_mmproj",
+                      "perf_reported"):
                 self.cfg[k] = {}
             save_config(self.cfg)
         self._append("\n[模型管理] 开始%s…\n"

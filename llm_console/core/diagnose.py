@@ -19,7 +19,7 @@ import os
 import sys
 import time
 
-from . import config, engine_install, hardware, models, params, secrets
+from . import config, engine_install, hardware, models, params, secrets, selfupdate
 from .config import write_error          # 只读：本模块不写状态文件（判据见 run_checks 里那条注释）
 
 
@@ -371,6 +371,18 @@ def run_checks(cfg, proxy_running=False, server_running=False, probe_gpu=True):
                       "如果现在能正常用，这条可以忽略；「打开错误日志」能看全文。",
                       ("log",)))
 
+    # 更新中断 / 回滚的兜底（2026-10-06）：把「改回原名即回旧版」这句人工出口提到
+    # 诊断页里 —— 真正双击都起不来的时候诊断页是够不到的，那时 README 里同一句话
+    # 是唯一出口（04 文档原本就有，用户侧一直看不见）。
+    if frozen:
+        old_bak = str(sys.executable) + selfupdate.OLD_SUFFIX
+        if os.path.isfile(old_bak):
+            out.append(_c("upd_backup", GROUP_ENV, WARN, "留有一份更新前的旧版备份",
+                          os.path.basename(old_bak),
+                          "这是上次自动更新留下的回滚备份，程序正常时不用管它。"
+                          "万一哪天更新后程序打不开：把旁边那个名字带 .updating 的文件"
+                          "改回原来的名字（去掉 .updating 后缀），就能回到旧版。"))
+
     tier = _dpi_aware()
     out.append(_c("dpi", GROUP_ENV, OK if tier else WARN,
                   "高分屏清晰度（DPI 感知）",
@@ -502,7 +514,9 @@ def run_checks(cfg, proxy_running=False, server_running=False, probe_gpu=True):
         in_gpu, cpu_only, with_vision = 0, [], 0
         for p in chat:
             try:
-                r = params.compute_ngl(cfg, p, vram or 8.0)
+                # vram 为 0（纯核显 / 没探到独显）就按 0 算：全部走 CPU 是**如实结论**，
+                # 不再兜假 8GB 糊弄出"能进显卡"的假话（2026-10-06 随 modelreq 校准轮统一口径）
+                r = params.compute_ngl(cfg, p, vram)
             except Exception:
                 r = None
             n = r.get("ngl") if isinstance(r, dict) else None

@@ -383,21 +383,26 @@ class SubWindowMixin:
 
         cfg = self.cfg
         exe_here = selfupdate.cur_exe_path()   # 源码运行 = None：没有 exe 可换
+        # 动手前的复核基准（CAS）：另一个实例可能在这扇窗开着的几分钟里已经把程序换过了，
+        # 真到「确认并更新」那一步要再对一遍，别把刚装好的新版又当旧版翻一遍。
+        expect = selfupdate.exe_stamp(exe_here) if exe_here else None
         stop_flag = threading.Event()
-        state = {"stage": "prompt", "staging": "", "exe": ""}
+        state = {"stage": "prompt", "staging": "", "exe": "", "url": ""}
 
         top = ttk.Frame(win)
         top.pack(side="top", fill="x", padx=14, pady=(12, 4))
-        ttk.Label(top, text="发现新版本：%s" % (info.get("name") or tag),
-                  font=("Microsoft YaHei UI", 11, "bold")).pack(
-            side="top", anchor="w")
-        ttk.Label(top, text="本机 %s → 新版 %s　·　发布于 %s　·　%s"
-                  % (updater.display_version(info.get("current") or APP_VERSION),
-                     updater.display_version(tag),
-                     info.get("published") or "日期未知",
-                     updater.channel_label(ch)),
-                  foreground="#5a6a7a", font=("Microsoft YaHei UI", 9)).pack(
-            side="top", anchor="w", pady=(2, 0))
+        head_lab = ttk.Label(top, text="发现新版本：%s" % (info.get("name") or tag),
+                             font=("Microsoft YaHei UI", 11, "bold"))
+        head_lab.pack(side="top", anchor="w")
+        ver_lab = ttk.Label(
+            top, text="本机 %s → 新版 %s　·　发布于 %s　·　%s"
+            % (updater.display_version(info.get("current") or APP_VERSION),
+               updater.display_version(tag),
+               info.get("published") or "日期未知",
+               updater.channel_label(ch)),
+            foreground="#5a6a7a", font=("Microsoft YaHei UI", 9),
+            wraplength=524, justify="left")
+        ver_lab.pack(side="top", anchor="w", pady=(2, 0))
 
         body = ttk.Frame(win)
         body.pack(side="top", fill="both", expand=True, padx=14, pady=(4, 4))
@@ -432,6 +437,40 @@ class SubWindowMixin:
         btn_stop.pack(side="right", padx=(0, 8))
         if exe_here is None:
             btn_go.configure(state="disabled")
+
+        # ---- 人工出口（2026-10-06）：自动更新这条路失败时，手动那条永远走得通。
+        # 国内直连 objects.githubusercontent.com 常失败 —— 窗口里得有一个不用猜的出路。
+        def _release_page_url():
+            return (str(info.get("url") or "") or
+                    updater.PAGE_RELEASES % updater.REPO)
+
+        def _open_release_page():
+            url = _release_page_url()
+            try:
+                import webbrowser
+                if webbrowser.open(url):
+                    return
+                raise RuntimeError("浏览器没响应")
+            except Exception as e:
+                messagebox.showinfo(
+                    "打开发布页",
+                    "浏览器没打开（%s）。\n把这个地址粘贴到浏览器里也一样：\n%s" % (e, url))
+
+        def _copy_link():
+            url = state.get("url") or _release_page_url()
+            try:
+                win.clipboard_clear()
+                win.clipboard_append(url)
+                status.set("已复制%s，可以在浏览器或下载工具里取回来：%s"
+                           % ("安装包直链" if state.get("url") else "发布页地址", url))
+                st_lab.configure(foreground="#5a6a7a")
+            except Exception as e:
+                status.set("复制失败（%s）—— 地址：%s" % (e, url))
+
+        ttk.Button(btns, text="打开发布页", width=11,
+                   command=_open_release_page).pack(side="left")
+        ttk.Button(btns, text="复制下载链接", width=13,
+                   command=_copy_link).pack(side="left", padx=(8, 0))
 
         def _record_dismiss():
             """自动弹的这扇窗被关掉 = 用户对**这个版本**说"别再弹"（落配置，重启仍算数）。"""
@@ -495,6 +534,8 @@ class SubWindowMixin:
         def _apply():
             """确认并更新：换 exe → 拉新 → 写哨兵 → 正常退出收尾。
 
+            全程握着跨进程更新闸（try_lock）：两份程序同时"确认并更新"时，后点的
+            会被闸住，不会把先点那份刚装好的新版当旧版改名（2026-10-06）。
             拉新失败要**回滚**（删掉放歪的新 exe、旧版改回原名）再报错 —— 顺序不能倒：
             先回滚后报错，用户看到的错误落地的就是"一切照旧"的状态。
             """
@@ -502,19 +543,46 @@ class SubWindowMixin:
             btn_go.configure(state="disabled")
             btn_stop.configure(state="disabled")
             status.set("正在替换程序文件…")
-            ok, why = selfupdate.apply_update(state["exe"], exe_here)
-            if not ok:
-                _restore_prompt(why)
+            lock, lwhy = selfupdate.try_lock(exe_here)
+            if lock is None:
+                if lwhy == "locked":
+                    _restore_prompt("另一个正在运行的实例在更新。请先关掉它，"
+                                    "或等它更新完重开程序。")
+                else:
+                    _restore_prompt("建不了更新锁（%s）—— 程序所在文件夹多半写不进去。"
+                                    "把本程序挪到可写的普通文件夹再试，或到发布页手动下载。"
+                                    % lwhy)
                 return
-            ok2, why2 = selfupdate.launch(exe_here)
-            if not ok2:
-                selfupdate.rollback(exe_here)
-                _restore_prompt("新程序没能启动（%s），已回滚到旧版，本机版本没有动。"
-                                % why2)
+            try:
+                ok, why = selfupdate.apply_update(state["exe"], exe_here, expect=expect)
+                if not ok:
+                    _restore_prompt(why)
+                    return
+                ok2, why2 = selfupdate.launch(exe_here)
+                if not ok2:
+                    selfupdate.rollback(exe_here)
+                    _restore_prompt("新程序没能启动（%s），已回滚到旧版，本机版本没有动。"
+                                    % why2)
+                    return
+                selfupdate.mark_updated(exe_here)
+                _cleanup_staging()
+                self.on_close(force=True)   # 正常退出收尾（停服务 / 存对话记录），不再弹二选
+            finally:
+                selfupdate.release_lock(lock, exe_here)
+
+        def _retarget(dl):
+            """点「立即更新」重新拉清单时，线上可能已经又发了新版 —— 窗口写的版本
+            必须跟着实际要装的对上（2026-10-06），别让用户"装的是 A′、看到的是 A"。"""
+            if not win.winfo_exists():
                 return
-            selfupdate.mark_updated(exe_here)
-            _cleanup_staging()
-            self.on_close(force=True)   # 正常退出收尾（停服务 / 存对话记录），不再弹二选
+            head_lab.configure(text="发现新版本：%s" % (dl.get("name") or dl.get("tag") or tag))
+            ver_lab.configure(
+                text="本机 %s → 新版 %s　·　发布于 %s　·　%s\n"
+                     "（弹窗之后线上又发了新版本，现在装的是上面这个最新的）"
+                % (updater.display_version(info.get("current") or APP_VERSION),
+                   updater.display_version(dl.get("tag") or tag),
+                   dl.get("published") or "日期未知",
+                   updater.channel_label(ch)))
 
         def _start_download():
             state["stage"] = "download"
@@ -534,6 +602,25 @@ class SubWindowMixin:
                 except Exception as e:  # UpdaterError / SelfUpdateError 都已是人话
                     self._ui_q.put(lambda w=str(e): _restore_prompt(w))
                     return
+                state["url"] = str(dl.get("url") or "")   # 人工出口的「复制下载链接」用
+                # 磁盘空间先看一眼：zip 落 %TEMP%（暂存里 zip + 解出的 exe 约两份），
+                # 新 exe 还要进程序目录 —— 两处都可能满，满了更新必然半途而废（2026-10-06）
+                need = int(dl.get("size") or 0)
+                if need > 0:
+                    import tempfile
+                    for where, d, factor in (
+                            ("临时文件夹（%TEMP%）", tempfile.gettempdir(), 2.2),
+                            ("程序所在文件夹", os.path.dirname(exe_here or "") or None, 1.2)):
+                        ok_d, free = selfupdate.disk_ok(d, int(need * factor))
+                        if not ok_d:
+                            self._ui_q.put(lambda w=(
+                                "磁盘空间不够：装这次更新大约要 %.0f MB，%s 只剩 %.0f MB。"
+                                "清出一些空间再试，或到发布页手动下载。"
+                                % (need * factor / 1048576.0, where, free / 1048576.0)):
+                                _restore_prompt(w))
+                            return
+                if dl.get("tag") and dl["tag"] != tag:
+                    self._ui_q.put(lambda d=dict(dl): _retarget(d))
                 staging = selfupdate.staging_dir()
                 zip_path = os.path.join(staging, "update.zip")
 

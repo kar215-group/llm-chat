@@ -9,8 +9,8 @@ import time
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog, font as tkfont
 
-from ..core import (capability, codesign, cloudjobs, engine_install, hardware, providers,
-                    sdprofile, secrets, textfile, updater)
+from ..core import (capability, codesign, cloudjobs, engine_install, hardware,
+                    media, providers, sdprofile, secrets, textfile, updater)
 from ..core.config import (APP_DIR, APP_VERSION, CFG_VERSION, DEFAULT_CONFIG,
                            FLOAT_KEYS, INT_KEYS, STR_KEYS, cloud_media_dir,
                            gen_api_key, save_config)
@@ -98,7 +98,8 @@ NAV_SPEC = [
                  "生图是同步请求（可以挂参考图），生视频是异步任务"
                  "（提交 → 轮询 → 下载），首帧仍要用本地链路。\n"
                  "左列是生图、右列是生视频，各自的存放目录在本列底部；"
-                 "轮询间隔与等待上限两条链路共用，压在下面那条横栏里。\n"
+                 "本地与云端四条链路共用的「修改产物位置」与轮询间隔、等待上限一起，"
+                 "压在下面那条横栏里。\n"
                  "云端产物地址只活 24 小时，所以拿到就立刻下载到本地，不在云上留原图；"
                  "没来得及下载的会记进任务台账，重启后对话开头给「取回」按钮。\n"
                  "费用单价按模型填，点「成本预估算」开窗口。"},
@@ -699,7 +700,8 @@ class SettingsMixin:
                 "显存容量：新模型 GPU 层数自动计算直接使用此值，不再临时询问系统；"
                 "探测失败或多卡时可手动填写。", width=8, fold=fold_svc)
             ent(t2, r2, "ram_gb", "内存 (GB)",
-                "系统内存总量（首次启动自动探测预填，可修改；目前预留展示）。", width=8,
+                "系统内存总量（首次启动自动探测预填，可修改）。"
+                "加入 / 启动模型的性能分级用它判「装不装得下」。", width=8,
                 fold=fold_svc)
             ent(t2, r2, "threads", "threads",
                 "CPU 线程数，0 = 自动。一般留 0。", fold=fold_svc)
@@ -785,7 +787,12 @@ class SettingsMixin:
                        ("img_vae_file", "img_llm_file", "img_clip_l_file",
                         "img_clip_g_file", "img_t5_file", "img_negative",
                         "img_seed", "img_backend", "img_params_backend",
-                        "img_extra_args"))
+                        "img_extra_args", "img_output_dir"))
+            ent(t3, r3, "img_output_dir", "输出目录",
+                "本地生图的落地目录；留空 = 产物文件夹下的 本地\\image"
+                "（产物文件夹在 设置 → 云端模型 → 生图 / 生视频 的「修改产物位置」里改）。"
+                "填相对路径时按程序目录解析。",
+                width=30, hint="留空=产物文件夹", fold=fold_img)
             ent(t3, r3, "img_vae_file", "VAE 文件",
                 "留空 = 在本族要求的目录里自动找（按文件名含 vae / ae）。放了多个家族"
                 "的权重又挑错时，在这里指名。", width=30, hint="留空=自动", fold=fold_img)
@@ -824,10 +831,12 @@ class SettingsMixin:
             fr_i = ttk.Frame(t3)
             ttk.Button(fr_i, text="打开图片输出文件夹",
                        command=lambda: _open_outdir(
-                           os.path.join(str(self.cfg.get("sd_dir", "") or ""), "output"),
-                           "生图输出目录", "生图（sd.cpp） → 引擎目录")).pack(side="left")
+                           media.img_out_dir(self.cfg),
+                           "生图输出目录",
+                           "生图（sd.cpp） → 高级参数 → 输出目录")).pack(side="left")
             row(t3, r3, "输出目录", fr_i,
-                "生成结果写在 sd.cpp\\output\\img_时间戳.png；引擎每次按需拉起，进程退出即释放显存。")
+                "生成结果写在「输出目录」指定的文件夹（留空 = 产物文件夹\\本地\\image）"
+                "下的 img_时间戳.png；引擎每次按需拉起，进程退出即释放显存。")
             refresh_img_note()
 
         # ---- 区块 4：本地图像与视频 / 生视频 ----
@@ -910,7 +919,12 @@ class SettingsMixin:
                         "vid_tokenizer_file", "vid_high_noise_file",
                         "vid_audio_vae_file", "vid_neg_prompt", "vid_format",
                         "vid_seed", "vid_backend", "vid_params_backend",
-                        "vid_extra_args"))
+                        "vid_extra_args", "vid_output_dir"))
+            ent(t3b, r3b, "vid_output_dir", "输出目录",
+                "本地生视频的落地目录；留空 = 产物文件夹下的 本地\\video"
+                "（产物文件夹在 设置 → 云端模型 → 生图 / 生视频 的「修改产物位置」里改）。"
+                "填相对路径时按程序目录解析。",
+                width=30, hint="留空=产物文件夹", fold=fold_vid)
             ent(t3b, r3b, "vid_llm_file", "文本编码器文件名",
                 "留空 = 自动取与扩散主体配套的编码器（按文件名匹配，通常名字里带 vl / llm）。",
                 width=30, fold=fold_vid)
@@ -953,10 +967,12 @@ class SettingsMixin:
             fr_v = ttk.Frame(t3b)
             ttk.Button(fr_v, text="打开视频输出文件夹",
                        command=lambda: _open_outdir(
-                           os.path.join(str(self.cfg.get("sd_dir", "") or ""), "video"),
-                           "生视频输出目录", "生视频（sd.cpp） → 引擎目录")).pack(side="left")
+                           media.vid_out_dir(self.cfg),
+                           "生视频输出目录",
+                           "生视频（sd.cpp） → 高级参数 → 输出目录")).pack(side="left")
             row(t3b, r3b, "输出目录", fr_v,
-                "生成结果写在 sd.cpp\\video\\vid_时间戳.webm；引擎每次按需拉起，进程退出即释放显存。")
+                "生成结果写在「输出目录」指定的文件夹（留空 = 产物文件夹\\本地\\video）"
+                "下的 vid_时间戳.webm；引擎每次按需拉起，进程退出即释放显存。")
             # 开页这次回显可能要扫视频目录，延到开页之后（_idle_fill）；下拉联动那次仍即时算
             _idle_fill(t3b, refresh_vid_note)
 
@@ -2249,7 +2265,8 @@ class SettingsMixin:
             ent(col_l, rl, "cloud_img_negative", "生图负向词",
                 "选填。留空 = 不传该参数。", lw=8)
             ent(col_l, rl, "cloud_img_dir", "图片存放",
-                "云端生图的落地目录；留空 = 程序目录下的 cloud_out\\images。", lw=8)
+                "云端生图的落地目录；留空 = 产物文件夹下的 云端\\image"
+                "（产物文件夹在下方「修改产物位置」里改）。", lw=8)
             fl = ttk.Frame(col_l)
             ttk.Button(fl, text="打开图片文件夹", width=14,
                        command=lambda: _open_outdir(
@@ -2274,7 +2291,8 @@ class SettingsMixin:
             ent(col_r, rr, "cloud_video_ratio", "画面比例",
                 "例如 16:9 / 9:16 / 1:1；留空 = 不传（画面比例常由素材决定）。", lw=8)
             ent(col_r, rr, "cloud_vid_dir", "视频存放",
-                "云端生视频的落地目录；留空 = 程序目录下的 cloud_out\\videos。", lw=8)
+                "云端生视频的落地目录；留空 = 产物文件夹下的 云端\\video"
+                "（产物文件夹在下方「修改产物位置」里改）。", lw=8)
             fr = ttk.Frame(col_r)
             ttk.Button(fr, text="打开视频文件夹", width=14,
                        command=lambda: _open_outdir(
@@ -2293,6 +2311,14 @@ class SettingsMixin:
                      font=("Microsoft YaHei UI", 9, "bold"),
                      background=widgets.default_bg()).grid(
                 row=i, column=0, columnspan=3, sticky="w")
+            # 产物位置（2026-10-06）：本地与云端四条链路共用的落地根。
+            # 标签 6 个字超出共用栏 lw=8 的宽度（每个中文字占 2 格，坑 113 同族），这一行收到 12
+            ent(t4c, r4c, "output_dir", "修改产物位置",
+                "本地与云端生图 / 生视频**四条链路共用**的落地根；留空 = 程序目录下的"
+                "「产物」文件夹，里面按 本地 / 云端 × image / video 分四个子目录，"
+                "首次生成时自动建。上面「图片存放 / 视频存放」两格与本地生图 / 生视频页"
+                "「高级参数」里的「输出目录」单独填过时，以各自为准。",
+                width=24, hint="留空=程序目录\\产物", lw=12)
             ent(t4c, r4c, "cloud_poll_seconds", "轮询间隔",
                 "秒。官方建议 15，且创建/查询/取消三个端点合计 20 QPS——"
                 "调小不会让任务更快完成，只会更早撞上限流。", hint="建议 15", lw=8)
@@ -2690,10 +2716,10 @@ class SettingsMixin:
                 确认后才动手。危险点是「信了这张证书 = 这台机器会信所有用它签的东西」，
                 所以那一句必须原样说给用户听，不能替他跳过（`core/codesign.py` 开头有边界说明）。
                 """
-                info = codesign.read_cert()
+                info, rwhy = codesign.read_cert_detail()
                 if info is None:
-                    msg_lab.set("列入失败：本程序这份 exe 没有签名"
-                                "（源码运行、或装的是未签名的构建）。")
+                    msg_lab.set("列入失败：%s" % (rwhy or "本程序这份 exe 没有签名"
+                                                  "（源码运行、或装的是未签名的构建）。"))
                     return
                 if info.get("trusted"):
                     msg_lab.set("这张签名证书已经在本机可信名单里了，不用再列一次。")
@@ -2722,10 +2748,10 @@ class SettingsMixin:
                 所以警告写得比用户级那条更狠（W 点名的"很严重的警告"），并把"接下来会弹
                 管理员授权"提前说清楚 —— 用户在 UAC 上点取消就是放弃，不是失败。
                 """
-                info = codesign.read_cert()
+                info, rwhy = codesign.read_cert_detail()
                 if info is None:
-                    msg_lab.set("列入失败：本程序这份 exe 没有签名"
-                                "（源码运行、或装的是未签名的构建）。")
+                    msg_lab.set("列入失败：%s" % (rwhy or "本程序这份 exe 没有签名"
+                                                  "（源码运行、或装的是未签名的构建）。"))
                     return
                 if info.get("trusted_machine"):
                     msg_lab.set("这张签名证书已经在本机（所有用户）可信名单里了。")

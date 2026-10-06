@@ -11,14 +11,26 @@ _CTX_FALLBACK = 10240
 
 
 def current_ngl(cfg):
-    """当前模型应使用的 GPU 层数：按模型记忆优先，否则回落全局 ngl。"""
+    """当前模型应使用的 GPU 层数：按模型记忆优先，否则回落全局 ngl。
+
+    没有记录且显存为 0（没探到独显）= **纯 CPU**：全局兜底的 24 层对核显机器是毒药
+    （llama-server 起不来，用户只看到"服务进程已退出"），2026-10-06 起直接给 0。
+    """
     b = os.path.basename(cfg["model"])
-    return int((cfg.get("model_ngl") or {}).get(b, cfg.get("ngl", 24)))
+    rec = (cfg.get("model_ngl") or {}).get(b)
+    if rec is not None:
+        return int(rec)
+    if not (cfg.get("vram_gb") or 0):
+        return 0
+    return int(cfg.get("ngl", 24))
 
 def compute_ngl(cfg, path, vram_gb):
     """按显存与模型大小估算该模型的最优 GPU 层数。
 
     依据（自上而下）：
+      0) **vram_gb ≤ 0（没探测到独立显卡）= 纯 CPU**：直接给 ngl=0，不再靠调用方兜
+         一个假显存 —— 纯核显机器按 8GB 假显存算出十几层，启动必炸（2026-10-06 随
+         modelreq 校准轮一并修的口径）。
       1) 显存预算 = 显存总量 × 92%（留系统/桌面余量）
                    − 非层权重（≈ 文件大小 × 7%，嵌入表 + 输出头）
                    − 运行时开销 0.7GB（CUDA 上下文 / cuBLAS 工作区 / 计算缓冲）
@@ -42,6 +54,10 @@ def compute_ngl(cfg, path, vram_gb):
         return None
     try:
         n_layers = int(info["block_count"])
+        is_moe = int(info.get("expert_count") or 0) > 0
+        if not vram_gb or float(vram_gb) <= 0:
+            return {"ngl": 0, "ngl_max": 0, "n_layers": n_layers,
+                    "vram": 0.0, "moe": is_moe}
         fsize = os.path.getsize(path)
         kv_heads = int(info.get("attention.head_count_kv") or 0)
         head_dim = int(info.get("attention.key_length") or 0)
@@ -49,7 +65,6 @@ def compute_ngl(cfg, path, vram_gb):
             heads = int(info.get("attention.head_count") or 0)
             emb = int(info.get("embedding_length") or 0)
             head_dim = emb // heads if heads else 0
-        is_moe = int(info.get("expert_count") or 0) > 0
 
         ctx = max(512, int(cfg.get("ctx", 8192)))   # 故意不等于 _CTX_FALLBACK：它参与 ngl 反推，系数按此值校准
         if is_moe:
@@ -64,7 +79,7 @@ def compute_ngl(cfg, path, vram_gb):
             discount = 0.85
         layer_bytes = fsize * layer_ratio / max(1, n_layers)
         kv_per_layer = (2 * kv_heads * head_dim * 2 * ctx) if (kv_heads and head_dim) else 0
-        budget = vram_gb * (1 << 30) * vram_factor - fsize * (1 - layer_ratio) - overhead
+        budget = float(vram_gb) * (1 << 30) * vram_factor - fsize * (1 - layer_ratio) - overhead
         if budget <= 0:
             return {"ngl": 0, "ngl_max": 0, "n_layers": n_layers,
                     "vram": vram_gb, "moe": is_moe}
@@ -102,6 +117,8 @@ def auto_ctx_for_model(cfg, path):
       cap = min(两预算推导值, 131072, GGUF 声明的原生上下文)，再圆整到常用档位。
       main 档另夹 98304：主页面比 agent 保守一档（大 ctx 首 token 明显变慢），与显存够不够无关。
     返回 {"main": …, "agent": …}；元数据不足返回 None。
+    显存缺省按 0（没探测到独显）而不是假 8GB —— 纯核显机器的 ctx 全部由内存预算推导
+    （2026-10-06 随 modelreq 校准轮统一口径）。
     """
     info = read_gguf_info(path)
     if not info:
@@ -122,7 +139,7 @@ def auto_ctx_for_model(cfg, path):
         ngl = int(ngl_rec) if ngl_rec else current_ngl(cfg)
         ngl = max(0, min(ngl, layers))
         is_moe = int(info.get("expert_count") or 0) > 0
-        vram = float(cfg.get("vram_gb") or 8.0) * (1 << 30)
+        vram = float(cfg.get("vram_gb") or 0.0) * (1 << 30)
         ram = float(cfg.get("ram_gb") or 32.0) * (1 << 30)
         w_vram = fsize * (ngl / layers) * (0.3 if is_moe else 1.0)
         kv_vram = max(0.5 * (1 << 30), vram - w_vram - 0.6 * (1 << 30))

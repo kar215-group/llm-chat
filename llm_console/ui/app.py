@@ -91,6 +91,8 @@ class App(ChatMixin, ImageGenMixin, VideoGenMixin, ServiceMixin, ModelsMixin, Se
         # 靠它决定"用户级那个按钮还要不要显示"（已经信任就不显示）。
         self._codesign = {"started": False}
         self._codesign_info = None
+        # 性能分级（2026-10-06 W）：启动前"必闪退"警告每模型只弹一次的登记（本进程内）
+        self._perf_warned = set()
         self._diag_win = None         # 「诊断」次级页面（设置 → 关于与诊断 的按钮开的，放路径与一键诊断）
         self._upd_win = None          # 「发现新版本」次级窗口（自替换更新，2026-10-05；单实例）
         self._alias_tried = set()    # （备用）已尝试向模型请求别名的模型
@@ -239,24 +241,39 @@ class App(ChatMixin, ImageGenMixin, VideoGenMixin, ServiceMixin, ModelsMixin, Se
 
         def work():
             try:
-                info = codesign.read_cert()
+                info, why = codesign.read_cert_detail()
             except Exception:            # 兜底：异常不许穿回 UI 线程（坑 54）
-                info = None
-            self._ui_q.put(lambda: self._codesign_notify(info))
+                info, why = None, ""
+            self._ui_q.put(lambda: self._codesign_notify(info, why))
 
         threading.Thread(target=work, daemon=True).start()
 
-    def _codesign_notify(self, info):
+    def _codesign_notify(self, info, why=""):
         """后台结果回主线程：先记下状态，再决定要不要问（问完记账，不再打扰）。"""
         self._codesign_info = info       # 可能为 None（没签名 / 读不出来）
-        if not info or info.get("trusted"):
-            return                       # 没签名 / 已经信任：什么都不用做，也不记账
+        if not info:
+            if why:
+                # 这台机器**判断不了**（PowerShell 被禁 / 策略拦截）也得说出来 ——
+                # 一律静默的话，用户既收不到询问、也收不到"判不了"，两条路全断（2026-10-06）。
+                # 只留一行说明，不弹窗：环境受限的机器多半也弹不出什么结果。
+                self._append("[签名] 这台机器判断不了本程序的签名状态（%s）。"
+                             "想手动处理：设置 → 关于与诊断 → 连点 5 下版本号，"
+                             "在开发者选项里操作。\n" % why, "meta")
+            return                       # 没签名（why 为空）/ 读不出来：不问也不记账
+        if info.get("trusted"):
+            return                       # 已经信任：什么都不用做，也不记账
         if self.cfg.get("codesign_prompt"):
             return                       # 问过了（确认或取消都算）
         if self._closing:
             return
         self.cfg["codesign_prompt"] = True
-        config.save_config(self.cfg)     # 先记账：点"取消"同样不再问
+        remembered = config.save_config(self.cfg)     # 先记账：点"取消"同样不再问
+        if not remembered:
+            # 记账失败的出口（2026-10-06）：只读目录里"问过了"记不住，就会天天重弹。
+            # 至少把原因说明白 —— 信任动作本身写进系统证书库，与配置文件无关。
+            self._append("[签名] 配置写不进去（%s），这条询问记不住，下次启动还会再问。"
+                         "可在 设置 → 关于与诊断 →「诊断」里查原因。\n"
+                         % (config.write_error()[1] or "原因未知"), "meta")
         if not messagebox.askyesno(
                 "把本软件签名列入本机可信名单",
                 "当前本软件签名未进入本机可信名单，自动更新功能可能无法使用，"

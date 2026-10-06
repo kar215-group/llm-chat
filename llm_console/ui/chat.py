@@ -357,6 +357,9 @@ class ChatMixin:
             # 选中的模型与当前服务加载的不一致：自动换载，就绪后自动发送。
             # 对话历史保存在本程序里，每次请求都会全量携带——
             # 换模型不会丢失上下文，新模型能读到之前全部对话。
+            # 换载前过一遍"必闪退"档确认（2026-10-06）：点否就不动服务、输入原样保留。
+            if not self._confirm_fatal_perf(self.cfg["model"]):
+                return
             self._pending_text = text
             self.input.delete("1.0", "end")
             self._begin_svc()

@@ -6,6 +6,7 @@ import threading
 import time
 from tkinter import messagebox
 
+from ..core import modelreq
 from ..core.models import display_name
 from ..core.params import ctx_for, current_ngl, estimate_kv_gb
 from ..core.server import _reset_alive_cache, server_alive, server_process_alive, server_ready, start_server, stop_server
@@ -55,6 +56,28 @@ class ServiceMixin:
         self._serving_model = None
         self._render_status(False, False)
         self._append("[服务] 已停止，显存已释放。\n", "meta")
+
+    # ---- 性能分级（2026-10-06 W）：加入时的分级提示在 models_ui 扫描侧；
+    #      启动这条线只拦「必闪退」档（3 级），弹一次确认、可坚持继续 ----
+    def _confirm_fatal_perf(self, path, kind="text", files=None):
+        """启动 / 发送前的可运行性确认：评估当前配置带不带得动，3 级才弹窗。
+
+        每模型每进程只弹一次（`_perf_warned`）；评估不出来（读不到头 / 硬件没探到）
+        不拦 —— 缺件那些预检各自管各自的，这里只回答"装不装得下"。
+        """
+        try:
+            need = modelreq.assess(self.cfg, path, kind, files=files)
+            lvl = modelreq.grade(need, self.cfg.get("vram_gb") or 0,
+                                 self.cfg.get("ram_gb") or 0) if need else 0
+        except Exception:
+            return True
+        if lvl < modelreq.LEVEL_FATAL or not path or path in self._perf_warned:
+            return True
+        self._perf_warned.add(path)
+        return messagebox.askyesno(
+            "设备可能带不动这个模型",
+            "%s\n\n（%s）\n\n仍要继续吗？"
+            % (modelreq.LEVEL_TEXT[lvl], need["detail"]))
 
     # ---- 服务控制 ----
     def _begin_svc(self):
@@ -107,6 +130,8 @@ class ServiceMixin:
     def start_server_async(self, agent=False):
         if self._svc_busy or self._server_alive_flag:
             return
+        if not self._confirm_fatal_perf(self.cfg.get("model", "")):
+            return
         self._begin_svc()
         self._append("\n[服务] 正在启动 %s（GPU 层数 %d），加载约需十几秒到几分钟…\n"
                      % (display_name(self.cfg, self.cfg["model"]), current_ngl(self.cfg)), "meta")
@@ -146,6 +171,8 @@ class ServiceMixin:
 
     def restart_server(self, agent=False):
         if self._svc_busy:
+            return
+        if not self._confirm_fatal_perf(self.cfg.get("model", "")):
             return
         self._begin_svc()
         self._append("\n[服务] 正在重启（%s场景，应用最新服务参数）…\n"

@@ -10,7 +10,8 @@ import tkinter as tk
 from tkinter import ttk
 
 from ..core import cloudjobs, config, providers, sdprofile
-from ..core.media import build_img_cmd, resolve_img_files, resolve_img_model_path
+from ..core.media import (build_img_cmd, img_out_dir, resolve_img_files,
+                          resolve_img_model_path)
 from ..connection import cloud_media
 
 
@@ -49,6 +50,9 @@ class ImageGenMixin:
                          "  放进生图模型目录，或在 设置 → 本地模型 → 生图（sd.cpp） 的「配套文件」里指名。\n"
                          % (sdprofile.label_of(files["family"]), "、".join(missing)), "error")
             return
+        # "必闪退"档启动确认（2026-10-06）：摆在消费输入框之前，点否一个字都不丢（坑 133）
+        if not self._confirm_fatal_perf(diffusion, "image", files=files):
+            return
         try:
             steps = max(1, int(self.cfg.get("img_steps", 12) or 12))
         except Exception:
@@ -58,7 +62,7 @@ class ImageGenMixin:
             cfg_scale = float(self.cfg.get("img_cfg", 2.5) or 2.5)
         except Exception:
             cfg_scale = 2.5
-        outdir = os.path.join(sd, "output")
+        outdir = img_out_dir(self.cfg)   # <产物文件夹>/本地/image（2026-10-06 起）
         os.makedirs(outdir, exist_ok=True)
         out = os.path.join(outdir, time.strftime("img_%Y%m%d_%H%M%S") + ".png")
 

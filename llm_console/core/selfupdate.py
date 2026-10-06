@@ -42,6 +42,9 @@ _ASSET_SHAPE = re.compile(r"^llm-chat-.+-windows-x64\.zip$", re.IGNORECASE)
 # 旧版文件名后缀与"上次更新成功启动过"的哨兵（都贴在 exe 旁边，跟程序目录走）
 OLD_SUFFIX = ".updating"
 SENTINEL_SUFFIX = ".update-ok"
+# 跨进程更新闸的锁文件（同贴 exe 旁边）。锁的是文件里的一个字节，锁随进程死自动释放，
+# 所以"程序更新到一半崩了"不会留下一把永远打不开的死锁 —— 残留的只是个空文件。
+LOCK_SUFFIX = ".update-lock"
 
 SMOKE_TIMEOUT = 20          # 新版 --version 烟测的秒数上限（onefile 解包要一两秒，留足）
 
@@ -99,6 +102,12 @@ def find_download(channel, fetch=None, token=None, cache=None, repo=updater.REPO
         raise SelfUpdateError(
             "更新失败：线上版本 %s 没挂 Windows 安装包（%s），"
             "请到发布页手动下载。" % (updater.display_version(tag), repo))
+    size = 0
+    for a in latest.get("assets") or []:            # 资产大小给"磁盘还装不装得下"用
+        a = a or {}
+        if str(a.get("browser_download_url") or "") == url:
+            size = int(a.get("size") or 0)
+            break
     return {
         "tag": tag,
         "name": str(latest.get("name") or tag),
@@ -106,6 +115,7 @@ def find_download(channel, fetch=None, token=None, cache=None, repo=updater.REPO
         "notes": updater._notes(latest),
         "url": url,
         "digest": digest,
+        "size": size,
     }
 
 
@@ -121,9 +131,31 @@ def cleanup(path):
     engine_install.cleanup(path)
 
 
+def disk_ok(path, need_bytes):
+    """`path` 所在盘的剩余空间够不够 `need_bytes` → `(够吗, 剩余字节数)`。
+
+    zip 落 `%TEMP%`、解出的新 exe 进程序目录，**两处**都可能满 —— 满盘上更新
+    必然半途而废。查不出来（盘符怪 / 权限）一律当够：空间探测是提醒，
+    不许反过来把更新卡死在探测上。
+    """
+    try:
+        free = shutil.disk_usage(path).free
+    except Exception:
+        return True, 0
+    return free >= need_bytes, free
+
+
 def download_zip(url, dest, emit=None, stop_flag=None, digest="", retries=None):
     """把 zip 落到 `dest` → `(ok, why)`。续传 / 重试 / sha256 强校验 / 取消全在
-    `engine_install.download` 里，这里只是**转一手**：名字留在本模块，界面不用知道引擎。"""
+    `engine_install.download` 里，这里只是**转一手**：名字留在本模块，界面不用知道引擎。
+
+    ⚠ digest 拿不到就**拒装**（2026-10-06）：引擎包下坏了还能重装，程序自己的包
+    不带校验就换上去，"半个文件装上去比没装更糟"同样成立 —— 拿不到官方 sha256
+    时宁可让用户去发布页手动下，也不做无校验的自替换。
+    """
+    if not str(digest or "").strip():
+        return False, ("拿不到这个安装包的官方校验值（sha256），不敢自动更换程序。"
+                       "请到发布页手动下载。")
     kw = {} if retries is None else {"retries": retries}
     return engine_install.download(url, dest, emit=emit, stop_flag=stop_flag,
                                    digest=digest, **kw)
@@ -191,10 +223,12 @@ def smoke_test(exe_path, expected, timeout=SMOKE_TIMEOUT, runner=None):
         r = run([exe_path, "--version"], capture_output=True, timeout=timeout,
                 env=child_env())
     except Exception as e:
-        return False, "新版启动自检没跑起来（%s），不敢替换正在用的程序。" % e
+        return False, ("新版启动自检没跑起来（%s），不敢替换正在用的程序。"
+                       "请到发布页手动下载。" % e)
     if getattr(r, "returncode", 1) != 0:
-        return False, "新版启动自检失败（退出码 %s），不敢替换正在用的程序。" % (
-            getattr(r, "returncode", "?"),)
+        return False, ("新版启动自检失败（退出码 %s），不敢替换正在用的程序。"
+                       "请到发布页手动下载。" % (
+                           getattr(r, "returncode", "?"),))
     txt = ""
     for stream in (getattr(r, "stdout", None), getattr(r, "stderr", None)):
         txt += (stream or b"").decode("utf-8", "replace") if isinstance(
@@ -231,23 +265,120 @@ def _try_remove(path):
     return False
 
 
-def apply_update(new_exe, cur_exe):
+# ---------------------------------------------------------------- 跨进程闸与复核
+
+def try_lock(cur_exe):
+    """跨进程更新闸（2026-10-06）：同一时刻只许一个实例走「换 exe」这条链。
+
+    为什么必须有：PyInstaller onefile 首启解包要 1~3 秒，"双击没反应再双击一次"是常态
+    —— 两个实例都开着「发现新版本」窗口时，后点的会把先点那份**刚装好的新版**当旧版
+    改名（`.updating`），用户以为能退回的旧版就被换成了新版。
+
+    锁文件贴在 exe 旁边（`<exe>.update-lock`），锁住其中一个字节：拿到锁的实例握着它
+    走完 换 exe → 拉新 → 写哨兵；**进程无论怎么退（含崩溃 / 断电），OS 都会放锁**，
+    所以没有"陈锁卡死更新"这回事 —— 残留的至多是个空文件。
+
+    → `(fd, "")` 拿到了（用完必须 `release_lock`）；
+      `(None, "locked")` 已被别的实例握着；
+      `(None, 其他原因)` 锁文件建不了（多半目录写不进去 —— 让 apply_update 的预检去说人话）。
+    """
+    try:
+        fd = os.open(str(cur_exe) + LOCK_SUFFIX, os.O_CREAT | os.O_RDWR)
+    except Exception as e:
+        return None, str(e)
+    try:
+        if os.name == "nt":
+            import msvcrt
+            msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        return fd, ""
+    except Exception:
+        try:
+            os.close(fd)
+        except Exception:
+            pass
+        return None, "locked"
+
+
+def release_lock(fd, cur_exe):
+    """`try_lock` 的另一半：解锁、关掉、顺手删锁文件（删不掉就算了 —— 它只是个空文件）。"""
+    if fd is None:
+        return
+    try:
+        if os.name == "nt":
+            import msvcrt
+            msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(fd, fcntl.LOCK_UN)
+    except Exception:
+        pass
+    try:
+        os.close(fd)
+    except Exception:
+        pass
+    _try_remove(str(cur_exe) + LOCK_SUFFIX)
+
+
+def exe_stamp(path):
+    """当前 exe 的 (大小, 修改时间) 快照 —— 给 apply_update 做「装之前再核一遍」用。
+
+    窗口打开时记一份，动手前现读现比：另一个实例可能在你确认的这几分钟里已经把
+    程序换过了。读不出来返回 None（判不了就别拦更新）。
+    """
+    try:
+        st = os.stat(path)
+        return (st.st_size, st.st_mtime)
+    except Exception:
+        return None
+
+
+def stamp_changed(path, stamp):
+    """exe 现在的样子还和记下的一样吗。`stamp` 为 None（当初没记上）= 当没变。"""
+    return bool(stamp) and exe_stamp(path) != stamp
+
+
+def apply_update(new_exe, cur_exe, expect=None):
     """换 exe（改名腾位 → 复制新 exe）→ `(ok, why)`；失败时**已**尽力回滚。
 
-    每一步都留了退路：改名失败 = 旧程序原封不动（只多不吓人）；复制失败 = 当场把改名
-    改回去。走到返回 `(True, "")` 时，旧版在 `.updating`、新版已就位但**还没**启动 ——
+    每一步都留了退路：目录写不进去 / 程序已被别的实例换过 = 什么都不动就退出；
+    改名失败 = 旧程序原封不动（只多不吓人）；复制失败 = 当场把改名改回去。
+    走到返回 `(True, "")` 时，旧版在 `.updating`、新版已就位但**还没**启动 ——
     拉新是调用方的活（`launch`），因为它失败要走 `rollback` 而不是这里顺手一改。
+
+    `expect`（可选）是动手前 `exe_stamp(cur_exe)` 记下的快照：装之前再核一遍，
+    对不上 = 另一个实例已经换过了 —— 这一版就别再动（再换的话 `.updating` 里的
+    回滚副本会被换成新版，用户以为能退回的旧版就没了）。
     """
+    d = os.path.dirname(cur_exe) or None
+    try:
+        pfd, probe = tempfile.mkstemp(dir=d, prefix=".llmchat-upd-")
+        os.close(pfd)
+        os.remove(probe)
+    except Exception as e:
+        return False, ("程序所在文件夹写不进去（%s）。把它整个文件夹挪到可写的普通位置"
+                       "（别放在 C:\\Program Files 这类系统目录）再更新，"
+                       "或到发布页手动下载。" % e)
+    if stamp_changed(cur_exe, expect):
+        return False, ("本机程序文件已经被另一个窗口更新过了。请关闭本程序，"
+                       "重新打开就是新版；这次更新到此为止。")
     old = pending_old(cur_exe)
     _try_remove(old)            # 每次只留一代：先清上一代（删不掉也无妨，改名那步会兜住）
     try:
         os.replace(cur_exe, old)
     except Exception as e:
-        return False, ("改不动正在运行的程序（%s）。多半是杀毒软件在拦，"
-                       "请稍后重试，或到发布页手动下载。" % e)
+        return False, ("改不动正在运行的程序（%s）。可能是杀毒软件在拦，也可能是程序文件"
+                       "被别的窗口占用；请关掉其他本程序窗口后重试，或到发布页手动下载。" % e)
+    # 新版先落 `cur_exe + ".new"` 再**同目录原子改名**：复制中途断电最多留下半个 .new，
+    # 正位上要么没有、要么是完整的 —— 半份 exe 冒充程序那种最坏局面不再出现（2026-10-06）。
+    new_tmp = cur_exe + ".new"
     try:
-        shutil.copy2(new_exe, cur_exe)
+        shutil.copy2(new_exe, new_tmp)
+        os.replace(new_tmp, cur_exe)
     except Exception as e:
+        _try_remove(new_tmp)
         try:                                # 回滚：把旧版改回原名，一切照旧
             os.replace(old, cur_exe)
         except Exception:

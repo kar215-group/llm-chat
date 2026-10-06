@@ -30,7 +30,7 @@ CONFIG_PATH = os.path.join(APP_DIR, "gui_config.json")
 
 # 版本号：发版时改这一处（--selfcheck / --version 会打印它）。
 # GitHub Release 的 tag 要与它一致（tag 去掉开头的 v），Actions 工作流会做一致性校验。
-APP_VERSION = "1.0.6"
+APP_VERSION = "1.0.7"
 
 CFG_VERSION = 2
 
@@ -139,9 +139,25 @@ DEFAULT_CONFIG = {
     # 文本附件超预算时，是否让云端模型自己决定读哪一段（多花一次规划请求，默认关）
     "cloud_file_model_decides": False,
     # ---- 云端生图 / 生视频（二三期：走服务商原生接口，不走本地 sd-cli）----
-    # 产物 URL 只活 24 小时，所以成功判定是"文件已在本地"；目录留空 = <程序目录>/cloud_out/*
+    # 产物 URL 只活 24 小时，所以成功判定是"文件已在本地"；
+    # 目录留空 = <产物文件夹>/云端/{image,video}（产物文件夹见 output_dir）
     "cloud_img_dir": "",
     "cloud_vid_dir": "",
+    # ---- 产物文件夹（本地与云端生图 / 生视频共用的落地根，2026-10-06 W 定）----
+    # 留空 = <程序目录>/产物，里面按 本地 / 云端 × image / video 分四个子目录
+    # （本地生图 产物\本地\image、本地生视频 产物\本地\video、
+    #   云端生图 产物\云端\image、云端生视频 产物\云端\video）。
+    # 各链路单独填过时以显式值为准：云端的 cloud_img_dir / cloud_vid_dir、
+    # 本地的 img_output_dir / vid_output_dir（显式 > 派生）。
+    "output_dir": "",
+    # 本地生图 / 生视频各自的产物目录（设置 → 生图 / 生视频 → 高级参数）；留空 = 产物文件夹下的 本地/{image,video}
+    "img_output_dir": "",
+    "vid_output_dir": "",
+    # ---- 性能分级登记（2026-10-06 W）----
+    # 键 = 模型路径，值 = 上次评估的级别（0~3，见 core/modelreq.py）。扫描发现新模型时评估
+    # 一次、输出栏说一次；文件删掉后由扫描侧剪枝。手改服务参数里的显存/内存后想重新评估，
+    # 用「模型文件与引擎 → 全部重新计算」清空它。
+    "perf_reported": {},
     "cloud_img_size": "1024*1024",     # 界面按「宽x高」填，发出去前按各家写法换算
     "cloud_img_negative": "",
     "cloud_video_resolution": "",      # 空 = 不传该参数，用服务端默认（各家档位不一样）
@@ -220,6 +236,7 @@ STR_KEYS = ("models_dir", "host", "api_key", "reasoning_mode",
             "vid_audio_vae_file",
             "vid_backend", "vid_params_backend", "vid_extra_args",
             "vid_neg_prompt", "model_provider",
+            "output_dir", "img_output_dir", "vid_output_dir",
             "cloud_img_dir", "cloud_vid_dir", "cloud_img_size",
             "cloud_img_negative", "cloud_video_resolution", "cloud_video_ratio",
             "cloud_video_negative", "chat_log_dir")
@@ -319,8 +336,22 @@ def gen_api_key():
     return "sk-" + secrets.token_urlsafe(24)
 
 
+def output_root(cfg):
+    """产物文件夹的**根**：`output_dir` 优先，留空 = `<程序目录>/产物`。
+
+    本地与云端生图 / 生视频四条链路共用的落地根（2026-10-06 起），里面按
+    本地 / 云端 × image / video 分四个子目录。判据只写这一处，
+    媒体两侧（media.img_out_dir / media.vid_out_dir / cloud_media_dir）都问它。
+    相对路径按**程序目录**解析 —— 别让相对路径落进"当前工作目录"（坑 42 同族）。
+    """
+    d = str((cfg or {}).get("output_dir", "") or "").strip()
+    if not d:
+        return os.path.join(APP_DIR, "产物")
+    return d if os.path.isabs(d) else os.path.join(APP_DIR, d)
+
+
 def cloud_media_dir(cfg, kind):
-    """云端产物目录：配置项优先，留空回退 <程序目录>/cloud_out/{images,videos}。
+    """云端产物目录：配置项优先，留空回退 <产物文件夹>/云端/{image,video}。
 
     两条纪律：① 不写死盘符（坑 55，项目要分发）；② **不挂到 sd.cpp 下面**——
     云端这条路根本不启动本地引擎，别人没部署 sd.cpp 时也该能出图出片。
@@ -329,4 +360,5 @@ def cloud_media_dir(cfg, kind):
     d = str((cfg or {}).get(key, "") or "").strip()
     if d:
         return d
-    return os.path.join(APP_DIR, "cloud_out", "images" if kind == "image" else "videos")
+    return os.path.join(output_root(cfg), "云端",
+                        "image" if kind == "image" else "video")
