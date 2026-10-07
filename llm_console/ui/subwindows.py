@@ -376,8 +376,9 @@ class SubWindowMixin:
         win = tk.Toplevel(host)
         win.withdraw()          # 先藏起来，摆正了再显示（否则左上角闪一下）
         win.title("发现新版本")
-        win.geometry("560x430")
-        win.minsize(520, 380)
+        W, H = 620, 520         # 一版正式公告约 18 行，560x430 装不下（滚动条是兜底不是常态）
+        win.geometry("%dx%d" % (W, H))
+        win.minsize(560, 440)
         win.transient(host)
         self._upd_win = win
 
@@ -406,11 +407,35 @@ class SubWindowMixin:
 
         body = ttk.Frame(win)
         body.pack(side="top", fill="both", expand=True, padx=14, pady=(4, 4))
-        notes = tk.Text(body, height=7, font=("Microsoft YaHei UI", 9),
-                        state="disabled", wrap="word")
-        notes.insert("1.0", str(info.get("notes") or "") or "（这个 Release 没写说明）")
-        notes.configure(state="disabled")
-        notes.pack(side="top", fill="both", expand=True)
+        nfr = ttk.Frame(body)
+        nfr.pack(side="top", fill="both", expand=True)
+        notes = tk.Text(nfr, height=7, font=("Microsoft YaHei UI", 9), wrap="char")
+        notes_sb = ttk.Scrollbar(nfr, command=notes.yview)
+        notes.configure(yscrollcommand=notes_sb.set)
+        # 滚动条先 pack：Text 带 expand 会把整条 cavity 吃掉，后 pack 的滚动条只剩 1x1
+        notes_sb.pack(side="right", fill="y")
+        notes.pack(side="left", fill="both", expand=True)
+        notes.tag_configure("sec", font=("Microsoft YaHei UI", 8))
+
+        def _show_notes(txt):
+            """公告写进框里。小节名单独挂 `sec` 标签（比正文小一号）。
+
+            ⚠ `state="disabled"` 的 Text 会**静默吞掉** `insert`（坑 159）：先开写、
+            写完再关，顺序反了框就永远是空的。
+            """
+            lines = str(txt or "").split("\n")
+            notes.configure(state="normal")
+            notes.delete("1.0", "end")
+            for i, ln in enumerate(lines):
+                seg = ln + ("\n" if i + 1 < len(lines) else "")
+                if ln.strip() in updater.NOTE_SECTIONS:
+                    notes.insert("end", seg, "sec")
+                else:
+                    notes.insert("end", seg)
+            notes.configure(state="disabled")
+            notes.see("1.0")
+
+        _show_notes(info.get("notes") or "（这个 Release 没写说明）")
 
         bar_var = tk.DoubleVar(value=0.0)
         bar = ttk.Progressbar(body, maximum=100.0, variable=bar_var, length=320)
@@ -583,6 +608,8 @@ class SubWindowMixin:
                    updater.display_version(dl.get("tag") or tag),
                    dl.get("published") or "日期未知",
                    updater.channel_label(ch)))
+            if dl.get("notes"):
+                _show_notes(dl["notes"])    # 公告也得跟着换成实际要装的那一版
 
         def _start_download():
             state["stage"] = "download"
@@ -681,5 +708,5 @@ class SubWindowMixin:
 
         btn_go.configure(command=_go)
         btn_stop.configure(command=_stop)
-        widgets.center_on(win, host)
+        widgets.center_on(win, host, size=(W, H))   # 尺寸显式交给它，原因见坑 161
         return win

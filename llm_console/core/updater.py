@@ -373,18 +373,93 @@ def humanize_net(err, repo=REPO):
     return "检查更新失败：%s。%s" % (err, _MANUAL)
 
 
-# ---------------------------------------------------------------- 主入口
+# ---------------------------------------------------------------- 公告摘录
+
+# 「发现新版本」窗口里要显示的小节（`05` §6.2 那套版式；安装 / 注意两段不进窗口）
+NOTE_SECTIONS = ("功能更新", "问题修复", "使用优化")
+
+_HEAD = re.compile(r"^\s{0,3}(#{1,6})\s*(.+?)\s*$")
+_BULLET = re.compile(r"^(\s*)([-*+])\s+(.*)$")
+_DETAIL = re.compile(r"\s*——\s*|\s+—\s+")        # 「概述 —— 详情」的分隔
+_OTHER = object()          # 认得是小节、但不在显示名单里
+
+
+def _md(text):
+    """去掉行内 Markdown 记号（粗体、反引号），只留下读得下去的字。"""
+    return re.sub(r"\*\*(.+?)\*\*", r"\1", str(text or "")).replace("`", "").strip()
+
+
+def _summary(line):
+    """一条里的概述。
+
+    以粗体开头、且粗体后面就是分隔符（` —— ` / `：`）或没别的字了 —— 粗体本身就是概述；
+    否则概述算到第一个 ` —— ` 为止（`**设置页保存**误改 ngl —— 详情` 那种），
+    没写分隔符就整条都是概述（使用优化里的一句话）。
+    """
+    s = str(line or "").strip()
+    m = re.match(r"^\*\*(.+?)\*\*\s*(.*)$", s)
+    if m and (not m.group(2) or m.group(2)[0] in "—:："):
+        return _md(m.group(1))
+    d = _DETAIL.search(s)
+    return _md(s[:d.start()] if d else s)
+
+
+def _plain(body):
+    """整篇正文原样收进来（只剥标题记号、去空行）。"""
+    out = []
+    for ln in body.split("\n"):
+        s = re.sub(r"^\s{0,3}#{1,6}\s*", "", ln).rstrip()
+        if s.strip():
+            out.append(_md(s))
+    return "\n".join(out)
+
 
 def _notes(item):
-    """Release 说明摘前几行（整篇贴进对话框会让人读不下去）。"""
-    s = re.sub(r"^#{1,6}\s*", "", str((item or {}).get("body") or "").strip(), flags=re.M)
-    out, n = [], 0
-    for line in s.splitlines():
-        out.append(line)
-        n += len(line) + 1
-        if n >= 240:
-            break
-    return "\n".join(out).strip()
+    """Release 正文 → 公告框里那几行：开头一句话 + 三个小节各自的概述条目。
+
+    小节名单独成行（界面按 `NOTE_SECTIONS` 认出它们、用小一号的字）。三条取舍：
+
+    - 只取顶层列点的概述，` —— ` 之后的详情与缩进的子条都不进窗口；
+    - 小节里没有列点时（预发布版那句「修复了一些已知问题」）整段文字原样收进来；
+    - 认不出这套版式（hotfix 只有一句话、流水线那份默认正文）就整篇贴出来 ——
+      框带滚动条，宁长不空。
+    """
+    body = str((item or {}).get("body") or "").replace("\r\n", "\n").replace("\r", "\n")
+    intro, secs, cur = [], {}, None
+    for ln in body.split("\n"):
+        if not ln.strip():
+            continue
+        m = _HEAD.match(ln)
+        if m:
+            title = _md(m.group(2))
+            if len(m.group(1)) > 2:      # 小节内的三级标题只当排版，不换小节
+                continue                 # （换了会把后面该收的条目整段判没）
+            cur = title if title in NOTE_SECTIONS else _OTHER
+            if cur is not _OTHER:
+                secs.setdefault(title, [])
+            continue
+        if cur is None:
+            intro.append(_md(ln))
+        elif cur is not _OTHER:
+            secs[cur].append(ln)
+
+    out, hit = [_md(x) for x in intro if x.strip()], False
+    for name in NOTE_SECTIONS:
+        lines = secs.get(name)
+        if not lines:
+            continue
+        top = [m for m in map(_BULLET.match, lines) if m and not m.group(1)]
+        items = [_summary(m.group(3)) for m in top]      # 缩进的子条属详情，不收
+        if not items:                      # 整段就是一句话，没有列点
+            items = [_md(ln) for ln in lines if ln.strip()]
+        if items:
+            hit = True
+            out.append(name)
+            out.extend("- " + x for x in items)
+    return "\n".join(out) if hit else _plain(body)
+
+
+# ---------------------------------------------------------------- 主入口
 
 
 def check_update(current, channel=CHANNEL_STABLE, fetch=None, timeout=TIMEOUT,

@@ -1066,8 +1066,12 @@ class ScrollPage(object):
         self.canvas.yview_moveto(max(0.0, min(1.0, frac)))
 
 
-def center_on(win, host=None):
+def center_on(win, host=None, size=None):
     """把这个 Toplevel 摆到 `host`（默认它的父窗口）水平居中、垂直略偏上，然后显示它。
+
+    `size=(宽, 高)`：**调用方显式定过窗口尺寸时把它传进来**。窗口还没映射时
+    `winfo_width()` 与 `geometry()` 都还是 `1x1`（坑 161），那时读回来的尺寸是假的，
+    原样写回去会被 `minsize` 夹成最小窗，我们显式设过的尺寸也被这一次写覆盖掉了。
 
     为什么需要：Tk 的 Toplevel **不给位置就摆在屏幕左上角**，于是「API Key」「选择模型」
     「诊断」「成本预估算」「管理本地模型」这一排子窗口全叠在左上角，跟它们所属的设置页
@@ -1083,22 +1087,26 @@ def center_on(win, host=None):
     host = host or win.master
     try:
         win.update_idletasks()
-        # ⚠ `withdraw()` 状态下 `winfo_width()` 返回 **1**，直接退回 `winfo_reqwidth()`
-        # 会拿到"内容的自然尺寸"（一个标签只有几十 px），而不是我们显式设定的窗口大小 ——
-        # 那样居中算出来是错的。所以先试 winfo_width，不成（<=1）就从 geometry 串里
-        # 把显式设定的大小读回来；连 geometry 都没设（API Key 那种靠内容定尺寸的）
-        # 才用 reqwidth，那正是它该用的值。
-        w, h = win.winfo_width(), win.winfo_height()
-        if w <= 1 or h <= 1:
-            size = win.geometry().split("+")[0]          # "400x300"
-            if "x" in size:
-                sw, sh = size.split("x", 1)
-                w, h = int(sw), int(sh)
-            else:
-                w, h = win.winfo_reqwidth(), win.winfo_reqheight()
+        # ⚠ `withdraw()` 状态下 `winfo_width()` 与 `geometry()` 都可能还是 **1x1**
+        # （Tk 还没把那次 geometry 请求落到窗口上），这时读回来的尺寸是假的：
+        # 原样写回去等于请求一个 1x1 的窗，被 `minsize` 夹成最小窗，调用方显式设过的
+        # 尺寸也被这一次写覆盖掉（坑 161）。所以：`size` 传了就用它；否则先试
+        # `winfo_width`，再试 geometry 串，都拿不到（还是 1x1）就**只写位置**，
+        # 尺寸留给调用方那次请求生效。用 reqwidth 只为把位置算得接近。
+        w, h = size if size else (win.winfo_width(), win.winfo_height())
+        geom = win.geometry().split("+")[0]              # "400x300"
+        if (w <= 1 or h <= 1) and "x" in geom and geom != "1x1":
+            sw, sh = geom.split("x", 1)
+            w, h = int(sw), int(sh)
+        known = w > 1 and h > 1
+        if not known:
+            w, h = win.winfo_reqwidth(), win.winfo_reqheight()   # 只拿来算位置
         x = host.winfo_rootx() + max(0, (host.winfo_width() - w) // 2)
         y = host.winfo_rooty() + max(0, (host.winfo_height() - h) // 3)
-        win.geometry("%dx%d+%d+%d" % (w, h, x, y))
+        # 尺寸没把握时**只写位置**：写 "1x1+x+y" 会被 minsize 夹成最小窗，
+        # 并把调用方那次 geometry 请求覆盖掉（坑 161）
+        win.geometry(("%dx%d+%d+%d" % (w, h, x, y)) if (size or known)
+                     else ("+%d+%d" % (x, y)))
     except Exception:
         pass               # 宿主已销毁 / 还没映射：位置摆不了就不摆，别为它炸出调用方
     try:
