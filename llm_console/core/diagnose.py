@@ -398,7 +398,7 @@ def run_checks(cfg, proxy_running=False, server_running=False, probe_gpu=True):
         out.append(_c("python", GROUP_ENV, OK if sys.version_info[:2] >= (3, 9) else FAIL,
                       "Python 版本（源码运行）", v,
                       "" if sys.version_info[:2] >= (3, 9) else "需要 Python 3.9 及以上。"))
-        # core 层**不许 import tkinter**（分层规矩 + 零依赖打包的口径），所以这里只查模块在不在位，
+        # core 层**不许 import tkinter**（分层规矩 + 轻量打包的口径），所以这里只查模块在不在位，
         # 不去 import 它。真判"能不能建窗口"不需要这条：这份报告本身就画在 Tk 里，
         # 用户能看到它 = Tk 起得来；Tk 版本在 设置 → 关于与诊断 →「诊断」那页显示。
         try:

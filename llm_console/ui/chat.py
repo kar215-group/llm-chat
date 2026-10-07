@@ -17,6 +17,7 @@ from ..connection import cloud as cloud_conn
 from ..connection import cloud_media
 from ..connection import stream as stream_conn
 from ..connection.stream import stream_worker
+from . import imgdecode
 from . import widgets
 
 
@@ -301,19 +302,16 @@ class ChatMixin:
     def _tile_preview(self, kind, path, px):
         """瓷砖预览 → (PhotoImage 或 None, 是否占位图)。
 
-        画得出来的图做真缩略图（整数倍 subsample，不做劣质缩放）；画不出来的图
-        （JPEG / WEBP / BMP，坑 132）与文档各用一张内嵌样图（ui/file_icons，
-        开发机上由 tools/make_file_icons.py 烧进去），条上不再出现"没有预览"的字样。
+        经 imgdecode.photo：Pillow 优先（全部格式 LANCZOS 真缩略图），缺席或
+        画不出来（JPEG / WEBP / BMP，坑 132）退 Tk 原生；再不行用一张内嵌样图
+        兜底（ui/file_icons，开发机上由 tools/make_file_icons.py 烧进去），
+        条上不再出现"没有预览"的字样。
         """
         if kind == "image":
-            try:
-                img = tk.PhotoImage(file=path)
-                f = max(1, int(round(max(img.width(), img.height()) / float(px))))
-                if f > 1:
-                    img = img.subsample(f, f)
+            img = imgdecode.photo(path, px)
+            if img is not None:
                 return img, False
-            except Exception:
-                return self._file_icon("IMG", px), True
+            return self._file_icon("IMG", px), True
         return self._file_icon("DOC", px), False
 
     def _file_icon(self, which, px):
@@ -493,22 +491,21 @@ class ChatMixin:
 
     def _append_image(self, path, max_w=320):
         """在聊天流末尾内嵌一张缩略图（normal 状态下插入）。"""
+        img = imgdecode.photo(path, max_w)
+        if img is None:
+            # 只是"这个格式画不出来"（Pillow 缺席 / 文件损坏），**不是发送失败**：
+            # 图已经按请求发出去了，所以这里用 meta 说一句，别标成红色错误（坑 132）
+            self._append("（这张图在对话里不显示预览：%s）\n" % os.path.basename(path),
+                         "meta")
+            return
         try:
-            img = tk.PhotoImage(file=path)
-            f = max(1, round(img.width() / float(max_w)))
-            if f > 1:
-                img = img.subsample(f, f)
             self._remember_photo(path, img)
             self.chat.configure(state="normal")
             self.chat.image_create("end", image=img)
             self.chat.insert("end", "\n", "meta")
             self.chat.see("end")
+        finally:
             self.chat.configure(state="disabled")
-        except Exception:
-            # 只是"这个格式画不出来"（Tk 只认 PNG/GIF），**不是发送失败**：
-            # 图已经按请求发出去了，所以这里用 meta 说一句，别标成红色错误（坑 132）
-            self._append("（这张图在对话里不显示预览：%s）\n" % os.path.basename(path),
-                         "meta")
 
     # ---- 文本渲染 ----
     def _append(self, text, tag):

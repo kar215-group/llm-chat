@@ -13,6 +13,7 @@ from ..core import capability, cloudjobs, config, providers, sdprofile
 from ..core.media import (build_img_cmd, img_out_dir, plan_ref_images,
                           resolve_img_files, resolve_img_model_path)
 from ..connection import cloud_media
+from . import imgdecode
 
 
 class ImageGenMixin:
@@ -366,17 +367,13 @@ class ImageGenMixin:
             # 布局：提示词行 → 进度行（原位替换）→ 图片独立成行，按钮在图片右侧同行
             self.chat.configure(state="normal")
             try:
-                # 缩略图单独一层 try：Tk 只认 PNG / 静态 GIF，云端产物若是 .jpg 就画不出来
-                # ——那只是"没有预览"，**已保存 + 两个打开按钮照给**（坑 132）
+                # 缩略图单独一层：imgdecode.photo 不抛（Pillow 优先，Tk 8.6 画不出
+                # JPEG / WEBP / BMP、或 Pillow 缺席时回 None）——那只是"没有预览"，
+                # **已保存 + 两个打开按钮照给**（坑 132）
                 thumb = None
-                try:
-                    img = tk.PhotoImage(file=out)
-                    factor = max(1, round(img.width() / 500.0))
-                    if factor > 1:
-                        img = img.subsample(factor, factor)
+                img = imgdecode.photo(out, 500)
+                if img is not None:
                     thumb = self._remember_photo(out, img)     # 持引用防 GC（按路径为键）
-                except Exception:
-                    thumb = None
                 self.chat.insert("end", "\n", "meta")      # 图片前补换行：独立成行
                 if thumb is not None:
                     self.chat.image_create("end", image=thumb)

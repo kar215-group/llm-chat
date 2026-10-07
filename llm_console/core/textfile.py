@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """llm_console.core.textfile — 文本文件附件：读取、编码回退、.docx 提取、按 token 预算折行。
 
-只用标准库（本项目的零第三方依赖铁律）。老的 .doc（Word 97 二进制）与 .pdf 需要真正的
+只用标准库（本项目的第三方依赖只有图片解码的 Pillow，见 ui/imgdecode）。老的 .doc（Word 97 二进制）与 .pdf 需要真正的
 解析器，这里明确不支持并提示"另存为 .txt / .docx"，不做半吊子提取——那会喂给模型一堆乱码。
 """
 
@@ -104,7 +104,8 @@ def read_document(path):
     k = kind_of(path)
     if k == "refused":
         return {"ok": False, "name": name,
-                "error": ("暂不支持直接读取 %s（需要专门的解析器，本项目坚持零第三方依赖）。"
+                "error": ("暂不支持直接读取 %s（需要专门的解析器，不在本项目极少量"
+                          "第三方依赖的清单内）。"
                           "请用 %s 另存为 .docx 或 .txt 后再发。"
                           % (os.path.splitext(name)[1], "Word/PDF 的「另存为」"))}
     if k not in ("text", "docx"):

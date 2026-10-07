@@ -1,8 +1,8 @@
 # LLM Chat 工作台
 
-一个**零第三方依赖**的桌面工作台：把本地 llama.cpp 对话、sd.cpp 生图/视频、以及云端
-API 调大模型收进同一个窗口，只用 Python 标准库 + Tkinter 写成，不需要任何其他依赖，
-本身也不需要任何网络连接或后台守护进程。
+一个**轻量化**桌面工作台：把本地 llama.cpp 对话、sd.cpp 生图/视频、以及云端
+API 调大模型收进同一个窗口，主体只用 Python 标准库 + Tkinter 写成，除图片解码等极少量辅助外
+没有第三方依赖，不需要网络连接或后台守护进程。
 
 > 本仓库**只包含工作台代码**。推理引擎、模型权重、云端密钥都不在仓库里，
 > 需要按下面的《你需要自己准备的东西》各自获取。
@@ -62,6 +62,8 @@ API 调大模型收进同一个窗口，只用 Python 标准库 + Tkinter 写成
 
 - **Windows**（按 Windows 设计与验证；停止服务、显存探测等少量调用用了 `taskkill` / `nvidia-smi`，跨平台需自行适配，有适配Linux的打算但是现在作者没精力，再说）
 - **Python 3.9+**，且带 Tkinter（python.org 的 Windows 安装包默认自带；部分精简版 Python 需要单独装 `tkinter`）
+- 可选 **Pillow**（`python -m pip install pillow`）：有了它，JPEG / WEBP / BMP 附件在条上显示真实缩略图；
+  没有它退回占位图标（不影响发送）。exe 版已内置
 - 显存 / 内存 / 磁盘需求取决于你选的模型与档位
 
 
@@ -185,20 +187,26 @@ tools/deploy_llamacpp.sh     取 llama.cpp 引擎的脚本（参数化）
 不打包也能用（`python llama_gui.py` 就是完整程序）。想要一个双击即开的 `llm-chat.exe`：
 
 ```bash
-python -m pip install "pyinstaller==6.21.0"
+python -m pip install "pyinstaller==6.21.0" "pillow==12.3.0"
 python -m PyInstaller --noconfirm --clean --onefile --windowed --name llm-chat \
+  --additional-hooks-dir tools/pyinstaller_hooks \
   --distpath dist --workpath build/work --specpath build llama_gui.py
 ```
 
-- 产物是**界面程序**（约 12MB），推理引擎与模型权重仍然要按上面的表格自己准备；
+- 产物是**界面程序**（约 14MB），推理引擎与模型权重仍然要按上面的表格自己准备；
   推荐把 `llm-chat.exe` 直接放进 `llama-server.exe` 所在的那一层目录 —— 配置默认按
   "与 exe 同目录"来找引擎和 `models/`，`gui_config.json` / `secrets.json` 也生成在那儿。
+- `tools/pyinstaller_hooks/` 是精简版 PIL 打包钩子：只把图片解码需要的部件收进 exe
+  （实测 14.2MB；不裁剪会连带 numpy 全家与 AVIF 等解码器涨到 32MB）。改过钩子或升级
+  Pillow 后核对一下：`pyi-archive_viewer -l dist/llm-chat.exe` 里 PIL 只应有
+  `_imaging` / `_imagingmath` / `_webp`，看到 `numpy` 或 `_avif` 就是钩子被绕过了。
 - 自检：`llm-chat.exe --selfcheck`（退出码 0 = 打包路径与内置服务商都正常）、`--version`。
 - exe 带**自签名**证书；没把它列入信任的机器，SmartScreen 第一次仍可能拦一下：「更多信息」→「仍要运行」。
 
 ## 第三方与许可
 
 - 本仓库只是工作台代码，不含模型权重与引擎二进制。
+- **Pillow**（部分）：HPND 许可（类 MIT 宽松许可）。
 - **llama.cpp**：MIT；其 CUDA 发行包随附的 libomp 为 Apache-2.0 with LLVM exception。
 - **sd.cpp（stable-diffusion.cpp）**：见该项目仓库声明的许可。
 - **模型权重**：各自遵循其在发布平台上的条款，商用前请逐个确认。

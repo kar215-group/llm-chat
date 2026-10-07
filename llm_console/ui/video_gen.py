@@ -355,7 +355,7 @@ class VideoGenMixin:
             self._append("────────────────\n", "meta")
             return
         if rc == 0 and out and os.path.isfile(out):
-            # 视频无法内嵌显示（tk.PhotoImage 只认 PNG/静态 GIF，且项目坚持零第三方依赖），
+            # 视频无法内嵌显示（tk.PhotoImage 只认 PNG/静态 GIF，视频帧也解不出来），
             # 所以结果形态与生图对齐但换成按钮行：聊天流里给位置 + 两个入口
             self.chat.configure(state="normal")
             try:

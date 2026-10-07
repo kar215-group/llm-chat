@@ -44,6 +44,9 @@ env:
   # 找不到就直接失败并列出目录，不会把坏包推到 Release 上。
   PY_VERSION: "3.12"
   PYINSTALLER_VERSION: "6.21.0"
+  # 第一个运行期第三方依赖（2026-10-07 W 定「轻量、低第三方依赖」）：只用于
+  # 图片解码（ui/imgdecode.py，懒加载）。锁版本保证打包产物可复现。
+  PILLOW_VERSION: "12.3.0"
 
 jobs:
   build:
@@ -59,10 +62,11 @@ jobs:
         with:
           python-version: ${{ env.PY_VERSION }}
 
-      - name: 装 PyInstaller
+      - name: 装 PyInstaller 与 Pillow
         run: |
           python -m pip install --upgrade pip
           python -m pip install "pyinstaller==${{ env.PYINSTALLER_VERSION }}"
+          python -m pip install "pillow==${{ env.PILLOW_VERSION }}"
 
       - name: 校验 tag 与 APP_VERSION 一致
         if: startsWith(github.ref, 'refs/tags/v')
@@ -123,9 +127,18 @@ jobs:
           # 然后 FileNotFoundError（本地实测）。
           ICON=$(python -c "import os; print(os.path.abspath(os.path.join('llm_console','ui','app.ico')))")
           echo "图标 = $ICON"
+          # 精简 PIL 钩子（覆盖内置 hook-PIL）：只收 ui/imgdecode 用到的解码部件，
+          # _avif/_imagingft/_imagingcms 等大件不进包。同 --icon 一样给绝对路径。
+          HOOKS=$(python -c "import os; print(os.path.abspath('tools/pyinstaller_hooks'))")
+          if [ ! -f "$HOOKS/hook-PIL.py" ]; then
+            echo "::error::缺少 tools/pyinstaller_hooks/hook-PIL.py"
+            exit 1
+          fi
+          echo "hooks = $HOOKS"
           python -m PyInstaller --noconfirm --clean \
             --onefile --windowed --name "$APP_NAME" \
             --icon "$ICON" \
+            --additional-hooks-dir "$HOOKS" \
             --distpath dist --workpath build/work --specpath build \
             --add-data "$TCLDIR;_tcl_data" --add-data "$TKDIR;_tk_data" \
             llama_gui.py
