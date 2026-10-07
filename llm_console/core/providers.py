@@ -391,9 +391,30 @@ def supports_media(p, kind):
 #   还回显 input_image_count=1 / rewrite_status=success → 这条是真正的"底图重绘"。
 #   MiniMax 的 subject_reference 官方定位就是**主体/角色参考**（type 只有 character 一种），
 #   喂条纹图它直接生成一个蓝紫夜景的人像 → 图被"用"了，但用的不是底图那条语义。
+#
+# 2026-10-06 W 给的新事实：**两家两种模式都支持**（此前这里只登记了各自那一种默认档）。
+# 上面那段真机结论仍然成立 —— 它说的是"各自**默认**那一档发出去是什么语义"，
+# 不等于另一档不支持。所以拆成两张表：
+#   REF_DEFAULT_MODE  这一家**默认**走哪一档（回显与不选时的行为，= 2026-10-01 实测那档）
+#   REF_MODES         这一家**支持**哪几档（用户可选的范围）
+# ⚠ 两档各自对应哪个请求字段、以及 MiniMax 那一档有没有与默认档不同的入参形状，
+#   **尚未真机确认** —— 已登记 `99-待确认规则清单`，确认前不把任何一档说成实测。
 REF_IMAGE_APIS = (MEDIA_ALIYUN, MEDIA_MINIMAX)
-REF_EDIT_APIS = (MEDIA_ALIYUN,)          # 参考图 = 底图重绘
-REF_SUBJECT_APIS = (MEDIA_MINIMAX,)      # 参考图 = 主体 / 角色一致性
+REF_EDIT_APIS = (MEDIA_ALIYUN,)          # 默认档 = 底图重绘
+REF_SUBJECT_APIS = (MEDIA_MINIMAX,)      # 默认档 = 主体 / 角色一致性
+# 模式标识与 `capability.MODE_*` 同一套字面量（那边是权威，这里不反向 import 免得成环；
+# 一致性由 `_selftest/test_cloud_ref_image.py` 断言钉住）。
+REF_MODE_EDIT = "edit"
+REF_MODE_SUBJECT = "subject"
+REF_MODES = {
+    MEDIA_ALIYUN: (REF_MODE_EDIT, REF_MODE_SUBJECT),
+    # ⚠ **只有主体参考一档**（2026-10-06 真机实测，`D:\tmp\ref_verify\`）：官方页的
+    # `ImageGenerationReq` 只有 `subject_reference` 一个输入图字段，`type` 仅 `character`＝人像，
+    # 没有任何底图重绘入参。实测喂四格色块图 + "把色块改成蓝紫、位置不变"，出来的是
+    # **一张人像**（把"四个色块"理解成左右色调分区），布局没保住 → 改不了图。
+    # 所以别把 subject_reference 当成两档通用的入口 —— 选了 edit 会被 preflight 拦下。
+    MEDIA_MINIMAX: (REF_MODE_SUBJECT,),
+}
 
 
 def supports_ref_image(p):
@@ -404,13 +425,25 @@ def supports_ref_image(p):
     return media_api(p) in REF_IMAGE_APIS
 
 
+def ref_image_modes(p):
+    """这一家**支持**哪几档模式（用户可选的范围）。没登记原生协议的 → 空元组。
+
+    问它判"能不能选"，`ref_image_mode()` 判"默认是哪一档"，两件事别混。
+    """
+    return REF_MODES.get(media_api(p), ())
+
+
+def supports_ref_mode(p, mode):
+    return str(mode or "") in ref_image_modes(p)
+
+
 def ref_image_mode(p):
-    """参考图在这一家到底是什么语义："edit"=底图重绘，"subject"=主体/角色参考。
+    """默认档：这一家不选模式时按哪一档发（2026-10-01 真机实测的那一档）。
 
     回显与提示都问它。写成两种而不是"都叫图生图"：把 MiniMax 的角色参考说成底图重绘，
     用户会以为出来的是同一张图换了个色调。
     """
-    return "subject" if media_api(p) in REF_SUBJECT_APIS else "edit"
+    return REF_MODE_SUBJECT if media_api(p) in REF_SUBJECT_APIS else REF_MODE_EDIT
 
 
 

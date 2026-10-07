@@ -17,10 +17,11 @@ class VideoGenMixin:
     """App 的聊天流内生视频职责（Mixin）；self._xxx 在运行时经 MRO 解析。"""
 
     # ---- 聊天流内生视频（与生图同一套形态：进度原位刷新、可取消、结果行进对话流）----
-    def _start_chat_video(self, prompt, ref_img=None):
+    def _start_chat_video(self, prompt, ref_img=None, doc=None):
         # 云端生视频走异步任务（三期）：提交 → 轮询 → 下载，完全不碰本地引擎。
+        # doc = 文本附件：回显后并进提示词再发（W 2026-10-07 裁决，见 chat._doc_merge）。
         if providers.is_cloud(self.cfg):
-            return self._start_cloud_video(prompt)
+            return self._start_cloud_video(prompt, doc=doc)
         sd = self.cfg.get("sd_dir", "")
         cli = os.path.join(sd, "sd-cli.exe")
         if not os.path.isfile(cli):
@@ -56,6 +57,12 @@ class VideoGenMixin:
             cfg_scale = float(self.cfg.get("vid_cfg", 5.0) or 5.0)
         except Exception:
             cfg_scale = 5.0
+        # 种子跟着设置页的 vid_seed 走（-1 = 随机）。不用 `or -1` 兜底：0 是合法种子，
+        # 会被 falsy 判断吞成随机（与本地/云端生图路径同一教训）。
+        try:
+            seed = int(self.cfg.get("vid_seed", -1))
+        except Exception:
+            seed = -1
         size = str(self.cfg.get("vid_size", "512x512")).strip() or "512x512"
         if "x" not in size.lower():
             size = "512x512"
@@ -71,6 +78,7 @@ class VideoGenMixin:
         self.input.delete("1.0", "end")
         self.clear_attachment()
         self._append("\n【你】\n" + prompt + "\n", "user")
+        prompt = self._doc_merge(prompt, doc)
         if ref_img and os.path.isfile(ref_img):
             self._append_image(ref_img, max_w=320)
             self._append("[图生视频] 首帧：%s（引擎会自动裁剪缩放到 %s）\n"
@@ -90,7 +98,7 @@ class VideoGenMixin:
         self._stop_flag = threading.Event()
         self._set_busy_ui(True)
         cmd = build_video_cmd(self.cfg, prompt, out, files, frames, fps, size,
-                              steps, cfg_scale, -1, ref_img=ref_img)
+                              steps, cfg_scale, seed, ref_img=ref_img)
         # 每次任务留一份完整引擎日志（与产物同名 + .log）：命令行 + 引擎原话 + 退出码
         self._vid_log = out + ".log"
         self._cloud_vid = False
@@ -151,7 +159,7 @@ class VideoGenMixin:
                              providers.media_price_note(provider, providers.KIND_VIDEO,
                                                         dur, model)))
 
-    def _start_cloud_video(self, prompt):
+    def _start_cloud_video(self, prompt, doc=None):
         provider = providers.current_provider(self.cfg)
         sp = providers.split_cloud_id(self.cfg.get("model", ""))
         model = sp[1] if sp else ""
@@ -172,6 +180,7 @@ class VideoGenMixin:
         self.input.delete("1.0", "end")
         self.clear_attachment()
         self._append("\n【你】\n" + prompt + "\n", "user")
+        prompt = self._doc_merge(prompt, doc)
         gen, q, stop = self._cloud_begin("video")
         self._cloud_pid = str(provider["id"])
         self._vid_out = out
@@ -190,8 +199,10 @@ class VideoGenMixin:
         `tid` 非空 = 从台账取回旧任务，**不再提交一次**——重复提交就是重复扣钱。
         """
         def _int(key, dft):
+            # 不用 `or dft`：0 是 vid_seed 的合法值，falsy 判断会把它吞成默认
+            v = self.cfg.get(key, dft)
             try:
-                return int(self.cfg.get(key, dft) or dft)
+                return int(v) if v not in (None, "") else dft
             except Exception:
                 return dft
         log_path = dest + ".log"

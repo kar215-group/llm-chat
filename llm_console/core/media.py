@@ -193,8 +193,29 @@ def resolve_img_files(cfg, diffusion_path=None, family=None):
     return files
 
 
+def plan_ref_images(refs, mode):
+    """带图两档的最终取舍 → `(used, dropped, note)`。**在 Popen 之前**算好。
+
+    命令行组装与界面回显共用这一份判断，所以"发了几张"和"说了几张"不可能对不上。
+
+    · `subject` 主体参考 → `-r/--ref-image`，`--help` 写明 *can be used multiple times* →
+      多张全部交出去。
+    · `edit` 底图重绘 → `-i/--init-img <string>` 是**单值**入口 → 只认第一张，多出来的
+      如实报数，不静默丢（静默丢图是这类 bug 最难查的一种）。
+    """
+    paths = [p for p in (refs or []) if p and os.path.isfile(p)]
+    if not paths:
+        return [], 0, ""
+    if str(mode or "") == sdprofile.EDIT_MODE_REF:
+        return paths, 0, ""
+    if len(paths) > 1:
+        return paths[:1], len(paths) - 1, "底图重绘一次只认一张，多出来的没送进去"
+    return paths, 0, ""
+
+
 def build_img_cmd(cfg, prompt, out_path, steps, size, diffusion_path, cfg_scale, seed,
-                  init_img=None, vae=None, llm=None, family=None, files=None):
+                  init_img=None, vae=None, llm=None, family=None, files=None,
+                  ref_mode="", ref_images=None):
     """组装 sd-cli 生图命令行（形状由模型族决定，参数值仍来自配置）。
 
     Qwen-Image 这条链路保持改造前的逐字顺序：
@@ -253,32 +274,57 @@ def build_img_cmd(cfg, prompt, out_path, steps, size, diffusion_path, cfg_scale,
     args += ["--steps", str(steps), "-W", w, "-H", h,
              "-s", str(seed), "-p", prompt, "-o", out_path]
 
-    if init_img and os.path.isfile(init_img):
-        edit = prof.get("edit", "init")
-        if edit == "ref":
-            # Flux Kontext / MiniMax Ref2VA 这类"参考图"模型：-r 可重复给
-            args += ["-r", init_img]
+    # 带图的两档模式：`edit` 底图重绘走 -i（单张），`subject` 主体参考走 -r（可重复给）。
+    # `ref_mode` 留空 = 按这一族的默认档（`edit` 字段），所以实测链路的 argv 逐字不变。
+    _refs = [p for p in (list(ref_images or []) + ([init_img] if init_img else []))
+             if p and os.path.isfile(p)]
+    if _refs:
+        _mode = str(ref_mode or "").strip() or prof.get("edit", sdprofile.EDIT_MODE_INIT)
+        _used, _dropped, _note = plan_ref_images(_refs, _mode)
+        # 视觉投影器：**两档共用，别只挂在 -i 那条路上**。qwen-image 这类 LLM 编码器家族
+        # 不配 mmproj 就"读不懂图" —— 实测（2026-10-06，qwen_image_2.1-Q5_0 + Qwen3VL-8B）：
+        # `-r` 不给 --llm_vision → 引擎报 "no vision weights detected" 并在 5.2s 内 rc=1；
+        # 同一命令补上 --llm_vision → rc=0、出图 1.98MB（355s）。所以它跟"用哪个参数传图"无关。
+        # `-i` 那条路的 argv 与实测链路逐字不变（位置也仍在 -i 之前），自检钉住。
+        vis = str(files.get("llm_vision") or "")
+        if prof.get("edit_needs") and not vis:
+            vis = find_vl_pairs(cfg).get(llm) or ""
+        if not (vis and os.path.isfile(vis)) and prof.get("edit_needs"):
+            try:
+                img_dir = img_dir_of(cfg)      # 与上面同一口径（留空 = <模型目录>/生图）
+                vis = next((os.path.join(img_dir, n) for n in sorted(os.listdir(img_dir))
+                            if _is_mmproj(n) and n.lower().endswith(".gguf")), "")
+            except Exception:
+                vis = ""
+        if vis and os.path.isfile(vis):
+            args += ["--llm_vision", vis]
+        if _mode == sdprofile.EDIT_MODE_REF:
+            # 主体参考：Flux Kontext / MiniMax Ref2VA 这类，--help 写明 -r 可重复给
+            for _p in _used:
+                args += ["-r", _p]
+            # 参考图"怎么处理"由这一档专属：--ref-image-args 是键值对串，
+            # help 写明 empty = 按模型权重自动判断 → 留空就不给这个参数。
+            _ra = str(cfg.get("img_ref_args", "") or "").strip()
+            if _ra:
+                args += ["--ref-image-args", _ra]
         else:
-            # 附图 = 底图（img2img）。LLM 编码器家族还要配视觉投影器，否则引擎
-            # 读不懂"把背景换成海边"这类语义指令（开发机实测 --llm_vision 必需）。
-            vis = str(files.get("llm_vision") or "")
-            if prof.get("edit_needs") and not vis:
-                vis = find_vl_pairs(cfg).get(llm) or ""
-            if not (vis and os.path.isfile(vis)) and prof.get("edit_needs"):
-                try:
-                    img_dir = img_dir_of(cfg)      # 与上面同一口径（留空 = <模型目录>/生图）
-                    vis = next((os.path.join(img_dir, n) for n in sorted(os.listdir(img_dir))
-                                if _is_mmproj(n) and n.lower().endswith(".gguf")), "")
-                except Exception:
-                    vis = ""
-            if vis and os.path.isfile(vis):
-                args += ["--llm_vision", vis]
+            # 底图重绘（img2img / inpaint）：LLM 编码器家族要配视觉投影器（同上，两档都要）
             minimum = prof.get("edit_cfg_min")
             if minimum and float(cfg_scale) < float(minimum):
                 i = args.index("--cfg-scale")
                 args[i + 1] = str(minimum)
-            args += ["-i", init_img,
+            args += ["-i", _used[0],
                      "--strength", str(cfg.get("img_strength", 0.9))]
+            # 图像引导强度是"inpaint / image edit 模型"专用的那一路 --help 原文：
+            #   --img-cfg-scale <float>  default: same as --cfg-scale
+            # 与上面"把 --cfg-scale 抬到 edit_cfg_min"是**两件事**（那个管文本提示词的影响力，
+            # 这个管图像条件的影响力）。<= 0 = 不传，用引擎默认（同 --cfg-scale）。
+            try:
+                _gs = float(cfg.get("img_guide_scale", 0) or 0)
+            except Exception:
+                _gs = 0.0
+            if _gs > 0:
+                args += ["--img-cfg-scale", str(_gs)]
     if str(cfg.get("img_extra_args", "")).strip():
         args += shlex.split(str(cfg["img_extra_args"]))
     return args
@@ -412,7 +458,7 @@ def build_video_cmd(cfg, prompt, out_path, files, frames, fps, size, steps,
         # -r/--ref-image 是给 Ref2VA 变体的，用错引擎不认（实测踩中）。
         # 首帧由引擎自己 crop/resize 到 -W/-H（实测 1024x1024 → 512x512），
         # 且 fl2va 只要首帧就能跑，不需要 --end-img（那是 flf2v 的尾帧）。
-        if prof.get("edit") == "ref":
+        if prof.get("edit") == sdprofile.EDIT_MODE_REF:
             args += ["-r", ref_img]
         else:
             args += ["-i", ref_img]

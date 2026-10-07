@@ -15,6 +15,16 @@
                    云端：目前各家只接了文生 → 不支持首帧。
 
 结论三态：yes / no / unknown；外加 basis 说明是谁下的结论，UI 才好决定要不要拦住用户。
+
+**模式（v1.0.8 起）**：生图带图有**两种语义**，配置键 `img_ref_mode` 贯穿全链路 ——
+
+  · `edit`    底图重绘：拿原图当底，按提示词改（本地 `-i`，云端各家原生字段）
+  · `subject` 主体参考：只借图里的人/物/风格，构图另说（本地 `-r`，云端各家原生字段）
+
+两者是**能力维度而不是偏好**：`resolve_modes()` 判"这个模型支持哪些"，判据是
+引擎 / 服务商**官方页写明的入参形状**（本地查 `sdprofile.edit_modes`、云端查
+`providers.ref_image_modes`）。不支持的那一档由调用方**在发请求之前**拦下 ——
+放行错了就是一次白花的计费（坑 102）。
 """
 
 import os
@@ -24,6 +34,19 @@ AUTO = ""          # 存进配置里表示"没人工指定，走自动判据"
 YES = "yes"
 NO = "no"
 UNKNOWN = "unknown"
+
+# 生图带图的两种模式。**文案统一在这里取**，别处不许自己写（措辞纪律见 13 坑 101）。
+MODE_EDIT = "edit"              # 底图重绘：原图当底，按提示词改
+MODE_SUBJECT = "subject"        # 主体参考：只借图里的人/物/风格
+MODES = (MODE_EDIT, MODE_SUBJECT)
+# 默认档 = 底图重绘：与这两种模式落地之前的行为完全一致（`-i` 那条实测链路）
+DEFAULT_MODE = MODE_EDIT
+MODE_LABEL = {MODE_EDIT: "底图重绘", MODE_SUBJECT: "主体参考"}
+# 每种模式在引擎/接口上落在哪个入参上 —— 用于日志与排查（"这一档到底怎么发的"）
+MODE_NOTE = {MODE_EDIT: "按原图重绘",
+             MODE_SUBJECT: "只借图里的主体"}
+# 两种模式各自的引擎参数（槽位纪律：参数名必须能在 `sd_cli_help.txt` 里查到）
+MODE_FLAG = {MODE_EDIT: "-i", MODE_SUBJECT: "-r"}
 CHOICES = (AUTO, YES, NO)
 CHOICE_LABEL = {AUTO: "自动判断", YES: "支持", NO: "不支持"}
 LABEL_CHOICE = {v: k for k, v in CHOICE_LABEL.items()}
@@ -127,6 +150,66 @@ def resolve_key(cfg, key, kind=None):
     else:
         probe["model"] = key
     return resolve(probe)
+
+
+# ---------------------------------------------------------------- 生图模式（两种语义）
+
+def modes_note(mode):
+    """这一档是干什么的（界面提示与发送回显统一问这里，别处自己写就会写出两种说法）。"""
+    return "%s（%s）" % (MODE_LABEL.get(mode, mode), MODE_NOTE.get(mode, ""))
+
+
+def resolve_modes(cfg, family=None):
+    """生图带图时，这个模型**支持哪些模式** → `{mode: {"ok", "why", "flag"}}`。
+
+    判据只认"官方页 / `--help` 写明的入参形状"：
+
+    · 本地：`sdprofile.edit_modes(family)` —— `-i`（底图重绘）与 `-r`（主体参考）是
+      sd-cli 的两个通用入口，`edit_modes` 记的是"这一族的权重走哪条路有依据"。
+      `family` 由调用方传（它手上已经有 `resolve_img_files` 的结果），不给就只认
+      配置里人工指定的 `img_family`，认不出按"两种都能试"给，**不由这一层瞎猜**。
+    · 云端：`providers.ref_image_modes(provider)` —— 官方页没写参考图入参的一律空集合。
+
+    `flag` 是给界面用的简短依据（"按 --help" / "官方页" / "未实测"），
+    **界面必须照实显示**，别把没实测的写成实测（坑 101 / 10 §5.1）。
+    """
+    from . import providers, sdprofile
+    if providers.is_cloud(cfg):
+        p = providers.current_provider(cfg) or {}
+        modes = providers.ref_image_modes(p)
+        flag = "官方页" if modes else "none"
+        if not modes:
+            return {m: {"ok": False, "flag": flag,
+                        "why": "这一家的生图接口只收文字提示词，带图请改用本地的〔生图〕模型"}
+                    for m in MODES}
+        return {m: {"ok": m in modes, "flag": flag,
+                    "why": "" if m in modes
+                    else "这一家不带%s，请换一家或改用%s" % (MODE_LABEL[m], MODE_LABEL[DEFAULT_MODE])}
+                for m in MODES}
+    fid = str(family or cfg.get("img_family") or "").strip()
+    modes, flag = sdprofile.edit_modes(fid)
+    return {m: {"ok": m in modes, "flag": flag,
+                "why": "" if m in modes
+                else "%s 走的是 %s，%s没这条通路" % (
+                    sdprofile.label_of(fid) or "这个模型",
+                    "参考图 -r" if m == MODE_EDIT else "底图 -i", MODE_LABEL[m])}
+            for m in MODES}
+
+
+def default_ref_mode(cfg, family=None):
+    """本次用哪一档：配置里选了它、且这一档确实支持 → 用它；否则回该模型的默认档。
+
+    **配置里的值只在模型支持时才生效** —— 换个不支持那一档的模型就自动回默认，
+    不会出现"设置页选了这一档、发出去却按另一种语义跑"。
+    """
+    want = str((cfg or {}).get("img_ref_mode", "") or "").strip()
+    if want in MODES and resolve_modes(cfg, family).get(want, {}).get("ok"):
+        return want
+    return DEFAULT_MODE
+
+
+def supports_ref_mode(cfg, mode, family=None):
+    return bool(resolve_modes(cfg, family).get(mode, {}).get("ok"))
 
 
 def can_take_image(cfg):

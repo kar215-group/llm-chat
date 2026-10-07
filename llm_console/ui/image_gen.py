@@ -9,9 +9,9 @@ import time
 import tkinter as tk
 from tkinter import ttk
 
-from ..core import cloudjobs, config, providers, sdprofile
-from ..core.media import (build_img_cmd, img_out_dir, resolve_img_files,
-                          resolve_img_model_path)
+from ..core import capability, cloudjobs, config, providers, sdprofile
+from ..core.media import (build_img_cmd, img_out_dir, plan_ref_images,
+                          resolve_img_files, resolve_img_model_path)
 from ..connection import cloud_media
 
 
@@ -19,11 +19,19 @@ class ImageGenMixin:
     """App 的聊天流内生图职责（Mixin）；self._xxx 在运行时经 MRO 解析。"""
 
     # ---- 聊天流内生图（方案 A：页面形态不变，输出内嵌对话流）----
-    def _start_chat_image(self, prompt, ref_img=None):
+    def _start_chat_image(self, prompt, ref_img=None, ref_imgs=None, ref_mode="",
+                          doc=None):
+        """带图两档都从这里进：`ref_mode` 空 = 按当前模型的默认档。
+
+        `ref_imgs` 是多图列表；旧的单张 `ref_img` 仍能用（内部并入列表）。
+        `doc` = 文本附件（set_file_attachment 的成品块）：回显后并进提示词再发
+        （W 2026-10-07 裁决，合并与 📄 行见 chat._doc_merge）。
+        """
         # 云端生图走服务商原生接口（二期），不启动本地 sd-cli：两套链路在入口就分开，
         # 免得拿云端模型名去喂本地引擎（那是 v32 拦下的那个错）。
         if providers.is_cloud(self.cfg):
-            return self._start_cloud_image(prompt, ref_img=ref_img)
+            return self._start_cloud_image(prompt, ref_imgs=ref_imgs or ([ref_img] if ref_img else []),
+                                           ref_mode=ref_mode, doc=doc)
         sd = self.cfg.get("sd_dir", "")
         cli = os.path.join(sd, "sd-cli.exe")
         if not os.path.isfile(cli):
@@ -50,6 +58,19 @@ class ImageGenMixin:
                          "  放进生图模型目录，或在 设置 → 本地模型 → 生图（sd.cpp） 的「配套文件」里指名。\n"
                          % (sdprofile.label_of(files["family"]), "、".join(missing)), "error")
             return
+        # 带图两档：**在 Popen 之前**定档并判这一族走不走得通。认不出族 / 这一族没这条通路
+        # 就地报错，一个字都不丢 —— 别把命令拼好再让引擎吃一次"退出码 1"。
+        refs = [p for p in (list(ref_imgs or []) + ([ref_img] if ref_img else []))
+                if p and os.path.isfile(p)]
+        modes = capability.resolve_modes(self.cfg, files["family"])
+        mode = str(ref_mode or "").strip()
+        if refs and mode and not modes.get(mode, {}).get("ok"):
+            self._append("\n[提示] %s\n" % modes[mode]["why"], "error")
+            return
+        mode = mode or capability.default_ref_mode(self.cfg, files["family"])
+        used, dropped, drop_note = plan_ref_images(refs, mode)
+        if not refs and mode:
+            mode = ""                      # 纯文生图不带模式，省得回显与日志里出现无意义的档位
         # "必闪退"档启动确认（2026-10-06）：摆在消费输入框之前，点否一个字都不丢（坑 133）
         if not self._confirm_fatal_perf(diffusion, "image", files=files):
             return
@@ -62,6 +83,12 @@ class ImageGenMixin:
             cfg_scale = float(self.cfg.get("img_cfg", 2.5) or 2.5)
         except Exception:
             cfg_scale = 2.5
+        # 种子跟着设置页的 img_seed 走（-1 = 随机）。不用 `or -1` 兜底：0 是合法种子，
+        # 会被 falsy 判断吞成随机（与云端生图路径同一教训）。
+        try:
+            seed = int(self.cfg.get("img_seed", -1))
+        except Exception:
+            seed = -1
         outdir = img_out_dir(self.cfg)   # <产物文件夹>/本地/image（2026-10-06 起）
         os.makedirs(outdir, exist_ok=True)
         out = os.path.join(outdir, time.strftime("img_%Y%m%d_%H%M%S") + ".png")
@@ -71,11 +98,16 @@ class ImageGenMixin:
         self.input.delete("1.0", "end")
         self.clear_attachment()
         self._append("\n【你】\n" + prompt + "\n", "user")
-        if ref_img and os.path.isfile(ref_img):
-            self._append_image(ref_img, max_w=320)
-            self._append("[图生图] 参考图：%s（重绘强度 %s）\n"
-                         % (os.path.basename(ref_img),
-                            self.cfg.get("img_strength", 0.6)), "meta")
+        prompt = self._doc_merge(prompt, doc)
+        for p in used:
+            self._append_image(p, max_w=320)
+        if used:
+            # 措辞一律问 capability（模式名只有那一处定义），不自己写"图生图"
+            self._append("[%s] 参考图 %d 张%s\n"
+                         % (capability.MODE_LABEL.get(mode, "带图"), len(used),
+                            "" if not drop_note else "（%s）" % drop_note), "meta")
+            if mode == capability.MODE_EDIT:
+                self._append("　重绘强度 %s\n" % self.cfg.get("img_strength", 0.6), "meta")
         self._img_gen += 1
         mygen = self._img_gen
         mark = "imgprog%d" % mygen
@@ -90,12 +122,11 @@ class ImageGenMixin:
         self._img_log = ""
         self._cloud_img = False
         self._t0 = time.time()
-        self._saw_sampling = False
         self._saw_decode = False
         self._stop_flag = threading.Event()
         self._set_busy_ui(True)
-        cmd = build_img_cmd(self.cfg, prompt, out, steps, size, diffusion, cfg_scale, -1,
-                            init_img=ref_img, files=files)
+        cmd = build_img_cmd(self.cfg, prompt, out, steps, size, diffusion, cfg_scale, seed,
+                            ref_mode=mode, ref_images=used, files=files)
         flags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
         try:
             self._img_proc = subprocess.Popen(
@@ -112,7 +143,8 @@ class ImageGenMixin:
                          daemon=True).start()
 
     # ---- 云端生图（二期：服务商原生接口，按 providers.media_api 分派）----
-    def _start_cloud_image(self, prompt, ref_img=None):
+    def _start_cloud_image(self, prompt, ref_img=None, ref_imgs=None, ref_mode="",
+                           doc=None):
         provider = providers.current_provider(self.cfg)
         sp = providers.split_cloud_id(self.cfg.get("model", ""))
         model = sp[1] if sp else ""
@@ -134,18 +166,23 @@ class ImageGenMixin:
         self.input.delete("1.0", "end")
         self.clear_attachment()
         self._append("\n【你】\n" + prompt + "\n", "user")
-        refs = []
-        if ref_img and os.path.isfile(ref_img):
-            # 参考图在发送前已由 chat.send_message 过一遍 capability + ref_images_error，
-            # 这里只负责把它显示回对话流并交给 worker（缩略图与本地生图同一套形态）。
-            # 措辞按 ref_image_mode 分：MiniMax 那条是"主体参考"，说成底图重绘就是骗人。
-            self._append_image(ref_img, max_w=320)
-            if providers.ref_image_mode(provider) == "subject":
-                self._append("[云端生图] 主体参考：%s（这一家按主体/角色一致性用这张图，"
-                             "不是在同图上重绘）\n" % os.path.basename(ref_img), "meta")
-            else:
-                self._append("[云端图生图] 参考图：%s\n" % os.path.basename(ref_img), "meta")
-            refs = [ref_img]
+        prompt = self._doc_merge(prompt, doc)
+        # 参考图在发送前已由 chat.send_message 过一遍 capability + ref_images_error（含档位
+        # 校验），这里只负责显示回对话流并交给 worker（缩略图与本地生图同一套形态）。
+        refs = [p for p in (list(ref_imgs or []) + ([ref_img] if ref_img else []))
+                if p and os.path.isfile(p)]
+        mode = ""                       # 纯文生图不带档位，省得回显与日志里出现无意义的它
+        if refs:
+            # 档位：选了且这家支持就用，否则回这家默认档（各家默认档不同，别替它决定）
+            mode = str(ref_mode or "").strip()
+            if not (mode and providers.supports_ref_mode(provider, mode)):
+                mode = providers.ref_image_mode(provider)
+            for p in refs:
+                self._append_image(p, max_w=320)
+            self._append("[云端生图] %s：%d 张（%s）\n"
+                         % (capability.MODE_LABEL.get(mode, "参考图"), len(refs),
+                            os.path.basename(refs[0])
+                            + ("等" if len(refs) > 1 else "")), "meta")
         # 费用就近打在对话流里，而且必须打在**提交之前**：生图不弹二次确认（同步、
         # 单次几分钱，每次都问只会让人不看内容按回车），但那不等于不告诉。
         # 单价按模型查，没填就明说"以账单为准"，不编数字。
@@ -162,10 +199,10 @@ class ImageGenMixin:
                                           provider.get("name") or ""))
         threading.Thread(target=self._cloud_image_worker,
                          args=(provider, model, prompt, out, gen, q, stop),
-                         kwargs={"refs": refs}, daemon=True).start()
+                         kwargs={"refs": refs, "ref_mode": mode}, daemon=True).start()
 
     def _cloud_image_worker(self, provider, model, prompt, dest, gen, q, stop_flag,
-                            tid="", refs=None):
+                            tid="", refs=None, ref_mode=""):
         """子线程：只往队列里投事件，绝不碰控件（坑 11/54 的铁律）。
 
         `tid` 非空 = 从台账取回旧任务，**不再提交一次**（重复提交就是重复扣钱）。
@@ -199,7 +236,7 @@ class ImageGenMixin:
                                   provider.get("name", ""), model, prompt, dest)
 
         try:
-            seed = int(self.cfg.get("img_seed", -1) or -1)
+            seed = int(self.cfg.get("img_seed", -1))    # 不用 or：0 是合法种子
         except Exception:
             seed = -1
         if cur["tid"]:
@@ -214,6 +251,7 @@ class ImageGenMixin:
                 negative=str(self.cfg.get("cloud_img_negative", "") or ""),
                 size=str(self.cfg.get("cloud_img_size", "") or ""), seed=seed,
                 ref_images=list(refs or []),
+                ref_mode=str(ref_mode or ""),
                 on_task_id=note_tid, persist=persist)
         paths = list(res.get("paths") or [])
         # 真实落地路径可能与服务端给的扩展名一致而与我们的默认值不同（.png vs .jpg），
@@ -278,8 +316,7 @@ class ImageGenMixin:
         elapsed = int(time.time() - self._t0) if getattr(self, "_t0", None) else 0
         low = line.lower()
         if "generating image" in line:
-            self._phase = "采样"
-            return
+            return      # 采样开始行：没有进度数字可报，原样跳过（进度靠下面的 n/m 行）
         m = re.search(r"(\d+)/(\d+) - ", line)
         steps = max(1, int(self.cfg.get("img_steps", 12) or 12))
         if m:

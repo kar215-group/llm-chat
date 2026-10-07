@@ -30,7 +30,7 @@ CONFIG_PATH = os.path.join(APP_DIR, "gui_config.json")
 
 # 版本号：发版时改这一处（--selfcheck / --version 会打印它）。
 # GitHub Release 的 tag 要与它一致（tag 去掉开头的 v），Actions 工作流会做一致性校验。
-APP_VERSION = "1.0.7"
+APP_VERSION = "1.0.8"
 
 CFG_VERSION = 2
 
@@ -92,6 +92,16 @@ DEFAULT_CONFIG = {
     "img_cfg": 2.5,                # 官方推荐值
     "img_seed": -1,                # -1 = 随机
     "img_strength": 0.9,           # 参考图编辑强度（附图时生效；实测 0.9 效果最好）
+    # 两档各自的可调项。**留空 / 0 = 不传**，用引擎自己的默认（help 原文的 default）：
+    #   img_guide_scale → --img-cfg-scale  底图重绘档的图像引导强度（default: same as --cfg-scale）
+    #   img_ref_args    → --ref-image-args 主体参考档的参考图处理键值对（empty = 按模型权重自动判断）
+    # 两条都是 2026-10-06 按 `sd_cli_help.txt` 接的，**值域未实测**（坑 95 纪律：参数名要在 --help 里，
+    # 实际怎么给值要真机跑过一次）。没实测这件事在设置页与 10 §5.0 都写明。
+    "img_guide_scale": 0.0,
+    "img_ref_args": "",
+    # 生图带图的两种模式：edit=底图重绘（-i）/ subject=主体参考（-r）。
+    # 只是**默认选哪一档**；模型不支持这一档时自动回该模型的默认档（capability.default_ref_mode）。
+    "img_ref_mode": "edit",
     # 换别的模型族时要动的就是这一组：留空一律"自动识别 / 自动找"
     "img_family": "",              # 模型族人工覆盖（qwen-image / flux / sdxl / generic …）
     "img_vae_file": "",            # 配套文件：留空 = 在生图目录里自动发现
@@ -221,12 +231,12 @@ INT_KEYS = ("port", "ngl", "ctx", "threads", "reasoning_budget",
             "cloud_download_seconds", "cloud_keep_days")
 
 FLOAT_KEYS = ("temperature", "top_p", "repeat_penalty", "vram_gb", "ram_gb",
-              "img_cfg", "img_strength", "vid_cfg")
+              "img_cfg", "img_strength", "vid_cfg", "img_guide_scale")
 
 # 「model」故意不在这里：它与云端复合 id 共用（坑 146），写回另有分支（settings._apply_settings）
 STR_KEYS = ("models_dir", "host", "api_key", "reasoning_mode",
             "extra_args", "exe", "gpu_name", "sd_dir", "image_model_dir",
-            "img_model_file", "img_size", "img_family",
+            "img_model_file", "img_size", "img_family", "img_ref_mode", "img_ref_args",
             "img_vae_file", "img_llm_file", "img_clip_l_file", "img_clip_g_file",
             "img_t5_file", "img_tokenizer_file", "img_backend", "img_params_backend",
             "img_negative", "img_extra_args",

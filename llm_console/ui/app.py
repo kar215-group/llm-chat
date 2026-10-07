@@ -13,8 +13,8 @@ from tkinter import ttk, scrolledtext, messagebox
 
 from ..core.config import (load_config, DEFAULT_CONFIG, APP_DIR, APP_VERSION,
                            CONFIG_PATH)
-from ..core import (cloudjobs, codesign, config, crashlog, diagnose, engine_install, providers,
-                    secrets, selfupdate, throttle, updater)
+from ..core import (capability, cloudjobs, codesign, config, crashlog, diagnose,
+                    engine_install, providers, secrets, selfupdate, throttle, updater)
 from ..core.models import (auto_locate_models_dir, dir_has_any_gguf, display_name,
                           extra_sources, first_usable, has_local_chat,
                           selected_usable)
@@ -528,18 +528,67 @@ class App(ChatMixin, ImageGenMixin, VideoGenMixin, ServiceMixin, ModelsMixin, Se
                          "meta")
 
     def _build_inputbar(self):
-        # 附件预览条（默认隐藏；有附图或文本文件时 pack 到输入区上方）
+        # 附件条（默认隐藏；有附图或文本文件时 pack 到输入区上方）。
+        # v1.0.9 形态：左 = 横向瓷砖条（预览在上、缩短文件名在下，拖动/滚轮左右滑动），
+        # 右 = 边界区域（本次发送的两档选择，仅生图模型显示），底下横贯一条状态行
+        # （预算截断 / 多图取舍 —— 状态信息不挪悬停，与 ADR §5.2 判据④同口径）。
         self.attach_frame = ttk.Frame(self.root)
-        self.attach_thumb = tk.Label(self.attach_frame, relief="groove")
-        self.attach_thumb.pack(side="left", padx=(0, 8))
-        self.attach_name = ttk.Label(self.attach_frame, text="", foreground="#555555",
-                                     wraplength=560, justify="left")
-        self.attach_name.pack(side="left")
-        ttk.Button(self.attach_frame, text="移除附件",
-                   command=self.clear_attachment).pack(side="left", padx=8)
-        self._attach_photo = None      # 缩略图引用（防 GC）
-        self._attached_image = None    # 待发送图片路径
-        self._attached_file = None     # 待发送文本附件（read_document + 预算截取的成品块）
+        self.attach_frame.columnconfigure(0, weight=1)
+
+        # -- 左：横向瓷砖条。canvas + 内框，瓷砖在内框里从左往右排，溢出可滑动 --
+        self._tile_px = 48          # 瓷砖预览边长；高 DPI 屏用 96 档（Tk 的图不跟缩放，同 app_logo 的教训）
+        try:
+            if float(self.root.tk.call("tk", "scaling")) >= 1.75:
+                self._tile_px = 96
+        except Exception:
+            pass
+        strip = tk.Frame(self.attach_frame, background=widgets.default_bg())
+        strip.grid(row=0, column=0, sticky="we")
+        self.attach_canvas = tk.Canvas(strip, height=self._tile_px + 40,
+                                       highlightthickness=0, xscrollincrement=1,
+                                       background=widgets.default_bg())
+        self.attach_canvas.pack(side="left", fill="both", expand=True)
+        self._tile_inner = tk.Frame(self.attach_canvas, background=widgets.default_bg())
+        self.attach_canvas.create_window((0, 0), window=self._tile_inner, anchor="nw")
+        self._tile_inner.bind("<Configure>",
+                              lambda _e: self.attach_canvas.configure(
+                                  scrollregion=self.attach_canvas.bbox("all")))
+        self._strip_drag_x = None   # 拖动滑动的锚点（x_root）；None = 没在拖
+        for w in (self.attach_canvas, self._tile_inner):
+            w.bind("<Button-1>", self._strip_drag_start)
+            w.bind("<B1-Motion>", self._strip_drag_move)
+            w.bind("<ButtonRelease-1>", self._strip_drag_end)
+            w.bind("<MouseWheel>", self._strip_wheel)
+
+        # -- 右：边界区域，本次发送的两档选择（仅生图模型；不支持的档置灰不隐藏，W 2026-10-06）--
+        self.refmode_zone = tk.Frame(self.attach_frame, relief="groove", bd=1,
+                                     background=widgets.default_bg())
+        self.refmode_zone.grid(row=0, column=1, sticky="ns", padx=(8, 0))
+        tk.Label(self.refmode_zone, text="带图方式", background=widgets.default_bg(),
+                 foreground="#5a6a7a",
+                 font=("Microsoft YaHei UI", 9)).pack(anchor="w", padx=8, pady=(4, 0))
+        self._ref_mode_var = tk.StringVar(value="")
+        self._refmode_radios = {}
+        for m in capability.MODES:
+            rb = ttk.Radiobutton(self.refmode_zone, text=capability.MODE_LABEL[m],
+                                 variable=self._ref_mode_var, value=m,
+                                 command=self._on_ref_mode_pick)
+            rb.pack(anchor="w", padx=8, pady=(0, 3))
+            self._refmode_radios[m] = rb
+        self.refmode_zone.grid_remove()   # 非生图模型不显示；_refresh_ref_mode_zone 决定
+
+        # -- 状态行（空时 grid_remove）--
+        self._attach_note_var = tk.StringVar(value="")
+        self.attach_note = ttk.Label(self.attach_frame, textvariable=self._attach_note_var,
+                                     foreground="#a8a8a8", font=("Microsoft YaHei UI", 9))
+        self.attach_note.grid(row=1, column=0, columnspan=2, sticky="w")
+        self.attach_note.grid_remove()
+
+        self._tile_photos = []       # 瓷砖预览图引用（防 GC；每次重建瓷砖整批换新）
+        self._attached_image = None  # 待发送图片路径（单张视图：附件条与既有调用都读它）
+        self._attached_images = []   # 待发送图片路径列表（生图带图两档都要多张；顺序即发送顺序）
+        self._img_ref_mode = ""      # 本次生图带图用哪一档（""=按本模型默认档；右侧区域可显式选）
+        self._attached_file = None   # 待发送文本附件（read_document + 预算截取的成品块）；单文档，新挂替换旧的
 
         bot = ttk.Frame(self.root)
         # side="bottom" 让输入区在分配空间时先于可伸缩的聊天区被满足：
@@ -582,6 +631,15 @@ class App(ChatMixin, ImageGenMixin, VideoGenMixin, ServiceMixin, ModelsMixin, Se
         self.stop_gen_btn.configure(state="normal" if running else "disabled",
                                     text="停止生成")
         self.clear_btn.configure(state="disabled" if blocked else "normal")
+
+    def _any_busy(self):
+        """任一任务在进行（生成 / 生图 / 生视频 / 服务操作）→ True。忙碌的统一判据。
+
+        与 _set_busy_ui 的 blocked 同一口径。"任务在跑时不该动 cfg / 引擎"的入口
+        （切模型、手动指向、整理对话框、发送、清空）一律判它，别各自只盯 _busy
+        （坑 19：四个忙碌标志各查各的，迟早漏一个）。
+        """
+        return bool(self._busy or self._img_busy or self._vid_busy or self._svc_busy)
 
     def _open_containing(self, path):
         """在资源管理器中打开文件所在文件夹并选中该文件。"""
@@ -638,7 +696,7 @@ class App(ChatMixin, ImageGenMixin, VideoGenMixin, ServiceMixin, ModelsMixin, Se
             jobs = cloudjobs.unfinished()
             cloudjobs.prune(int(self.cfg.get("cloud_keep_days", 7) or 7))
         except Exception as e:
-            print("[云端台账读取失败] %s" % e)
+            crashlog.note("[云端台账读取失败] %s" % e)
             return
         if not jobs:
             return
@@ -661,7 +719,7 @@ class App(ChatMixin, ImageGenMixin, VideoGenMixin, ServiceMixin, ModelsMixin, Se
             self.chat.insert("end", "\n", "meta")
             self.chat.see("end")
         except Exception as e:
-            print("[云端任务列表异常] %s" % e)
+            crashlog.note("[云端任务列表异常] %s" % e)
         finally:
             self.chat.configure(state="disabled")
 
@@ -695,7 +753,7 @@ class App(ChatMixin, ImageGenMixin, VideoGenMixin, ServiceMixin, ModelsMixin, Se
             self.chat.insert("end", "\n", "meta")
             self.chat.see("end")
         except Exception as e:
-            print("[环境提示渲染失败] %s" % e)
+            crashlog.note("[环境提示渲染失败] %s" % e)
         finally:
             self.chat.configure(state="disabled")
 
@@ -835,7 +893,7 @@ class App(ChatMixin, ImageGenMixin, VideoGenMixin, ServiceMixin, ModelsMixin, Se
                 fn()
             except Exception as e:
                 # 不能因为一个回调炸掉就把 after 链断了；但也不能静默吞掉（排查过同类问题）
-                print("[界面回调异常] %s: %s" % (type(e).__name__, e))
+                crashlog.note("[界面回调异常] %s: %s" % (type(e).__name__, e))
         # 流式输出：先收集成批（连续同类自然合并），处理完队列后一次性写入
         pending = []
         while True:
@@ -884,11 +942,11 @@ class App(ChatMixin, ImageGenMixin, VideoGenMixin, ServiceMixin, ModelsMixin, Se
                         self._finish_turn(error=True)
             except Exception as e:
                 # 关键健壮性：与生图/生视频分支同一铁律——任何异常都不得中断
-                # after 链（断了就是界面永久假死）；打印但不中断
+                # after 链（断了就是界面永久假死）；落崩溃日志但不中断
                 try:
                     self._append("[内部错误] 对话事件处理异常: %s\n" % e, "error")
                 except Exception:
-                    print("[对话事件处理异常] %s: %s" % (type(e).__name__, e))
+                    crashlog.note("[对话事件处理异常] %s: %s" % (type(e).__name__, e))
         self._flush_stream(pending)
 
         while True:
@@ -943,7 +1001,7 @@ class App(ChatMixin, ImageGenMixin, VideoGenMixin, ServiceMixin, ModelsMixin, Se
                 try:
                     self._append("[内部错误] 状态事件处理异常: %s\n" % e, "error")
                 except Exception:
-                    print("[状态事件处理异常] %s: %s" % (type(e).__name__, e))
+                    crashlog.note("[状态事件处理异常] %s: %s" % (type(e).__name__, e))
 
         if not self._closing:
             self.root.after(80, self._poll)
@@ -1052,7 +1110,7 @@ class App(ChatMixin, ImageGenMixin, VideoGenMixin, ServiceMixin, ModelsMixin, Se
             try:
                 self._maybe_adopt_first_model()
             except Exception as e:
-                print("[自动选中模型异常] %s: %s" % (type(e).__name__, e))
+                crashlog.note("[自动选中模型异常] %s: %s" % (type(e).__name__, e))
         elif tag == "serving":
             # 服务实际加载的模型变了（常见来源：agent 经 8081 让代理换了模型）。
             # 顶栏跟着刷新 + 说一句，免得"顶栏写着 A、回答其实来自 B"（坑 134）

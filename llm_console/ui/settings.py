@@ -285,6 +285,8 @@ _FLOAT_RANGE = {
     "temperature": (0.0, 10.0), "top_p": (0.0, 1.0), "repeat_penalty": (0.0, 10.0),
     "vram_gb": (0.0, 4096.0), "ram_gb": (0.0, 4096.0),
     "img_cfg": (0.0, 100.0), "img_strength": (0.0, 1.0), "vid_cfg": (0.0, 100.0),
+    # 与 img_cfg / vid_cfg 同尺度（都是 --cfg-scale 一族的旋钮）；0 = 不传、跟 --cfg-scale 走
+    "img_guide_scale": (0.0, 100.0),
 }
 
 
@@ -714,8 +716,8 @@ class SettingsMixin:
         # ---- 区块 3：本地图像与视频 / 生图 ----
         #
         # 分层：状态行（依赖就绪与否）→ 常改的 7 项 → 「高级参数」折叠区（配套文件 + 后端 /
-        # 种子 / 附加参数，共 10 项，默认收起）。折叠只挪格子不毁控件 —— 值不丢、保存钩子
-        # 照跑（见 _row 的 fold 说明）；底部「显示全部参数」一勾全展开。
+        # 种子 / 附加参数 / 输出目录 / 带图两档的可调项，共 13 项，默认收起）。折叠只挪格子不毁控件
+        # —— 值不丢、保存钩子照跑（见 _row 的 fold 说明）；底部「显示全部参数」一勾全展开。
         @section("local_media", "img")
         def _t3(t3, r3):
             def _fill_state(var):
@@ -787,7 +789,8 @@ class SettingsMixin:
                        ("img_vae_file", "img_llm_file", "img_clip_l_file",
                         "img_clip_g_file", "img_t5_file", "img_negative",
                         "img_seed", "img_backend", "img_params_backend",
-                        "img_extra_args", "img_output_dir"))
+                        "img_extra_args", "img_output_dir",
+                        "img_guide_scale", "img_ref_args"))
             ent(t3, r3, "img_output_dir", "输出目录",
                 "本地生图的落地目录；留空 = 产物文件夹下的 本地\\image"
                 "（产物文件夹在 设置 → 云端模型 → 生图 / 生视频 的「修改产物位置」里改）。"
@@ -825,6 +828,20 @@ class SettingsMixin:
                 "原样拼到命令行末尾，是「识别没覆盖到」的人工出口。例如 "
                 "--scheduler karras --prediction eps 或 --taesd <路径> 做快速预览。",
                 width=30, hint="可留空", fold=fold_img)
+            # 带图两档各自专属的可调项（W 2026-10-06：先收进折叠区，日后随高级选项
+            # 一起搬去独立页）。参数名以 sd-cli --help 为准（坑 95：没实测就写明依据）：
+            #   --img-cfg-scale  default: same as --cfg-scale（底图重绘那一路的原文）
+            #   --ref-image-args empty = 按模型权重自动判断（主体参考那一路的原文）
+            ent(t3, r3, "img_guide_scale", "图像引导强度",
+                "底图重绘档专用：sd-cli --img-cfg-scale，管**图像条件**对结果的影响力，"
+                "与「默认 CFG」（管提示词服从度）是两件事。0 = 不传，--help 原文 "
+                "default: same as --cfg-scale。参数名按 --help，数值未实测（坑 95）。",
+                hint="0=跟 CFG", fold=fold_img)
+            ent(t3, r3, "img_ref_args", "参考图参数",
+                "主体参考档专用：sd-cli --ref-image-args，键值对串原样拼进命令行"
+                "（例如 strength=0.8）。--help 写明留空 = 按模型权重自动判断，"
+                "留空就不传。参数名按 --help，数值未实测（坑 95）。",
+                width=30, hint="留空=自动", fold=fold_img)
 
             # 「输出目录」这一行与生视频那块**同一形状**（标签 + 打开按钮 + 一句说明），
             # 两块的尾巴长得一样，扫一眼就知道哪儿开文件夹
@@ -843,7 +860,7 @@ class SettingsMixin:
         #
         # 分层同生图：状态行 → 常改的 8 项（目录 / 主体 / 族 / 分辨率 / 帧数 / 帧率 / 步数 /
         # CFG）→ 「高级参数」折叠区（编码器 / VAE / MoE 高噪段 / 音频 VAE / 负向词 / 容器 /
-        # 后端，共 12 项，默认收起）。
+        # 后端 / 输出目录，共 13 项，默认收起）。
         @section("local_media", "vid")
         def _t3b(t3b, r3b):
             def _fill_state(var):

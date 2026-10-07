@@ -682,6 +682,86 @@ class HelpDot(object):
     close = _hide
 
 
+_TIP_FNT = None       # bind_tip 量宽用的字体对象（懒建；Font 需要默认 root 已存在）
+
+
+def bind_tip(widget, text_fn, width=360):
+    """给任意控件挂悬停气泡（附件瓷砖的完整文件名、置灰选项的原因等）。
+
+    与 `HelpDot` 的气泡同款样式，并共用它的全局"同时只有一个气泡"登记表
+    （`HelpDot._current`）：点开「?」会收掉这里的，反之亦然。
+    与 HelpDot 的差别：不要求把指针移进气泡里读 —— 这里挂的是至多两三行的
+    短信息（长解释仍归「?」），鼠标离开即收。
+    text_fn 可以是字符串，也可以是零参函数（弹层时才取现值，刷新后置灰理由不会过期）。
+    """
+    def _cancel():
+        after = getattr(widget, "_tip_after", None)
+        if after:
+            try:
+                widget.after_cancel(after)
+            except Exception:
+                pass
+        widget._tip_after = None
+
+    def _hide(_e=None):
+        _cancel()
+        tip = getattr(widget, "_tip_win", None)
+        if tip is HelpDot._current:
+            HelpDot._current = None
+        _destroy_quietly(tip)
+        widget._tip_win = None
+
+    def _show(_e=None):
+        _cancel()
+        text = text_fn() if callable(text_fn) else str(text_fn or "")
+        text = text.strip().replace("**", "")
+        if not text or not widget.winfo_ismapped():
+            return
+        HelpDot._close_current()
+        tip = tk.Toplevel(widget)
+        HelpDot._current = tip
+        widget._tip_win = tip
+        tip.wm_overrideredirect(True)
+        tip.attributes("-topmost", True)
+        # tk.Message 的 width 是"最长一行的像素宽"：先按上限折行，再取实测最宽行，
+        # 短文本就不会撑成一个空荡荡的 360px 大方块。
+        # _FONT 是元组，量宽得用 tkfont.Font（建一次缓存住，Font 要有默认 root 才能建）
+        global _TIP_FNT
+        if _TIP_FNT is None:
+            from tkinter import font as tkfont
+            _TIP_FNT = tkfont.Font(family=_FONT[0], size=_FONT[1])
+        lines = _wrap_px(text, _TIP_FNT, width)
+        body = tk.Message(tip, text=text, font=_FONT,
+                          width=min(width, max(_TIP_FNT.measure(ln) for ln in lines) + 20),
+                          background=_TIP_BG, foreground="#202020", justify="left",
+                          padx=8, pady=6)
+        body.pack(fill="both", expand=True)
+        border = tk.Frame(tip, background=_TIP_BORDER)
+        border.place(relx=0, rely=0, relwidth=1, relheight=1)
+        body.lift()
+        tip.update_idletasks()
+        w, h = tip.winfo_reqwidth(), tip.winfo_reqheight()
+        sw, sh = widget.winfo_screenwidth(), widget.winfo_screenheight()
+        x = widget.winfo_rootx()
+        y = widget.winfo_rooty() + widget.winfo_height() + 4
+        if y + h > sh - 8:
+            y = widget.winfo_rooty() - h - 4            # 下方放不下 → 弹上方
+        x = max(4, min(x, sw - 8 - w))                  # 贴边时整体收回屏内
+        y = max(4, min(y, max(4, sh - 8 - h)))
+        tip.wm_geometry("+%d+%d" % (x, y))
+
+    def _leave(_e=None):
+        _cancel()
+        try:
+            widget._tip_after = widget.after(180, _hide)   # 指针抖动不误收
+        except Exception:
+            _hide()
+
+    widget.bind("<Enter>", _show)
+    widget.bind("<Leave>", _leave)
+    return widget
+
+
 class SideNav(object):
     """左栏导航：分组标题行（点击展开/收起）+ 缩进的叶子行（点击回调）。
 

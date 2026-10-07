@@ -43,7 +43,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-from ..core import config, providers
+from ..core import capability, config, providers
 from . import cloud
 
 PROTOCOL_ALIYUN = "aliyun"
@@ -279,10 +279,17 @@ _HINTS = (
 )
 
 
-def explain(status, text, provider):
-    """HTTP 状态 + 回包 → 一句能行动的话（复用一期的 humanize_http，再补原生接口的暗号）。"""
+def explain(status, text, provider, endpoint=""):
+    """HTTP 状态 + 回包 → 一句能行动的话（复用一期的 humanize_http，再补原生接口的暗号）。
+
+    `endpoint` = **本次实际请求的媒体端点**（image/video/task/file/cancel 之一）。humanize_http
+    里的 URL 取自 provider 的 `base_url`，那是**文本对话端点**，云端生图/生视频失败时报它会把人
+    带去查错方向（Y4，2026-10-06 实测：阿里云生图超时，报错却指向 `/chat/completions`）。把真实
+    端点补一行，日志里本就有它（`log.json("请求 POST …")`），这里让失败文案也带上。
+    """
+    tail = ("\n  实际请求端点：%s" % endpoint) if endpoint else ""
     if status in (-1, -2, 0) or status is None:
-        return str(text or "云端请求没有发出")
+        return str(text or "云端请求没有发出") + tail
     msg = cloud.humanize_http(status, text, provider)
     # 阿里云的错误码（AccessDenied.Unpurchased / UnsupportedOperation …）比 message
     # 更好定位，但 humanize_http 只取 message——这里补一行，别把它丢掉
@@ -292,6 +299,8 @@ def explain(status, text, provider):
         code = str(payload.get("code") or "")
     if code and code not in msg:
         msg += "\n  错误码：%s" % code
+    if endpoint and endpoint not in msg:
+        msg += tail
     low = (text or "").lower()
     for word, hint in _HINTS:
         if word in low:
@@ -621,8 +630,12 @@ def ref_data_url(path, protocol):
     return "data:%s;base64,%s" % (mime, base64.b64encode(raw).decode("ascii")), ""
 
 
-def ref_images_error(provider, paths):
-    """发送前的预检（数量 / 格式 / 体积）。返回人话说明，空串代表可以发。"""
+def ref_images_error(provider, paths, mode=""):
+    """发送前的预检（模式 / 数量 / 格式 / 体积）。返回人话说明，空串代表可以发。
+
+    **顺序有意义**：模式校验排在最前 —— 用户选的那一档这家不支持时就地拦下，
+    一次请求都不发（放行错了就是一次白花的计费，坑 102）。
+    """
     paths = [p for p in (paths or []) if str(p or "").strip()]
     if not paths:
         return ""
@@ -631,6 +644,11 @@ def ref_images_error(provider, paths):
     if not lim:
         return ("这一家的生图接口只收文字提示词，参考图请改用本地的〔生图〕模型"
                 "（图片已保留，不会丢）")
+    want = str(mode or "").strip()
+    if want and not providers.supports_ref_mode(provider, want):
+        return ("这一家不带%s，参考图请改用%s（图片已保留，不会丢）"
+                % (capability.MODE_LABEL.get(want, want),
+                   capability.MODE_LABEL.get(providers.ref_image_mode(provider), "文生图")))
     if len(paths) > lim["max"]:
         return ("参考图一次最多 %d 张（这一家的上限），现在选了 %d 张"
                 % (lim["max"], len(paths)))
@@ -665,13 +683,25 @@ def _shrink_for_log(body):
 
 
 def image_body(model, prompt, size="", negative="", seed=-1, extra=None,
-               protocol=PROTOCOL_ALIYUN, ref_images=None):
-    """拼一次云端生图的请求体。`ref_images` 是**已经编成 data URL 的参考图**列表。
+               protocol=PROTOCOL_ALIYUN, ref_images=None, ref_mode=""):
+    r"""拼一次云端生图的请求体。`ref_images` 是**已经编成 data URL 的参考图**列表。
 
     编码放在 `generate_image` 里做（那里能出"这张图不合格"的人话），这里只负责各家**字段
     形状不同**这一件事：阿里云把图塞进 `content[]`，MiniMax 塞进 `subject_reference[]`。
+
+    两档在协议层**同形**（各家官方页各只写了一个带图入口），真正把两种语义分开的是**提示词** ——
+    2026-10-06 真机测出来的（`D:\tmp\ref_verify\`，同一张四格色块图、同一接口）：
+      · `edit`    + "把色块改成夜晚蓝紫、位置不变" → **四个色块位置大小全保留**，配色按要求改
+      · `subject` + "参考配色画一只橘猫" → **全新构图**的猫，只借了配色（地毯条纹、墙上四格画）
+    同一接口、同一个入参，差别全在提示词上。所以 `ref_mode` 在这里的作用是**给提示词加一句语义
+    约束** —— 是**我们侧的提示词构造**，不是接口原生开关，界面别写成"官方开关"。
+    MiniMax 只有 subject 一档（实测改不了图），对它加这句只是加固，不改变行为。
     """
     refs = [u for u in list(ref_images or []) if str(u).strip()]
+    if refs:
+        _hint = {"edit": "以此图为本体进行修改。", "subject": "以此图主体为核心进行创作。"}.get(str(ref_mode or "").strip())
+        if _hint:
+            prompt = ("%s%s" % (_hint, prompt)) if str(prompt).strip() else _hint
     if protocol == PROTOCOL_MINIMAX:
         body = {"model": model, "prompt": prompt, "response_format": "url"}
         for k, v in _size_for(protocol, size):
@@ -729,11 +759,12 @@ def image_body(model, prompt, size="", negative="", seed=-1, extra=None,
 
 def generate_image(cfg, provider, model, prompt, dest, emit=None, stop_flag=None,
                    negative="", size="", seed=-1, log=None, ref_images=None,
-                   on_task_id=None, persist=None):
+                   on_task_id=None, persist=None, ref_mode=""):
     """云端生图：同步端点出 URL；万一服务端给了 task_id，就地转成轮询。
 
-    `ref_images` 是本地参考图路径列表（图生图）。发送前先 `ref_images_error` 预检，
-    不合格就地报错，**一次请求都不发**（预检在 UI 侧也做一遍，这里是最后一道）。
+    `ref_images` 是本地参考图路径列表，`ref_mode` 是要用哪一档（空 = 这一家的默认档）。
+    发送前先 `ref_images_error` 预检（模式 / 张数 / 格式 / 体积），不合格就地报错，
+    **一次请求都不发**（预检在 UI 侧也做一遍，这里是最后一道）。
 
     `on_task_id`：拿到 task_id 的那一刻回调一次（**在轮询之前**）—— 调用方靠它把
     task_id 立刻落进台账，断电 / 强杀之后还能「取回」（产物地址只活 24 小时）。
@@ -749,7 +780,7 @@ def generate_image(cfg, provider, model, prompt, dest, emit=None, stop_flag=None
         log = _Log(dest + ".log", "云端生图 %s" % model)
     timeout = int(cfg.get("cloud_image_wait_seconds", 180) or 180)
     proto = protocol_of(provider)
-    bad = ref_images_error(provider, ref_images)
+    bad = ref_images_error(provider, ref_images, mode=ref_mode)
     if bad:
         return _img_fail(bad, t0, log)
     urls_in = []
@@ -760,17 +791,20 @@ def generate_image(cfg, provider, model, prompt, dest, emit=None, stop_flag=None
         urls_in.append(data_url)
     body = image_body(model, prompt, size=size, negative=negative, seed=seed,
                       extra=providers.media_extra_params(provider, model),
-                      protocol=proto, ref_images=urls_in)
+                      protocol=proto, ref_images=urls_in, ref_mode=ref_mode)
     log.json("请求 POST %s" % image_endpoint(provider), _shrink_for_log(body))
     emit(("line", "云端生图：%s%s" % (providers.short_of(model),
-                                      "（带 %d 张参考图）" % len(urls_in) if urls_in else "")))
+                                      "（%s %d 张）" % (capability.MODE_LABEL.get(ref_mode,
+                                                                             "参考图"),
+                                                        len(urls_in))
+                                      if urls_in else "")))
     emit(("progress", "☁ 云端生图中… %ds" % int(time.time() - t0)))
 
     st, text = _request(provider, "POST", image_endpoint(provider), body, timeout=timeout)
     log.w("回包 HTTP %s" % st)
     log.json("回包原文", _safe_json(text))
     if st != 200:
-        return _img_fail(explain(st, text, provider), t0, log)
+        return _img_fail(explain(st, text, provider, image_endpoint(provider)), t0, log)
     payload = _safe_json(text)
     if not isinstance(payload, dict):
         return _img_fail("回包不是 JSON，没法解析（原文已存日志）。", t0, log)
@@ -963,7 +997,7 @@ def submit_video(cfg, provider, model, prompt, resolution="", duration=0, ratio=
         err = "服务端回了 200 但没有 task_id（回包结构不认识，原文已存日志）。"
         log.w(err)
     else:
-        err = explain(st, text, provider)
+        err = explain(st, text, provider, url)
         log.w("提交失败：%s" % err)
     out = {"ok": bool(tid), "task_id": tid, "raw": payload,
            "error": err, "log_path": log.path}
@@ -991,7 +1025,7 @@ def query_task(provider, task_id, model=""):
     payload = _safe_json(text)
     if st != 200:
         return {"status": "unknown", "urls": [], "image_urls": [],
-                "error": explain(st, text, provider), "code": "",
+                "error": explain(st, text, provider, url), "code": "",
                 "raw": payload, "usage": {}, "task_id": task_id,
                 "submit_time": "", "end_time": ""}
     if not isinstance(payload, dict):
@@ -1023,7 +1057,7 @@ def query_task(provider, task_id, model=""):
                            timeout=45)
         p2 = _safe_json(t2)
         if st2 != 200:
-            err = explain(st2, t2, provider)
+            err = explain(st2, t2, provider, file_endpoint(provider, payload.get("file_id")))
             status = "unknown"
         elif not isinstance(p2, dict):
             err = "文件检索回包不是 JSON（原文已存日志）。"
@@ -1207,7 +1241,7 @@ def cancel(provider, task_id, model=""):
     ok = st == 200 and not (isinstance(payload, dict) and payload.get("code"))
     if ok:
         return True, "已取消（任务还没开始跑，不会产生费用）。"
-    why = _says(text) or explain(st, text, provider)
+    why = _says(text) or explain(st, text, provider, task_endpoint(provider, task_id, model) + "/cancel")
     return False, ("取消没成功：%s\n  云端任务一旦开始运行就取消不了，只能不再等它——"
                    "任务记录已存进 cloud_jobs.json，之后可以点「取回」拿结果。" % why)
 

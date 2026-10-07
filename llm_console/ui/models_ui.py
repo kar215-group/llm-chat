@@ -107,6 +107,10 @@ class ModelsMixin:
                      % (name, what), "meta")
 
     def _update_model_label(self):
+        # 附件条右侧「带图方式」区跟着模型走：仅生图模型显示、置灰态随家族/服务商刷新。
+        # 放在所有分支之前 —— 从生图切回聊天时也必须把那块区域收起来
+        # （方法内部有 getattr 守卫，顶栏先于输入区构建时调用是空操作）。
+        self._refresh_ref_mode_zone()
         cur = str(self.cfg.get("model") or "")
         if model_missing(self.cfg):
             # 「（纯文本）」是**能力**标注，只有真选上了模型才谈得上能力：一个 .gguf 都没有
@@ -304,8 +308,12 @@ class ModelsMixin:
         """
         if os.path.basename(path) == os.path.basename(self.cfg["model"]):
             return
-        if self._busy:
-            messagebox.showinfo("切换模型", "正在生成回复，请等本轮结束再切换模型。")
+        if self._any_busy():
+            # 四标志统一判（坑 19）：生图 / 生视频 / 服务操作期间切模型会让
+            # cfg["model"] 与在跑任务、顶栏显示三方错位（文案 2026-10-07 已报 W 复核）
+            messagebox.showinfo("切换模型",
+                                "当前有任务正在进行（生成 / 生图 / 生视频 / 服务操作），\n"
+                                "请等任务结束再切换模型。")
             return
         disp = display_name(self.cfg, path)
         # 类型判定：以"是否出现在对应扫描列表"为准（视频组件 → 生视频；生图目录内的
@@ -351,8 +359,10 @@ class ModelsMixin:
         mid = providers.make_cloud_id(pid, model)
         if providers.is_cloud(self.cfg) and self.cfg.get("model") == mid:
             return
-        if self._busy:
-            messagebox.showinfo("切换模型", "正在生成回复，请等本轮结束再切换模型。")
+        if self._any_busy():
+            messagebox.showinfo("切换模型",
+                                "当前有任务正在进行（生成 / 生图 / 生视频 / 服务操作），\n"
+                                "请等任务结束再切换模型。")
             return
         self.cfg["model"] = mid
         self.cfg["model_provider"] = pid
@@ -845,9 +855,9 @@ class ModelsMixin:
         单文件按它自己的类型收进对应清单。**只登记路径、不移动文件**（判据在
         `models.extra_sources`，扫描侧 `scan_models` / `video_scan_dirs` 会认）。
         """
-        if self._svc_busy or self._busy or self._img_busy:
+        if self._any_busy():
             messagebox.showinfo("手动定向模型",
-                                "当前有任务正在进行（生成/生图/服务操作），\n"
+                                "当前有任务正在进行（生成 / 生图 / 生视频 / 服务操作），\n"
                                 "请等任务结束、服务停止后再加入模型来源。")
             return
         host = self.root
@@ -924,9 +934,9 @@ class ModelsMixin:
         self._update_model_label()
 
     def _open_tidy_dialog(self):
-        if self._svc_busy or self._busy or self._img_busy:
+        if self._any_busy():
             messagebox.showinfo("整理模型文件夹",
-                                "当前有任务正在进行（生成/生图/服务操作），\n"
+                                "当前有任务正在进行（生成 / 生图 / 生视频 / 服务操作），\n"
                                 "请等任务结束、服务停止后再整理文件。")
             return
         moves, unpaired = plan_tidy(self.cfg)

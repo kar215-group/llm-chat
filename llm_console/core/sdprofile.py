@@ -63,6 +63,21 @@ QWEN_MARK = (b"transformer_blocks.0.attn.to_q", b"time_text_embed.timestep_embed
 H3_MARK = (b"adaln_t_table", b"audio_patch_proj.weight", b"blocks.0.attn.qkv_proj")
 H3_ENC = (b"visual.blocks", b"model.embed_tokens")
 
+# ---- 编辑通路（生图带图的两种模式）----
+# 底图重绘：img2img / inpaint 的标准入口，help 原文 "-i, --init-img <string>" → **单张**
+EDIT_MODE_INIT = "edit"
+# 主体参考：help 原文 "reference image ... (can be used multiple times)" → **可重复给多张**
+EDIT_MODE_REF = "subject"
+# 生图族默认两档都可选：这两个都是 sd-cli 的**通用**入口，不挑家族。至于"这一族的权重有没有为
+# 对应能力训练过"，离线判不出来 —— 所以 flag 如实标依据，界面照实显示，谁也不许把
+# "通用入口有这条路"说成"这一族实测支持"（坑 101 / 10 §5.1 纪律）。
+# 模式标识与 `capability.MODE_*` 同一套字面量（那边是权威；这里不反向 import 免得成环，
+# 一致性由 `_selftest/test_cloud_ref_image.py` 断言钉住）。
+IMG_EDIT_MODES = (EDIT_MODE_INIT, EDIT_MODE_REF)
+EDIT_MODE_FLAG_TESTED = "tested"     # 开发机真机跑过这一族
+EDIT_MODE_FLAG_HELP = "help"         # sd-cli --help 点名了这一族/变体
+EDIT_MODE_FLAG_UNKNOWN = "unknown"   # 只是通用入口，--help 没点名这一族
+
 FAMILIES = {
     # ---------------- 开发机实测过（argv 必须与调优前逐字一致）----------------
     "qwen-image": {
@@ -78,8 +93,12 @@ FAMILIES = {
         "edit_cfg_min": 3.0,        # 实测：编辑场景 CFG 低于 3.0 时提示词影响力不足
         "backend": "te=cpu,diffusion=cuda0,vae=cuda0",
         "size_multiple": 8,
-        "edit": "init",              # 附图 = -i 底图（配 --llm_vision 才懂"换背景"这类指令）
+        "edit": EDIT_MODE_INIT,     # 默认档 = -i 底图重绘（配 --llm_vision 才懂"换背景"这类指令）
         "edit_needs": ("llm_vision",),
+        "edit_modes": IMG_EDIT_MODES,
+        "edit_modes_flag": EDIT_MODE_FLAG_TESTED,   # 两档都在开发机真机跑过（2026-10-06）
+        "edit_modes_note": ("两档实测：-i 92.7s、-r 357s（都 rc=0）；-r 不补视觉投影器会 rc=1。"
+                            "--img-cfg-scale 本模型被引擎忽略（提示 3-conditioning 不支持）"),
         "cfg_hint": "2.5（官方推荐；编辑时提到 3.0）",
         "steps_hint": "20（8 步最快）",
     },
@@ -118,7 +137,10 @@ FAMILIES = {
         "flow_shift": None,
         "backend": "clip=cpu,diffusion=cuda0,vae=cuda0",
         "size_multiple": 16,
-        "edit": "ref",               # FLUX.1-Kontext 用 -r/--ref-image
+        "edit": EDIT_MODE_REF,       # FLUX.1-Kontext 用 -r/--ref-image（--help 点名了这一族）
+        "edit_modes": IMG_EDIT_MODES,
+        "edit_modes_flag": EDIT_MODE_FLAG_HELP,
+        "edit_modes_note": "主体参考 -r 有 --help 依据；底图重绘 -i 属通用入口，未实测",
         "cfg_hint": "1.0（dev/schnell 都用 1.0；schnell 4 步）",
         "steps_hint": "dev 20~50 / schnell 4",
         "docs": "上游 docs/flux.md 的示例命令行",
@@ -135,7 +157,10 @@ FAMILIES = {
         "flow_shift": None,
         "backend": "te=cpu,diffusion=cuda0,vae=cuda0",
         "size_multiple": 16,
-        "edit": "ref",
+        "edit": EDIT_MODE_REF,
+        "edit_modes": IMG_EDIT_MODES,
+        "edit_modes_flag": EDIT_MODE_FLAG_UNKNOWN,
+        "edit_modes_note": "两档都是 sd-cli 通用入口，--help 未点名 flux2（按名字猜的）",
         "cfg_hint": "见发行页（--help 说 flux2 的文本编码器是 mistral-small3.2）",
         "steps_hint": "8~50",
         "docs": "sd-cli --help 的 --llm 说明与 --scheduler 列表里的 flux2",
@@ -152,7 +177,10 @@ FAMILIES = {
         "flow_shift": None,          # --flow-shift 默认 auto
         "backend": "clip=cpu,diffusion=cuda0,vae=cuda0",
         "size_multiple": 16,
-        "edit": "init",
+        "edit": EDIT_MODE_INIT,
+        "edit_modes": IMG_EDIT_MODES,
+        "edit_modes_flag": EDIT_MODE_FLAG_UNKNOWN,
+        "edit_modes_note": "两档都是 sd-cli 通用入口，--help 未点名本族（按名字猜的）",
         "cfg_hint": "4.5~7（SD3.5 medium 常给 4.5，可试 --slg-scale 2.5）",
         "steps_hint": "20~50",
     },
@@ -168,7 +196,10 @@ FAMILIES = {
         "flow_shift": None,
         "backend": "clip=cpu,diffusion=cuda0,vae=cuda0",
         "size_multiple": 8,
-        "edit": "init",
+        "edit": EDIT_MODE_INIT,
+        "edit_modes": IMG_EDIT_MODES,
+        "edit_modes_flag": EDIT_MODE_FLAG_UNKNOWN,
+        "edit_modes_note": "两档都是 sd-cli 通用入口，--help 未点名本族（按名字猜的）",
         "cfg_hint": "5~8",
         "steps_hint": "20~30",
         "docs": "上游 docs/sd.md：单文件用 -m，拆开的才补 --vae/--clip*",
@@ -185,7 +216,10 @@ FAMILIES = {
         "flow_shift": None,
         "backend": "clip=cpu,diffusion=cuda0,vae=cuda0",
         "size_multiple": 8,
-        "edit": "init",
+        "edit": EDIT_MODE_INIT,
+        "edit_modes": IMG_EDIT_MODES,
+        "edit_modes_flag": EDIT_MODE_FLAG_UNKNOWN,
+        "edit_modes_note": "两档都是 sd-cli 通用入口，--help 未点名本族（按名字猜的）",
         "cfg_hint": "6~8",
         "steps_hint": "20~30",
         "docs": "上游 docs/sd.md 的 -m 用法；--help：--motion-module 在 SD1.5 上开视频",
@@ -257,7 +291,10 @@ FAMILIES = {
         "flow_shift": None,
         "backend": "",
         "size_multiple": 8,
-        "edit": "init",
+        "edit": EDIT_MODE_INIT,
+        "edit_modes": IMG_EDIT_MODES,
+        "edit_modes_flag": EDIT_MODE_FLAG_UNKNOWN,
+        "edit_modes_note": "认不出家族：两档都作为通用入口原样给出，出图对不对无法预判",
         "cfg_hint": "以模型发行页为准",
         "steps_hint": "20",
     },
@@ -291,6 +328,29 @@ def profile(fid):
 
 def label_of(fid):
     return profile(fid).get("label", fid)
+
+
+def edit_modes(fid):
+    """这一族的生图支持哪几档模式 → `(modes, flag)`。**不是**"能不能带图"的判据。
+
+    `flag` 说清依据，界面照实显示（别把"通用入口有这条路"说成"这一族实测支持"）：
+      `tested`  开发机真机跑过这一族 · `help` sd-cli --help 点名了这一族/变体
+      `unknown` 只是通用入口，--help 没点名这一族 —— 能跑**不保证出图对**
+
+    生视频族（`kind != "image"`）返回空元组：它们的 `edit` 是**图生视频的首帧**，
+    与这两种模式不是一回事，别混进同一张表。
+    """
+    p = FAMILIES.get(str(fid or "").strip())
+    if not p or p.get("kind") != "image":
+        return (), "none"
+    return (tuple(p.get("edit_modes") or IMG_EDIT_MODES),
+            str(p.get("edit_modes_flag") or EDIT_MODE_FLAG_UNKNOWN))
+
+
+def edit_modes_note(fid):
+    """这一族两档的依据说明（一句话，界面按需显示；没有就空串）。"""
+    p = FAMILIES.get(str(fid or "").strip()) or {}
+    return str(p.get("edit_modes_note") or "")
 
 
 def family_choices(kind=None):
