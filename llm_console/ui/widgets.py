@@ -1010,13 +1010,35 @@ class ScrollPage(object):
         self._wheel = attach_wheel(self.canvas)      # 滚轮走全窗口共用那套（见 attach_wheel）
 
     # ---- 尺寸 ----
+    def _sync_region(self, _e=None):
+        """scrollregion 与实际内容对齐（W 报"所有子页面都能向上滚动出大片空白"）。
+
+        根因（实测钉死）：Tk 画布在 `scrollregion 高 < 视口高` 时，origin 的
+        合法区间不是 [0,0] 而是 **[region−视口, 0] —— 允许负值**（向上滚能把
+        内容推下去、露出 region−视口 那么大一片空白），而向下滚又被钳在 0，
+        所以只有"向上"方向能滚出空白。W 的窗口高 891、所有页都矮于视口 ⇒
+        每一页都中招。⚠ 排查提示：`yview()` 的分数上报会把负 origin 饱和成
+        (0.0,1.0)，看着像"没滚"，量这个必须用 `canvasy(0)`（本轮因此绕了一大圈）。
+        修法：region 撑到"内容与视口取大" ⇒ slack=0 ⇒ origin 区间 [0,0]，
+        矮页滚不动、长页区间恰为 内容−视口（可滚动范围与实际内容一致）。
+        canvas 的 <Configure>（窗口缩放）与 inner 的 <Configure>（内容增减）
+        都走这里，两个方向的变化都被覆盖。
+        不做 update_idletasks：Configure 事件本身就代表几何已落定，而本函数
+        在缩放拖动中会被连续调用 —— 每次插一次 idle 排空会把重建过程层层放大。
+        """
+        bbox = self.canvas.bbox("all") or (0, 0, 0, 0)
+        vh = max(1, self.canvas.winfo_height())
+        vw = max(1, self.canvas.winfo_width())
+        self.canvas.configure(scrollregion=(0, 0, max(bbox[2], vw), max(bbox[3], vh)))
+
     def _on_inner_configure(self, _e=None):
-        self.canvas.configure(scrollregion=self.canvas.bbox("all") or (0, 0, 0, 0))
+        self._sync_region()
 
     def _on_canvas_configure(self, event):
         # 内容宽度贴着可视宽度：否则长控件会把 scrollregion 撑出右边，
         # 看上去像"页面比窗口宽"，实际却滚不到
         self.canvas.itemconfigure(self._win, width=max(1, event.width))
+        self._sync_region()
 
     # ---- 页切换 ----
     def set_page(self, frame):
@@ -1037,7 +1059,7 @@ class ScrollPage(object):
     def _refresh(self):
         self.canvas.update_idletasks()
         self.inner.update_idletasks()
-        self.canvas.configure(scrollregion=self.canvas.bbox("all") or (0, 0, 0, 0))
+        self._sync_region()
 
     # ---- 锚点定位 ----
     def goto(self, widget, offset=8):

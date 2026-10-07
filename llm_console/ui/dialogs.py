@@ -9,6 +9,8 @@ r"""llm_console.ui.dialogs — 独立对话框：退出确认。
 import tkinter as tk
 from tkinter import ttk
 
+from . import theme
+
 
 class ExitDialog(tk.Toplevel):
     """模态二选：停止服务并退出 / 取消（继续运行）。"""
@@ -25,9 +27,9 @@ class ExitDialog(tk.Toplevel):
             padx=28, pady=(0, 14))
         box = ttk.Frame(self)
         box.pack(padx=28, pady=(0, 14))
-        ttk.Button(box, text="停止服务并退出", width=16,
+        theme.button(box, text="停止服务并退出", width=16,
                    command=lambda: self._done("stop")).pack(side="left", padx=4)
-        ttk.Button(box, text="取消", width=10,
+        theme.button(box, text="取消", width=10,
                    command=lambda: self._done("cancel")).pack(side="left", padx=4)
         ttk.Label(self, text="「取消」返回主窗口，程序与服务继续运行。Esc 也可取消。",
                   foreground="#999999",

@@ -29,6 +29,7 @@ from tkinter import ttk, messagebox
 
 from ..core import (crashlog, diagnose, providers, secrets, selfupdate, updater)
 from ..core.config import APP_DIR, APP_VERSION, CONFIG_PATH, save_config
+from . import theme
 from . import widgets
 
 
@@ -112,12 +113,12 @@ class SubWindowMixin:
         status_var = tk.StringVar(value="")
         _pl = providers.provider_labels(cfg)
 
-        combo_p = ttk.Combobox(body, state="readonly", width=30,
+        combo_p = theme.comb(body, state="readonly", width=30,
                                values=[lb for lb, _p in _pl])
-        combo_m = ttk.Combobox(body, state="readonly", width=30,
+        combo_m = theme.comb(body, state="readonly", width=30,
                                textvariable=model_var, values=[])
         # 计费单位只列**本链路**认得的（拆分的另一半：单位跟着链路走，不再混在一格）
-        combo_u = ttk.Combobox(body, state="readonly", width=8, textvariable=unit_var,
+        combo_u = theme.comb(body, state="readonly", width=8, textvariable=unit_var,
                                values=list(providers.UNITS_BY_KIND[kind]))
         # 已填清单用 Text 而不是"拼全部模型名"的 Label（坑 92：状态类 Label 必须定长）
         lst = tk.Text(body, height=8, width=46, font=("Microsoft YaHei UI", 9),
@@ -202,14 +203,14 @@ class SubWindowMixin:
         combo_m.bind("<<ComboboxSelected>>", pick_model)
         lrow("服务商", combo_p)
         lrow("模型", combo_m)
-        lrow("单价（元）", ttk.Entry(body, textvariable=price_var, width=10))
+        lrow("单价（元）", theme.entry(body, textvariable=price_var, width=10))
         lrow("计费单位", combo_u)
         lrow("已填的模型", lst)
         btns = ttk.Frame(body)
         lrow("", btns)
-        ttk.Button(btns, text="写入单价", width=12,
+        theme.button(btns, text="写入单价", width=12,
                    command=lambda: write_price(False)).pack(side="left")
-        ttk.Button(btns, text="清除该模型单价", width=14,
+        theme.button(btns, text="清除该模型单价", width=14,
                    command=lambda: write_price(True)).pack(side="left", padx=(8, 0))
         ttk.Label(btns, textvariable=status_var, foreground="#808080", wraplength=230,
                   justify="left", font=("Microsoft YaHei UI", 9)).pack(side="left", padx=(10, 0))
@@ -360,7 +361,7 @@ class SubWindowMixin:
         for text, fn in (("一键诊断", do_diag), ("复制诊断报告", copy_report),
                          ("保存诊断报告", save_report),
                          ("打开错误日志", lambda: open_file(crashlog.log_path(), "错误日志"))):
-            ttk.Button(bf, text=text, command=fn).pack(side="left", padx=(0, 6))
+            theme.button(bf, text=text, command=fn).pack(side="left", padx=(0, 6))
         ttk.Label(body, textvariable=status, foreground="#808080", wraplength=520,
                   justify="left", font=("Microsoft YaHei UI", 9)).grid(
             row=rows["i"], column=1, columnspan=2, sticky="w", pady=(6, 0))
@@ -476,9 +477,9 @@ class SubWindowMixin:
 
         btns = ttk.Frame(win)
         btns.pack(side="bottom", fill="x", padx=14, pady=(0, 12))
-        btn_go = ttk.Button(btns, text="立即更新", width=12)
+        btn_go = theme.button(btns, text="立即更新", width=12)
         btn_go.pack(side="right")
-        btn_stop = ttk.Button(btns, text="暂不", width=10)
+        btn_stop = theme.button(btns, text="暂不", width=10)
         btn_stop.pack(side="right", padx=(0, 8))
         if exe_here is None:
             btn_go.configure(state="disabled")
@@ -512,9 +513,9 @@ class SubWindowMixin:
             except Exception as e:
                 status.set("复制失败（%s）—— 地址：%s" % (e, url))
 
-        ttk.Button(btns, text="打开发布页", width=11,
+        theme.button(btns, text="打开发布页", width=11,
                    command=_open_release_page).pack(side="left")
-        ttk.Button(btns, text="复制下载链接", width=13,
+        theme.button(btns, text="复制下载链接", width=13,
                    command=_copy_link).pack(side="left", padx=(8, 0))
 
         def _record_dismiss():

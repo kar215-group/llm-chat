@@ -18,6 +18,7 @@ from ..connection import cloud_media
 from ..connection import stream as stream_conn
 from ..connection.stream import stream_worker
 from . import imgdecode
+from . import theme
 from . import widgets
 
 
@@ -266,17 +267,17 @@ class ChatMixin:
 
     def _build_attach_tile(self, inner, i, kind, path, px):
         """一块瓷砖：预览（或占位样图）在上、缩短文件名在下、右上角 ×、悬停看全名。"""
-        tile = tk.Frame(inner, background="#ffffff", highlightthickness=1,
-                        highlightbackground="#c9c9c9", padx=4, pady=4)
+        tile = tk.Frame(inner, background=theme.c("bg"), highlightthickness=1,
+                        highlightbackground=theme.c("border"), padx=4, pady=4)
         tile.grid(row=0, column=i, padx=(0, 6), pady=2)
         photo, fallback = self._tile_preview(kind, path, px)
         if photo is not None:
             self._tile_photos.append(photo)         # 持引用防 GC（同 _remember_photo 的教训）
         prev = tk.Label(tile, image=photo if photo is not None else "",
-                        width=px, height=px, background="#ffffff")
+                        width=px, height=px, background=theme.c("bg"))
         prev.pack()
         name = self._tile_name(kind, path)
-        lab = ttk.Label(tile, text=_shorten_name(name), foreground="#555555",
+        lab = ttk.Label(tile, text=_shorten_name(name), foreground=theme.c("label"),
                         font=("Microsoft YaHei UI", 9))
         lab.pack()
         tip = lambda k=kind, p=path, f=fallback: self._tile_tip(k, p, f)
@@ -287,8 +288,8 @@ class ChatMixin:
             w.bind("<ButtonRelease-1>", self._strip_drag_end)
             w.bind("<MouseWheel>", self._strip_wheel)
         tk.Button(tile, text="×", relief="flat", bd=0, takefocus=0, padx=2,
-                  background="#ffffff", activebackground="#ffffff",
-                  foreground="#8a8a8a", activeforeground="#c01c28",
+                  background=theme.c("bg"), activebackground=theme.c("bg"),
+                  foreground=theme.c("muted"), activeforeground=theme.c("error"),
                   font=("Microsoft YaHei UI", 9, "bold"), cursor="hand2",
                   command=lambda k=kind, p=path: self._drop_attach_tile(k, p)
                   ).place(relx=1.0, rely=0.0, anchor="ne")

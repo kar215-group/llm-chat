@@ -162,6 +162,34 @@ def _listdir(path):
         return []
 
 
+def _expand_dirs(root, max_depth=3):
+    """"模型来源目录"展开成要扫描的目录清单：它自己 + 子目录（深度 ≤ max_depth）。
+
+    W 2026-10-08 报的检测缺口：手动定向的文件夹此前只扫**顶层** —— 而"每个模型一个
+    子文件夹"（本体 + mmproj 同放）是产品认可的两种摆放方式之一，于是
+    `D:\\llm modle\\Qwen3.6-35B\\*.gguf` 这类模型在"手动定向"路径下全漏
+    （models_dir 主路径本来就扫一级子目录，两条路径行为不一致）。
+    `D:\\aaa models\\<组织>\\<模型>\\*.gguf` 这类两层的目录也要认，所以深度给 3。
+    过滤与 `auto_locate_models_dir` 同一口径：跳过 `.` 开头的隐藏目录与 `*.old` / `*.new`。
+    """
+    out = []
+    root = os.path.normpath(str(root or ""))
+    if not root or not os.path.isdir(root):
+        return out
+    out.append(root)
+    base_depth = root.rstrip(os.sep).count(os.sep)
+    for dp, dns, _fns in os.walk(root):
+        if dp.rstrip(os.sep).count(os.sep) - base_depth >= max_depth:
+            dns[:] = []                    # 到深度上限：不再往下走
+        dns[:] = sorted(d for d in dns
+                        if not d.startswith(".")
+                        and not d.endswith((".old", ".new")))
+        np = os.path.normpath(dp)
+        if np != root and np not in out:
+            out.append(np)
+    return out
+
+
 def auto_locate_models_dir(cfg, app_dir=None, max_depth=3):
     """模型目录的「自动定向」：在程序目录附近找一个**确实装着模型**的文件夹，返回路径或空串。
 
@@ -226,16 +254,17 @@ def video_scan_dirs(cfg):
         if np and os.path.isdir(np) and np != img_dir and np not in out:
             out.append(np)
     try:
-        for n in sorted(os.listdir(d)):
-            fp = os.path.normpath(os.path.join(d, n))
-            if os.path.isdir(fp) and fp != img_dir and fp not in out:
-                out.append(fp)
+        for dd in _expand_dirs(d):
+            if dd != img_dir and dd not in out:
+                out.append(dd)
     except Exception:
         pass
-    # 手动定向加入的目录也按"视频组件扫描目录"处理（W 2026-10-05）
+    # 手动定向加入的目录也按"视频组件扫描目录"处理（W 2026-10-05）；
+    # 2026-10-08 起展开到子目录（深度 ≤ 3）——与文件名来源同一套递归口径
     for d2 in extra_scan_dirs(cfg):
-        if d2 != img_dir and d2 not in out:
-            out.append(d2)
+        for dd in _expand_dirs(d2):
+            if dd != img_dir and dd not in out:
+                out.append(dd)
     return out
 
 def scan_video_models(cfg):
@@ -288,27 +317,50 @@ def scan_models(cfg):
         return not _is_mmproj(n) and gguf_is_chat_capable(os.path.join(folder, n))
 
     chat, image = [], []
-    # 顶层 .gguf
-    for n in _ggufs(d):
-        if _chat_ok(d, n):
-            chat.append(os.path.join(d, n))
-    # 一级子目录（每个子目录视为一个模型的"家"；生图目录除外）
-    try:
-        subs = [n for n in sorted(os.listdir(d))
-                if os.path.isdir(os.path.join(d, n))
-                and os.path.normpath(os.path.join(d, n)) != img_dir]
-    except Exception:
-        subs = []
-    for s in subs:
-        folder = os.path.join(d, s)
-        for n in _ggufs(folder):
-            if _chat_ok(folder, n):
-                chat.append(os.path.join(d, s, n))
+    pairs = find_vl_pairs(cfg)
+
+    def _harvest(root):
+        """把一棵"模型树"收进两个清单 —— models_dir 与手动定向的来源**共用这一处**
+        （W 2026-10-08：此前手动定向只扫顶层，"每个模型一个子目录"的摆法整批漏检，
+        两条路径行为不一致；现在连同更深的组织嵌套一起递归，深度见 _expand_dirs）。
+
+        每一层目录里的规则：
+        · 可聊天 gguf（非 mmproj、带元数据）→ chat
+        · 扩散权重（.gguf / .safetensors / .ckpt…，且不是视频链路组件）→ image
+        生图目录（img_dir）除外 —— 它按"扩散主体 + 配对可看图组件"单独处理（下面一段）。
+        """
+        img_norm = os.path.normpath(img_dir)
+        for folder in _expand_dirs(root):
+            if os.path.normpath(folder) == img_norm:
+                continue
+            for n in _ggufs(folder):
+                if _is_mmproj(n):
+                    continue
+                fp = os.path.join(folder, n)
+                if fp in chat or fp in image:
+                    continue
+                if is_diffusion_file(fp):
+                    # 视频链路的组件（主体 / 文本编码器）不进生图清单：它们是 kv=0 的
+                    # 裸权重，拿去生图必然失败，各自归 scan_video_models 的清单
+                    if video_component_role(fp) is None:
+                        image.append(fp)
+                elif _chat_ok(folder, n):
+                    chat.append(fp)
+            # 非 gguf 的扩散单文件（生图的 .safetensors / .ckpt，引擎用 -m 直接吃）
+            for n in _listdir(folder):
+                fp = os.path.join(folder, n)
+                if not os.path.isfile(fp) or str(n).lower().endswith(".gguf"):
+                    continue
+                if not str(n).lower().endswith(sdprofile.DIFFUSION_EXTS):
+                    continue
+                if fp not in image and is_diffusion_file(fp):
+                    image.append(fp)
+
+    _harvest(d)
     # 生图目录：扩散模型 + 可配对 mmproj 的视觉组件。
     # 这里不再只盯 .gguf —— SDXL / Flux / SD3 的社区权重常常是单个 .safetensors/.ckpt，
     # 引擎用 `-m` 直接吃（见 sdprofile 的 main_flag）。配套件（vae / clip / t5 / lora …）
     # 由 is_model_file 的名字判据摘出去，带元数据的 .gguf 是语言模型（可当聊天模型）。
-    pairs = find_vl_pairs(cfg)
     for n in sorted(os.listdir(img_dir) if os.path.isdir(img_dir) else []):
         p = os.path.join(img_dir, n)
         if not os.path.isfile(p) or _is_mmproj(n):
@@ -321,34 +373,19 @@ def scan_models(cfg):
             image.append(p)
         elif p in pairs and gguf_is_chat_capable(p):
             chat.append(p)
-    # 手动定向加入的来源（W 2026-10-05）：文件夹按"一个目录"并入，单文件按它自己判。
-    # **只登记、不动文件**；判据与上面完全一致（不另写一套）。
+    # 手动定向加入的来源（W 2026-10-05）：文件夹按"一棵模型树"并入（与 models_dir
+    # 同一套 _harvest），单文件按它自己判。**只登记、不动文件**。
     for p in extra_sources(cfg):
         if os.path.isfile(p):
             if is_diffusion_file(p):
-                if p not in image:
+                if video_component_role(p) is None and p not in image:
                     image.append(p)
             elif (not _is_mmproj(os.path.basename(p))
                   and str(p).lower().endswith(".gguf")
                   and gguf_is_chat_capable(p) and p not in chat):
                 chat.append(p)
             continue
-        for n in _ggufs(p):
-            fp = os.path.join(p, n)
-            if _chat_ok(p, n) and fp not in chat:
-                chat.append(fp)
-        try:
-            names = sorted(os.listdir(p))
-        except Exception:
-            names = []
-        for n in names:
-            fp = os.path.join(p, n)
-            if not os.path.isfile(fp) or _is_mmproj(n):
-                continue
-            if not str(n).lower().endswith(sdprofile.DIFFUSION_EXTS):
-                continue
-            if is_diffusion_file(fp) and fp not in image:
-                image.append(fp)
+        _harvest(p)
     return d, chat, image
 
 def has_local_chat(cfg):
@@ -521,21 +558,16 @@ def find_vl_pairs(cfg):
     """
     d = cfg.get("models_dir") or os.path.dirname(cfg.get("model", "")) or "."
     img_dir = cfg.get("image_model_dir") or os.path.join(d, IMAGE_SUBDIR)
-    folders = [d]
-    try:
-        for n in sorted(os.listdir(d)):
-            fp = os.path.join(d, n)
-            if os.path.isdir(fp):
-                folders.append(fp)
-    except Exception:
-        pass
+    folders = _expand_dirs(d)
     if (os.path.isdir(img_dir)
             and os.path.normpath(img_dir) not in [os.path.normpath(f) for f in folders]):
         folders.append(img_dir)
-    # 手动定向加入的目录也要参与 mmproj 配对（否则那些目录里的可看图模型认不出投影器）
+    # 手动定向加入的目录也要参与 mmproj 配对（否则那些目录里的可看图模型认不出投影器）；
+    # 2026-10-08 起展开到子目录 —— 与 scan_models / video_scan_dirs 同一套递归口径
     for d2 in extra_scan_dirs(cfg):
-        if d2 not in [os.path.normpath(f) for f in folders]:
-            folders.append(d2)
+        for dd in _expand_dirs(d2):
+            if dd not in [os.path.normpath(f) for f in folders]:
+                folders.append(dd)
     pairs = {}
     for folder in folders:
         try:

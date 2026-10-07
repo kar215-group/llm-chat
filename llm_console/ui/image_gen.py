@@ -10,6 +10,7 @@ import tkinter as tk
 from tkinter import ttk
 
 from ..core import capability, cloudjobs, config, providers, sdprofile
+from . import theme
 from ..core.media import (build_img_cmd, img_out_dir, plan_ref_images,
                           resolve_img_files, resolve_img_model_path)
 from ..connection import cloud_media
@@ -378,11 +379,11 @@ class ImageGenMixin:
                 if thumb is not None:
                     self.chat.image_create("end", image=thumb)
                     self.chat.insert("end", "  ", "meta")      # 图片与按钮的间距
-                btn = ttk.Button(self.chat, text="打开原图",
+                btn = theme.button(self.chat, text="打开原图",
                                  command=lambda p=out: os.startfile(p))
                 self.chat.window_create("end", window=btn)
                 self.chat.insert("end", "  ", "meta")
-                btn2 = ttk.Button(self.chat, text="打开所在文件夹",
+                btn2 = theme.button(self.chat, text="打开所在文件夹",
                                   command=lambda p=out: self._open_containing(p))
                 self.chat.window_create("end", window=btn2)
                 self.chat.insert("end", "\n🎨 已保存：%s · 耗时 %ds\n" % (out, elapsed), "meta")

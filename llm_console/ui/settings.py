@@ -18,6 +18,7 @@ from ..core.models import has_local_chat, scan_models, scan_video_models
 from ..core.params import ctx_for, current_ngl
 from ..core.server import _query_serving_model, server_process_alive
 from ..connection import cloud
+from . import theme
 from . import widgets
 
 # ---------------------------------------------------------------------------
@@ -664,7 +665,7 @@ class SettingsMixin:
             """
             if var is None:
                 var = v.setdefault(key, tk.StringVar(value=str(self.cfg.get(key, ""))))
-            e = ttk.Entry(parent, textvariable=var, width=width)
+            e = theme.entry(parent, textvariable=var, width=width)
             if trace is not None:
                 var.trace_add("write", lambda *a: trace())
             _row(parent, rows, label, e, desc, hint, lw, fold)
@@ -680,7 +681,7 @@ class SettingsMixin:
                 r1["i"] += 1
                 v["show_reasoning"] = tk.BooleanVar(
                     value=bool(self.cfg.get("show_reasoning", True)))
-                ttk.Checkbutton(t1, text="展示思考过程",
+                theme.check(t1, text="展示思考过程",
                                 variable=v["show_reasoning"]).grid(
                     row=i, column=0, columnspan=3, sticky="w", pady=8)
                 ent(t1, r1, "temperature", "随机性",
@@ -690,8 +691,14 @@ class SettingsMixin:
                 head = tk.Frame(t1, background=widgets.default_bg())
                 head.grid(row=i, column=0, sticky="nw", padx=(0, 8), pady=5)
                 ttk.Label(head, text="系统提示词", width=14, anchor="nw").pack(side="left")
+                # 边框必须显式给：裸 Text 的默认高亮环色与主题底色同灰，四边全部
+                # 融进背景（视觉上"下边框丢了"，实测四边都丢）；焦点态给主色，与
+                # 圆角输入框（Round.TEntry 的 focus 态）同一套语义
                 v["system_prompt"] = tk.Text(t1, height=3, width=44,
-                                             font=("Microsoft YaHei UI", 9))
+                                             font=("Microsoft YaHei UI", 9),
+                                             bd=0, highlightthickness=1,
+                                             highlightbackground=theme.c("border"),
+                                             highlightcolor=theme.c("accent"))
                 v["system_prompt"].grid(row=i, column=1, columnspan=2, sticky="nsew", pady=5)
                 v["system_prompt"].insert("1.0", str(self.cfg.get("system_prompt", "")))
                 return
@@ -711,15 +718,19 @@ class SettingsMixin:
             widgets.HelpDot(head, "系统提示词：给模型的人设与规则，自动放在每轮对话最前面。").pack(side="left", padx=(2, 0))
             # width 必须显式给：tk.Text 默认 80 字符，在高 DPI 下要 1080px，
             # 会把这一行顶出滚动可视区（横向不能滚，等于看不见）
+            # 边框显式给（同上面 simple 分支：默认高亮环色与主题底色融合会隐形）
             v["system_prompt"] = tk.Text(t1, height=3, width=44,
-                                         font=("Microsoft YaHei UI", 9))
+                                         font=("Microsoft YaHei UI", 9),
+                                         bd=0, highlightthickness=1,
+                                         highlightbackground=theme.c("border"),
+                                         highlightcolor=theme.c("accent"))
             v["system_prompt"].grid(row=i, column=1, columnspan=2, sticky="nsew", pady=5)
             v["system_prompt"].insert("1.0", str(self.cfg.get("system_prompt", "")))
 
             i = r1["i"]
             r1["i"] += 1
             v["show_reasoning"] = tk.BooleanVar(value=bool(self.cfg.get("show_reasoning", True)))
-            ttk.Checkbutton(t1, text="在对话中显示模型的思考过程（reasoning，灰色斜体）",
+            theme.check(t1, text="在对话中显示模型的思考过程（reasoning，灰色斜体）",
                             variable=v["show_reasoning"]).grid(
                 row=i, column=0, columnspan=3, sticky="w", pady=8)
 
@@ -748,7 +759,7 @@ class SettingsMixin:
                 "模型文件夹：主页模型下拉列表扫描此目录下所有 .gguf 文件。", width=30)
             # ngl：显示/修改的是"当前模型"的值（按模型分别记忆）
             v["ngl"] = tk.StringVar(value=str(current_ngl(self.cfg)))
-            e_ngl = ttk.Entry(t2, textvariable=v["ngl"], width=8)
+            e_ngl = theme.entry(t2, textvariable=v["ngl"], width=8)
             row(t2, r2, "n-gpu-layers", e_ngl,
                 "放进显存的层数（当前模型）。新模型会按显存与模型大小自动计算并按模型分别记忆；"
                 "此处修改仅对当前模型生效。0 = 全部放 CPU。")
@@ -756,7 +767,7 @@ class SettingsMixin:
             # 原来这里预填的是全局兜底 cfg["ctx"]，而保存又无条件写进当前模型的记录，
             # 于是"打开任意一页点保存"就会把该模型自动算出的 context 覆盖掉（坑 130）
             v["ctx"] = tk.StringVar(value=str(ctx_for(self.cfg)))
-            e_ctx = ttk.Entry(t2, textvariable=v["ctx"], width=8)
+            e_ctx = theme.entry(t2, textvariable=v["ctx"], width=8)
             _row(t2, r2, "context (-c)", e_ctx,
                  "上下文长度（token）：容纳 系统提示 + 全部对话 + 工具定义 + 回答。"
                  "按模型分别记忆，切换模型时自动带上各自的值；新模型会按显存与内存预算"
@@ -769,7 +780,7 @@ class SettingsMixin:
             # 这里**不放 api_key**：那是「本地模型 API」那一页的事（生成 / 复制 / 撤销都在一处），
             # 摆在服务参数里会让人以为改完要重启服务，也会和那页的只读回显对不上
             v["reasoning_mode"] = tk.StringVar(value=str(self.cfg.get("reasoning_mode", "default")))
-            cb = ttk.Combobox(t2, textvariable=v["reasoning_mode"],
+            cb = theme.comb(t2, textvariable=v["reasoning_mode"],
                               values=["default", "off", "budget"], width=8, state="readonly")
             row(t2, r2, "reasoning", cb,
                 "思考模式：default 跟随模型模板；off 关闭思考（更快、不吃 max_tokens 额度）；"
@@ -821,7 +832,7 @@ class SettingsMixin:
                     "填相对路径时按程序目录解析。",
                     width=30, hint="留空=产物文件夹")
                 fr_i = ttk.Frame(t3)
-                ttk.Button(fr_i, text="打开输出目录",
+                theme.button(fr_i, text="打开输出目录",
                            command=lambda: _open_outdir(
                                media.img_out_dir(self.cfg),
                                "生图输出目录",
@@ -858,7 +869,7 @@ class SettingsMixin:
             v["img_family"] = tk.StringVar(
                 value=_code2label.get(str(self.cfg.get("img_family", "") or "").strip(),
                                       _fam_opts[0][1]))
-            fam_cb = ttk.Combobox(t3, textvariable=v["img_family"], state="readonly",
+            fam_cb = theme.comb(t3, textvariable=v["img_family"], state="readonly",
                                   width=24, values=[t for _c, t in _fam_opts])
             img_note = tk.StringVar(value="")
             _fam_row = r3["i"]
@@ -957,7 +968,7 @@ class SettingsMixin:
             # 「输出目录」这一行与生视频那块**同一形状**（标签 + 打开按钮 + 一句说明），
             # 两块的尾巴长得一样，扫一眼就知道哪儿开文件夹
             fr_i = ttk.Frame(t3)
-            ttk.Button(fr_i, text="打开图片输出文件夹",
+            theme.button(fr_i, text="打开图片输出文件夹",
                        command=lambda: _open_outdir(
                            media.img_out_dir(self.cfg),
                            "生图输出目录",
@@ -990,7 +1001,7 @@ class SettingsMixin:
                     "填相对路径时按程序目录解析。",
                     width=30, hint="留空=产物文件夹")
                 fr_v = ttk.Frame(t3b)
-                ttk.Button(fr_v, text="打开输出目录",
+                theme.button(fr_v, text="打开输出目录",
                            command=lambda: _open_outdir(
                                media.vid_out_dir(self.cfg),
                                "生视频输出目录",
@@ -1026,7 +1037,7 @@ class SettingsMixin:
             v["vid_family"] = tk.StringVar(
                 value=_vf2code.get(str(self.cfg.get("vid_family", "") or "").strip(),
                                    _vf_opts[0][1]))
-            vfile_cb = ttk.Combobox(t3b, textvariable=v["vid_family"], state="readonly",
+            vfile_cb = theme.comb(t3b, textvariable=v["vid_family"], state="readonly",
                                     width=24, values=[t for _c, t in _vf_opts])
             vid_note = tk.StringVar(value="")
             _vfam_row = r3b["i"]
@@ -1119,7 +1130,7 @@ class SettingsMixin:
                 width=30, fold=fold_vid)
 
             fr_v = ttk.Frame(t3b)
-            ttk.Button(fr_v, text="打开视频输出文件夹",
+            theme.button(fr_v, text="打开视频输出文件夹",
                        command=lambda: _open_outdir(
                            media.vid_out_dir(self.cfg),
                            "生视频输出目录",
@@ -1163,11 +1174,11 @@ class SettingsMixin:
                 r4["i"] += 1
 
             fr = ttk.Frame(t4)
-            ttk.Button(fr, text="启动 / 重启服务（给 agent 用）", width=22,
+            theme.button(fr, text="启动 / 重启服务（给 agent 用）", width=22,
                        command=self.on_start_restart_agent).pack(side="left", padx=(0, 6))
-            ttk.Button(fr, text="停止服务", width=10,
+            theme.button(fr, text="停止服务", width=10,
                        command=self.stop_server_async).pack(side="left", padx=(0, 6))
-            ttk.Button(fr, text="重启代理", width=10,
+            theme.button(fr, text="重启代理", width=10,
                        command=self._restart_proxy).pack(side="left")
             row(t4, r4, "服务控制", fr,
                 "与主页面是同一个服务，只是按下面那个 context 启动；"
@@ -1176,41 +1187,41 @@ class SettingsMixin:
             self.agent_ctx_var = tk.StringVar(
                 value=str(ctx_for(self.cfg, agent=True)))
             row(t4, r4, "agent 上下文长度",
-                ttk.Entry(t4, textvariable=self.agent_ctx_var, width=10),
+                theme.entry(t4, textvariable=self.agent_ctx_var, width=10),
                 "agent 通过下面那个地址调用时，服务用这个上下文长度启动"
                 "（默认 35B=131072、27B=32768；改完对下次启动生效）。")
             v["agent_ctx"] = self.agent_ctx_var
 
             fr = ttk.Frame(t4)
             v_bu = tk.StringVar(value=self._api_base_url())
-            ttk.Entry(fr, textvariable=v_bu, width=25, state="readonly").pack(side="left", padx=(0, 6))
-            ttk.Button(fr, text="复制", width=6,
+            theme.entry(fr, textvariable=v_bu, width=25, state="readonly").pack(side="left", padx=(0, 6))
+            theme.button(fr, text="复制", width=6,
                        command=lambda: self._copy_text(v_bu.get(), "Base URL")).pack(side="left")
             row(t4, r4, "地址与 Key", fr,
                 "别的软件（agent / 脚本）填这一行：地址是本机的 OpenAI 兼容入口，"
                 "Key 一起给它。不要填 8080 —— 那个是后端服务，填了会连不上。")
 
             fr = ttk.Frame(t4)
-            ttk.Entry(fr, textvariable=api_key_var, width=20, state="readonly").pack(
+            theme.entry(fr, textvariable=api_key_var, width=20, state="readonly").pack(
                 side="left", padx=(0, 6))
-            ttk.Button(fr, text="复制", width=6,
+            theme.button(fr, text="复制", width=6,
                        command=lambda: self._copy_text(api_key_var.get(), "API Key")).pack(
                 side="left", padx=(0, 6))
-            ttk.Button(fr, text="重新生成", width=10,
+            theme.button(fr, text="重新生成", width=10,
                        command=lambda: (api_key_var.set(self._gen_api_key()),
                                         self.api_hint_var.set(
                                             "已生成新 Key，重启服务后生效"))).pack(side="left")
             row(t4, r4, "API Key", fr, "鉴权密钥（随机生成）；修改后需重启服务生效。")
 
             fr = ttk.Frame(t4)
-            ttk.Entry(fr, textvariable=api_model_var, width=25, state="readonly").pack(
+            theme.entry(fr, textvariable=api_model_var, width=25, state="readonly").pack(
                 side="left", padx=(0, 6))
-            ttk.Button(fr, text="复制", width=6,
+            theme.button(fr, text="复制", width=6,
                        command=lambda: self._copy_text(api_model_var.get(), "模型名")).pack(side="left")
             row(t4, r4, "模型名", fr, "建议填写值（实时取服务加载的模型）；支持模糊匹配，略写也能命中。")
 
             fr = ttk.Frame(t4)
-            ttk.Button(fr, text="复制完整配置（含填法说明）", width=24,
+            theme.button(fr, text="复制完整配置（含填法说明）", width=24,
                        command=lambda: self._copy_text(self._api_config_text(), "完整配置")).pack(side="left")
             row(t4, r4, "一键复制", fr, "粘贴到任意 agent 应用的自定义模型配置即可接入。")
 
@@ -1222,14 +1233,14 @@ class SettingsMixin:
             #   启用   = 这个功能开不开（默认关；普通用户模式整页不出现，切回去也不会被关）
             #   自启动 = 程序启动时自动把代理服务带起来；不勾 = 要用时在本页手动启动
             v_px = tk.BooleanVar(value=bool(self.cfg.get("proxy_enabled")) and usable)
-            cb_px = ttk.Checkbutton(t4, text="启用本地模型 API", variable=v_px,
+            cb_px = theme.check(t4, text="启用本地模型 API", variable=v_px,
                                     state="normal" if usable else "disabled")
             row(t4, r4, "启用", cb_px,
                 "关闭后 agent 无法接入；改动后点「重启代理」生效。" if usable else
                 "现在锁着：这台机器上还没有能转发的本地文本模型。")
             v["proxy_enabled"] = v_px
             v_auto = tk.BooleanVar(value=bool(self.cfg.get("proxy_autostart", True)))
-            cb_auto = ttk.Checkbutton(t4, text="自启动（打开本程序时自动开启这个服务）",
+            cb_auto = theme.check(t4, text="自启动（打开本程序时自动开启这个服务）",
                                       variable=v_auto,
                                       state="normal" if usable else "disabled")
             row(t4, r4, "自启动", cb_auto,
@@ -1535,7 +1546,7 @@ class SettingsMixin:
                 ttk.Label(d, text="密钥只写进 secrets.json，留在你这台机器上；界面与配置文件里都只显示掩码。",
                           foreground="#808080", wraplength=420, justify="left",
                           font=("Microsoft YaHei UI", 9)).pack(anchor="w", padx=14)
-                e = ttk.Entry(d, width=40, show="●")
+                e = theme.entry(d, width=40, show="●")
                 e.pack(padx=14, pady=10)
                 tip = ttk.Label(d, textvariable=key_lbl, foreground="#808080",
                                 font=("Microsoft YaHei UI", 9))
@@ -1574,9 +1585,9 @@ class SettingsMixin:
                         refresh_key()
                     d.destroy()
 
-                ttk.Button(bf, text="清除", width=8, command=clear).pack(side="left", padx=4)
-                ttk.Button(bf, text="取消", width=8, command=d.destroy).pack(side="left", padx=4)
-                ttk.Button(bf, text="保存密钥", width=10, command=save).pack(side="left")
+                theme.button(bf, text="清除", width=8, command=clear).pack(side="left", padx=4)
+                theme.button(bf, text="取消", width=8, command=d.destroy).pack(side="left", padx=4)
+                theme.button(bf, text="保存密钥", width=10, command=save).pack(side="left")
                 e.focus_set()
                 widgets.center_on(d, win)   # 摆到设置页正中，别落在屏幕左上角
 
@@ -1644,9 +1655,9 @@ class SettingsMixin:
 
                 # 列宽先量后用：拍脑袋的数字若比控件真实宽度小，grid 会把列撑开，
                 # 表头就和下面每行的下拉错位（这正是"比例失衡"的观感来源）
-                _p_kind = ttk.Combobox(table, state="readonly", width=9, values=[
+                _p_kind = theme.comb(table, state="readonly", width=9, values=[
                     providers.KIND_LABEL[k] for k in providers.KIND_ORDER])
-                _p_img = ttk.Combobox(table, state="readonly", width=9, values=[
+                _p_img = theme.comb(table, state="readonly", width=9, values=[
                     capability.CHOICE_LABEL[c] for c in capability.CHOICES])
                 _p_chk = ttk.Checkbutton(table, text="")
                 table.update_idletasks()
@@ -1803,10 +1814,10 @@ class SettingsMixin:
                     kv, cv_kind, cv_img = rows[m]
                     cb = ttk.Checkbutton(table, text=shorten(labels.get(m, m), label_px()),
                                          variable=kv)
-                    ic = ttk.Combobox(table, textvariable=cv_img, state="readonly", width=9,
+                    ic = theme.comb(table, textvariable=cv_img, state="readonly", width=9,
                                       values=[capability.CHOICE_LABEL[c] for c in
                                               capability.CHOICES])
-                    kc = ttk.Combobox(table, textvariable=cv_kind, state="readonly",
+                    kc = theme.comb(table, textvariable=cv_kind, state="readonly",
                                       width=9,
                                       values=[providers.KIND_LABEL[k] for k in
                                               providers.KIND_ORDER])
@@ -2056,25 +2067,25 @@ class SettingsMixin:
                 botf.pack(side="bottom", fill="x", padx=12, pady=(4, 2), before=wrap)
                 ttk.Label(botf, text="模型名", foreground="#808080",
                           font=("Microsoft YaHei UI", 9)).pack(side="left", padx=(0, 4))
-                e_new = ttk.Entry(botf, width=16)
+                e_new = theme.entry(botf, width=16)
                 e_new.pack(side="left", fill="x", expand=True)
                 # 回车 = 直接加入。以前这个框一个绑定都没有：敲完名字按回车什么也不会发生，
                 # 看起来就是"加不进去"（W 实测报的那条）。
                 e_new.bind("<Return>", lambda _e: manual_add())
                 e_new.bind("<KP_Enter>", lambda _e: manual_add())
-                ttk.Button(botf, text="测试连接并加入", width=14,
+                theme.button(botf, text="测试连接并加入", width=14,
                            command=try_add).pack(side="left", padx=(6, 0))
-                ttk.Button(botf, text="直接加入", width=10,
+                theme.button(botf, text="直接加入", width=10,
                            command=lambda: manual_add()).pack(side="left", padx=(6, 0))
                 # 最下沿：左边两个动作按钮，右边确定/取消，一行装得下 470px 的最小宽度
                 bf2 = ttk.Frame(d)
                 bf2.pack(side="bottom", fill="x", padx=12, pady=(2, 12), before=botf)
-                ttk.Button(bf2, text="刷新清单", width=9,
+                theme.button(bf2, text="刷新清单", width=9,
                            command=lambda: pull(True)).pack(side="left")
-                ttk.Button(bf2, text="验证图片输入", width=12,
+                theme.button(bf2, text="验证图片输入", width=12,
                            command=lambda: do_verify()).pack(side="left", padx=(6, 0))
-                ttk.Button(bf2, text="取消", width=8, command=d.destroy).pack(side="right")
-                ttk.Button(bf2, text="确定", width=10,
+                theme.button(bf2, text="取消", width=8, command=d.destroy).pack(side="right")
+                theme.button(bf2, text="确定", width=10,
                            command=lambda: ok_apply(d)).pack(side="right", padx=6)
 
                 def ok_apply(dlg):
@@ -2221,19 +2232,19 @@ class SettingsMixin:
             bar.grid(row=r4b["i"], column=0, columnspan=3, sticky="w", pady=(0, 8))
             r4b["i"] += 1
             ttk.Label(bar, text="服务商：").pack(side="left")
-            combo = ttk.Combobox(bar, width=24, state="readonly")
+            combo = theme.comb(bar, width=24, state="readonly")
             combo.pack(side="left", padx=(0, 6))
             combo.bind("<<ComboboxSelected>>", on_pick)
             if not simple:
                 # 「删除」是管理动作，普通用户模式不出现（测试连接按 W 的口径保留）
-                ttk.Button(bar, text="删除", width=6,
+                theme.button(bar, text="删除", width=6,
                            command=do_delete).pack(side="left", padx=3)
-            ttk.Button(bar, text="测试连接", width=10, command=do_test).pack(side="left", padx=3)
+            theme.button(bar, text="测试连接", width=10, command=do_test).pack(side="left", padx=3)
 
             kr = ttk.Frame(t4b)
             kr.grid(row=r4b["i"], column=0, columnspan=3, sticky="w", pady=(0, 8))
             r4b["i"] += 1
-            ttk.Button(kr, text="填该服务商 API Key", width=20,
+            theme.button(kr, text="填该服务商 API Key", width=20,
                        command=do_key_dialog).pack(side="left")
             # 原先这里还有一个「配置本地 API 地址」按钮跳去API 页（W 2026-10-03 要求移除）：
             # 云端这一页只管密钥与模型，混一个"去改本地端口"的入口只会让人以为两者相关。
@@ -2276,7 +2287,7 @@ class SettingsMixin:
                 width=36, var=vars_["media_base_url"], trace=refresh_media)
             # width=18：最长的候选串是「不接（这个服务商只用文本）」这类 12 个中日韩字，
             # 18 个"平均字宽"够摆下（24 会把这一行撑到 775px，比视口 768 还宽 → 整行被压扁）
-            _ma_cb = ttk.Combobox(fields2, textvariable=vars_["media_api"], state="readonly",
+            _ma_cb = theme.comb(fields2, textvariable=vars_["media_api"], state="readonly",
                                   width=18, values=[t for _c, t in _ma_opts])
             _ma_cb.bind("<<ComboboxSelected>>", lambda *a: refresh_media())
             _row(fields2, sub2, "原生接口协议", _ma_cb,
@@ -2305,12 +2316,12 @@ class SettingsMixin:
             # 都操作它，对没映射的 Listbox 做 delete/insert 完全合法
             btns = ttk.Frame(mf)
             btns.pack(side="left", padx=(6, 0) if not simple else (0, 0), fill="y")
-            ttk.Button(btns, text="选择模型…", width=12,
+            theme.button(btns, text="选择模型…", width=12,
                        command=do_pick_models).pack(anchor="w", pady=1)
             if not simple:
-                ttk.Button(btns, text="移出选中项", width=12,
+                theme.button(btns, text="移出选中项", width=12,
                            command=do_remove_selected).pack(anchor="w", pady=1)
-                ttk.Button(btns, text="刷新清单", width=12,
+                theme.button(btns, text="刷新清单", width=12,
                            command=lambda: (commit(silent=True),
                                             open_picker(fetch=True))).pack(anchor="w", pady=1)
 
@@ -2338,7 +2349,7 @@ class SettingsMixin:
 
                 i = r4b["i"]
                 r4b["i"] += 1
-                ttk.Checkbutton(t4b, text="启用该服务商",
+                theme.check(t4b, text="启用该服务商",
                                 variable=vars_["enabled"]).grid(
                     row=i, column=1, sticky="w", pady=4)
 
@@ -2354,7 +2365,7 @@ class SettingsMixin:
                 ttk.Label(t4b, textvariable=jobs_lbl, foreground="#808080", wraplength=680,
                           justify="left", font=("Microsoft YaHei UI", 9)).grid(
                     row=i, column=0, columnspan=3, sticky="w", pady=(6, 2))
-                ttk.Button(t4b, text="刷新任务台账", width=14,
+                theme.button(t4b, text="刷新任务台账", width=14,
                            command=refresh_jobs).grid(row=i, column=2, sticky="e", pady=(6, 2))
 
             def save_page():
@@ -2374,7 +2385,7 @@ class SettingsMixin:
                 sf = ttk.Frame(t4b)
                 sf.grid(row=r4b["i"], column=0, columnspan=3, sticky="w", pady=(4, 4))
                 r4b["i"] += 1
-                ttk.Button(sf, text="保存本页", width=12, command=save_page).pack(side="left")
+                theme.button(sf, text="保存本页", width=12, command=save_page).pack(side="left")
                 ttk.Label(sf, textvariable=url_lbl, foreground="#808080", wraplength=430,
                           justify="left", font=("Microsoft YaHei UI", 9)).pack(side="left", padx=10)
             # 蓝色状态行两种模式都留：测试连接 / 选模型的结果要有地方说话
@@ -2399,7 +2410,7 @@ class SettingsMixin:
             r4d["i"] += 1
             v["cloud_show_reasoning"] = tk.BooleanVar(
                 value=bool(self.cfg.get("cloud_show_reasoning", True)))
-            ttk.Checkbutton(t4d, text="展示思考过程（云端模型；与本地模型的开关互不影响）",
+            theme.check(t4d, text="展示思考过程（云端模型；与本地模型的开关互不影响）",
                             variable=v["cloud_show_reasoning"]).grid(
                 row=i, column=0, columnspan=3, sticky="w", pady=6)
             if simple:
@@ -2411,7 +2422,7 @@ class SettingsMixin:
             v["show_usage"] = tk.BooleanVar(value=bool(self.cfg.get("show_usage", True)))
             # 勾选框文字长，必须跨列放：占在 column=1 上会把整列撑宽，
             # 于是右侧"短摘要 + ?"那一格被 grid 挤扁（版式自检抓到过）
-            ttk.Checkbutton(t4d, text="每轮结束后显示 token 用量（云端计费可见性）",
+            theme.check(t4d, text="每轮结束后显示 token 用量（云端计费可见性）",
                             variable=v["show_usage"]).grid(
                 row=i, column=0, columnspan=3, sticky="w", pady=6)
 
@@ -2419,7 +2430,7 @@ class SettingsMixin:
             r4d["i"] += 1
             v["cloud_file_model_decides"] = tk.BooleanVar(
                 value=bool(self.cfg.get("cloud_file_model_decides", False)))
-            ttk.Checkbutton(
+            theme.check(
                 t4d, text="文本附件超预算时，让云端模型自己决定读哪一段",
                 variable=v["cloud_file_model_decides"]).grid(
                 row=i, column=0, columnspan=2, sticky="w", pady=(0, 6))
@@ -2440,7 +2451,7 @@ class SettingsMixin:
             # 云端文本自己的成本估算（2026-10-07 W 定：三条云端链路各一个入口、
             # 单价表与计费单位各自独立；文本这条只在高级模式出现）
             fc = ttk.Frame(t4d)
-            ttk.Button(fc, text="成本估算", width=14,
+            theme.button(fc, text="成本估算", width=14,
                        command=lambda: self.open_cost_window(
                            providers.KIND_TEXT)).pack(side="left")
             _row(t4d, r4d, "费用单价", fc,
@@ -2482,7 +2493,7 @@ class SettingsMixin:
                 "云端生图的落地目录；留空 = 产物文件夹下的 云端\\image"
                 "（产物文件夹在下方「修改产物位置」里改）。", lw=8)
             fl = ttk.Frame(col_l)
-            ttk.Button(fl, text="打开图片文件夹", width=14,
+            theme.button(fl, text="打开图片文件夹", width=14,
                        command=lambda: _open_outdir(
                            cloud_media_dir(self.cfg, "image"),
                            "云端生图的落地目录",
@@ -2493,7 +2504,7 @@ class SettingsMixin:
             # 成本估算按链路拆开（2026-10-07 W 定）：生图 / 生视频各一个按钮、
             # 各一张单价表、各自的计费单位（原来两条链路共用一个「成本预估算」）
             flc = ttk.Frame(col_l)
-            ttk.Button(flc, text="成本估算", width=14,
+            theme.button(flc, text="成本估算", width=14,
                        command=lambda: self.open_cost_window(
                            providers.KIND_IMAGE)).pack(side="left")
             row(col_l, rl, "费用单价", flc,
@@ -2517,7 +2528,7 @@ class SettingsMixin:
                 "云端生视频的落地目录；留空 = 产物文件夹下的 云端\\video"
                 "（产物文件夹在下方「修改产物位置」里改）。", lw=8)
             fr = ttk.Frame(col_r)
-            ttk.Button(fr, text="打开视频文件夹", width=14,
+            theme.button(fr, text="打开视频文件夹", width=14,
                        command=lambda: _open_outdir(
                            cloud_media_dir(self.cfg, "video"),
                            "云端生视频的落地目录",
@@ -2525,7 +2536,7 @@ class SettingsMixin:
             row(col_r, rr, "输出目录", fr,
                 "同上：这条链路下它是唯一留存，服务端地址 24 小时就失效。", lw=8)
             frc = ttk.Frame(col_r)
-            ttk.Button(frc, text="成本估算", width=14,
+            theme.button(frc, text="成本估算", width=14,
                        command=lambda: self.open_cost_window(
                            providers.KIND_VIDEO)).pack(side="left")
             row(col_r, rr, "费用单价", frc,
@@ -2572,7 +2583,7 @@ class SettingsMixin:
                 "云端生图的落地目录；留空 = 产物文件夹（程序目录下的「产物」）里的 云端\\image。",
                 width=30, hint="留空=产物文件夹")
             fl = ttk.Frame(t4e)
-            ttk.Button(fl, text="打开输出目录", width=14,
+            theme.button(fl, text="打开输出目录", width=14,
                        command=lambda: _open_outdir(
                            cloud_media_dir(self.cfg, "image"),
                            "云端生图的落地目录",
@@ -2580,7 +2591,7 @@ class SettingsMixin:
             row(t4e, r4e, "", fl,
                 "产物一落地就在这里。云端地址只活 24 小时，本地这份是唯一的留存。")
             fc = ttk.Frame(t4e)
-            ttk.Button(fc, text="成本估算", width=14,
+            theme.button(fc, text="成本估算", width=14,
                        command=lambda: self.open_cost_window(
                            providers.KIND_IMAGE)).pack(side="left")
             row(t4e, r4e, "费用单价", fc,
@@ -2603,7 +2614,7 @@ class SettingsMixin:
                 "云端生视频的落地目录；留空 = 产物文件夹（程序目录下的「产物」）里的 云端\\video。",
                 width=30, hint="留空=产物文件夹")
             fr = ttk.Frame(t4f)
-            ttk.Button(fr, text="打开输出目录", width=14,
+            theme.button(fr, text="打开输出目录", width=14,
                        command=lambda: _open_outdir(
                            cloud_media_dir(self.cfg, "video"),
                            "云端生视频的落地目录",
@@ -2611,7 +2622,7 @@ class SettingsMixin:
             row(t4f, r4f, "", fr,
                 "这条链路下它是唯一留存，服务端地址 24 小时就失效。")
             fc = ttk.Frame(t4f)
-            ttk.Button(fc, text="成本估算", width=14,
+            theme.button(fc, text="成本估算", width=14,
                        command=lambda: self.open_cost_window(
                            providers.KIND_VIDEO)).pack(side="left")
             row(t4f, r4f, "费用单价", fc,
@@ -2678,9 +2689,9 @@ class SettingsMixin:
             i = r9["i"]
             r9["i"] += 1
             bf.grid(row=i, column=0, columnspan=3, sticky="w", pady=(0, 6))
-            ttk.Button(bf, text="新手引导", width=12,
+            theme.button(bf, text="新手引导", width=12,
                        command=self.start_guide).pack(side="left", padx=(0, 6))
-            ttk.Button(bf, text="诊断", width=12,
+            theme.button(bf, text="诊断", width=12,
                        command=self.open_diag_window).pack(side="left")
 
             # 检查更新：联网在子线程、结果回主线程走 _ui_q
@@ -2809,12 +2820,12 @@ class SettingsMixin:
             # 顺序按 W 2026-10-04 的要求：检查更新 → 正式版/测试版 → 打开下载页 → "?"，
             # 并且**删掉左边的「版本类型」标签** —— 那一行的内容自解释，不需要一个名词占位。
             uf = ttk.Frame(t9)
-            btn_chk = ttk.Button(uf, text="检查更新", width=12, command=_do_check)
+            btn_chk = theme.button(uf, text="检查更新", width=12, command=_do_check)
             btn_chk.pack(side="left", padx=(0, 6))
-            ch_cb = ttk.Combobox(uf, textvariable=ch_var, state="readonly", width=10,
+            ch_cb = theme.comb(uf, textvariable=ch_var, state="readonly", width=10,
                                  values=[lab for _c, lab in updater.CHANNELS])
             ch_cb.pack(side="left", padx=(0, 6))
-            btn_open = ttk.Button(uf, text="打开下载页", width=12,
+            btn_open = theme.button(uf, text="打开下载页", width=12,
                                   command=lambda: _open_page(up_url["v"]),
                                   state="disabled")
             btn_open.pack(side="left", padx=(0, 6))
@@ -2885,7 +2896,7 @@ class SettingsMixin:
                 save_config(self.cfg)
                 dpi_status.set("已记住，重开程序后生效。")
 
-            ttk.Checkbutton(df, text="高分屏清晰度", variable=dpi_var,
+            theme.check(df, text="高分屏清晰度", variable=dpi_var,
                             command=set_dpi).pack(side="left")
             ttk.Label(df, text="现在：%s" % ("已开" if now else "没开"),
                       foreground="#808080", font=("Microsoft YaHei UI", 9)).pack(
@@ -2947,7 +2958,7 @@ class SettingsMixin:
                                   "只写进本机 secrets.json，界面与配置文件仅显示掩码。",
                           foreground="#808080", wraplength=430, justify="left",
                           font=("Microsoft YaHei UI", 9)).pack(anchor="w", padx=14)
-                e = ttk.Entry(d, width=48, show="●")
+                e = theme.entry(d, width=48, show="●")
                 e.pack(padx=14, pady=10)
                 ttk.Label(d, textvariable=tok_lab, foreground="#808080",
                           font=("Microsoft YaHei UI", 9)).pack(anchor="w", padx=14)
@@ -2975,9 +2986,9 @@ class SettingsMixin:
                         msg_lab.set("已清除 GitHub 令牌。")
                     d.destroy()
 
-                ttk.Button(bf, text="清除", width=8, command=clear).pack(side="left", padx=4)
-                ttk.Button(bf, text="取消", width=8, command=d.destroy).pack(side="left", padx=4)
-                ttk.Button(bf, text="保存令牌", width=10, command=save).pack(side="left")
+                theme.button(bf, text="清除", width=8, command=clear).pack(side="left", padx=4)
+                theme.button(bf, text="取消", width=8, command=d.destroy).pack(side="left", padx=4)
+                theme.button(bf, text="保存令牌", width=10, command=save).pack(side="left")
                 e.focus_set()
                 widgets.center_on(d, win)   # 摆到设置页正中，别落在屏幕左上角
 
@@ -3090,19 +3101,19 @@ class SettingsMixin:
             # —— 所以签名那条按需少建一个时，也不许挪动这两头的位置。
             brf = ttk.Frame(t_dev)
             brf.grid(row=i, column=0, columnspan=3, sticky="w", pady=(2, 6))
-            ttk.Button(brf, text="关闭开发者模式",
+            theme.button(brf, text="关闭开发者模式",
                        command=close_dev).pack(side="top", anchor="w", pady=(0, 4))
-            ttk.Button(brf, text="填写 GitHub 令牌",
+            theme.button(brf, text="填写 GitHub 令牌",
                        command=fill_token).pack(side="top", anchor="w", pady=(0, 4))
             # 「本机已写入签名」就不再显示用户级那一条（W 2026-10-05）：判据用启动时那次
             # 检测的结果（`App._codesign_info`），不在这里再起一次 PowerShell 卡界面。
             if not _trusted_here():
-                btn_trust_user = ttk.Button(brf, text="将本软件签名列入本机可信签名",
+                btn_trust_user = theme.button(brf, text="将本软件签名列入本机可信签名",
                                             command=trust_sign)
                 btn_trust_user.pack(side="top", anchor="w", pady=(0, 4))
-            ttk.Button(brf, text="将本软件签名列入系统级信任（所有用户）",
+            theme.button(brf, text="将本软件签名列入系统级信任（所有用户）",
                        command=trust_sign_machine).pack(side="top", anchor="w", pady=(0, 4))
-            ttk.Button(brf, text="重置开发者选项",
+            theme.button(brf, text="重置开发者选项",
                        command=reset_dev).pack(side="top", anchor="w")
 
             for var, fg in ((tok_lab, "#5a6a7a"), (msg_lab, "#1a7f37")):
@@ -3273,13 +3284,13 @@ class SettingsMixin:
                 r10["i"] += 1
 
                 flavor_var = tk.StringVar(value="")
-                btn_act = ttk.Button(vf, text="检查更新", width=12)
+                btn_act = theme.button(vf, text="检查更新", width=12)
                 btn_act.pack(side="left")
                 # 档位下拉先建不 pack：**点过「检查更新」才 pack 出来**（W 2026-10-05）。
                 # 构造时就绑 textvariable（坑 112：只 set 变量而没绑，界面是空的而数据是对的）。
                 flavor_lbl = ttk.Label(vf, text="档位", foreground="#5a5a5a",
                                        font=("Microsoft YaHei UI", 9))
-                flavor_cb = ttk.Combobox(vf, textvariable=flavor_var, state="readonly",
+                flavor_cb = theme.comb(vf, textvariable=flavor_var, state="readonly",
                                          width=16, values=[])
                 shown = {"v": False}
 
@@ -3554,13 +3565,13 @@ class SettingsMixin:
                         on_check()
 
                 # 顺序按 W 2026-10-05：复制下载链接 → 自动定向 → 手动定向 → 打开目标目录
-                ttk.Button(bf, text="复制下载链接", width=13,
+                theme.button(bf, text="复制下载链接", width=13,
                            command=copy_link).pack(side="left", padx=(0, 6))
-                ttk.Button(bf, text="自动定向", width=10,
+                theme.button(bf, text="自动定向", width=10,
                            command=auto_dir).pack(side="left", padx=(0, 6))
-                ttk.Button(bf, text="手动定向", width=10,
+                theme.button(bf, text="手动定向", width=10,
                            command=manual_dir).pack(side="left", padx=(0, 6))
-                ttk.Button(bf, text="打开目标目录", width=13,
+                theme.button(bf, text="打开目标目录", width=13,
                            command=lambda d=dir_of, w=what, s=setting: _open_outdir(
                                d(), w, s)).pack(side="left")
                 btn_act.configure(command=do_click)
@@ -3580,7 +3591,7 @@ class SettingsMixin:
                 for _txt, _cmd in (("管理本地模型…", self.open_local_models),
                                    ("全部重新计算", lambda: self._manual_scan(True)),
                                    ("手动定向模型", self._manual_point_model)):
-                    ttk.Button(t5, text=_txt, width=18, command=_cmd).grid(
+                    theme.button(t5, text=_txt, width=18, command=_cmd).grid(
                         row=r5["i"], column=0, columnspan=3, sticky="w", pady=4)
                     r5["i"] += 1
                 enter_hooks.setdefault("files", []).append(self._auto_scan_models)
@@ -3608,7 +3619,7 @@ class SettingsMixin:
             _idle_fill(t5, _fill_files_head)
 
             frm = ttk.Frame(t5)
-            ttk.Button(frm, text="管理本地模型…", width=18,
+            theme.button(frm, text="管理本地模型…", width=18,
                        command=self.open_local_models).pack(side="left")
             row(t5, r5, "菜单与配套件", frm,
                 "三组模型与各自的配套件（VAE / 文本编码器 / CLIP / T5…）摊开在一页里，"
@@ -3616,9 +3627,9 @@ class SettingsMixin:
                 "「能聊天的 .gguf 编码器」常需要收起来。只改显示，不动文件。")
 
             fr = ttk.Frame(t5)
-            ttk.Button(fr, text="补全缺失项", width=18,
+            theme.button(fr, text="补全缺失项", width=18,
                        command=lambda: self._manual_scan(False)).pack(side="left", padx=(0, 6))
-            ttk.Button(fr, text="全部重新计算", width=18,
+            theme.button(fr, text="全部重新计算", width=18,
                        command=lambda: self._manual_scan(True)).pack(side="left")
             row(t5, r5, "匹配参数", fr,
                 "补全 = 只为缺记录的模型计算（不覆盖手动调整过的值）；"
@@ -3626,9 +3637,9 @@ class SettingsMixin:
                 "进这一页会自动补全一次（10 分钟内不重复）。")
 
             fr2 = ttk.Frame(t5)
-            ttk.Button(fr2, text="整理模型文件夹", width=18,
+            theme.button(fr2, text="整理模型文件夹", width=18,
                        command=self._open_tidy_dialog).pack(side="left", padx=(0, 6))
-            ttk.Button(fr2, text="手动定向模型", width=18,
+            theme.button(fr2, text="手动定向模型", width=18,
                        command=self._manual_point_model).pack(side="left")
             row(t5, r5, "文件整理", fr2,
                 "把模型目录顶层散落的模型与其配对 mmproj 归入各自子文件夹"
@@ -3818,12 +3829,12 @@ class SettingsMixin:
             self._settings_win = None
             self.open_settings(jump=cur if cur in keys else "")
 
-        ttk.Button(bar, text="切换到高级模式" if simple else "切换到普通模式",
+        theme.button(bar, text="切换到高级模式" if simple else "切换到普通模式",
                    command=_switch_mode).pack(side="left", padx=(2, 0))
-        ttk.Button(bar, text="关闭", command=win.destroy).pack(side="right", padx=4)
-        ttk.Button(bar, text="保存并重启服务",
+        theme.button(bar, text="关闭", command=win.destroy).pack(side="right", padx=4)
+        theme.button(bar, text="保存并重启服务",
                    command=lambda: _global_save(restart=True)).pack(side="right", padx=4)
-        ttk.Button(bar, text="保存", command=_global_save).pack(side="right")
+        theme.button(bar, text="保存", command=_global_save).pack(side="right")
 
         # 首屏默认落在第一个叶子（本地模型 → 文本模型 → 生成参数）；
         # jump 由输出栏那两个按钮传进来，指到哪个叶子就滚到哪一段

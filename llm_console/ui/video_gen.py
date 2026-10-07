@@ -9,6 +9,7 @@ import time
 from tkinter import ttk, messagebox
 
 from ..core import cloudjobs, config, providers
+from . import theme
 from ..core.media import build_video_cmd, resolve_video_files, vid_out_dir
 from ..connection import cloud_media
 
@@ -360,11 +361,11 @@ class VideoGenMixin:
             self.chat.configure(state="normal")
             try:
                 self.chat.insert("end", "\n🎬 视频已生成 · 耗时 %ds\n" % elapsed, "meta")
-                btn = ttk.Button(self.chat, text="打开视频",
+                btn = theme.button(self.chat, text="打开视频",
                                  command=lambda p=out: os.startfile(p))
                 self.chat.window_create("end", window=btn)
                 self.chat.insert("end", "  ", "meta")
-                btn2 = ttk.Button(self.chat, text="打开所在文件夹",
+                btn2 = theme.button(self.chat, text="打开所在文件夹",
                                   command=lambda p=out: self._open_containing(p))
                 self.chat.window_create("end", window=btn2)
                 self.chat.insert("end", "\n🎬 已保存：%s（%.1f MB）\n"

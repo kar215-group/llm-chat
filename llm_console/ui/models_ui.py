@@ -17,6 +17,7 @@ from ..core.models import (ENGINE_LABEL, apply_tidy, display_name, engine_ready,
 from ..core.params import auto_ctx_for_model, compute_ngl, current_ngl
 from ..core.media import resolve_video_files
 from ..connection.stream import request_auto_alias
+from . import theme
 from . import widgets
 
 # 「没选上模型」在按钮上的说法。以前这种情况跟着能力判据写成「（纯文本）」，
@@ -458,9 +459,9 @@ class ModelsMixin:
             note.set("已把 %d 个配套编码器移出菜单（点「确定」生效）" % len(got)
                      if got else "没有发现配套编码器")
 
-        ttk.Button(bot, text="确定", command=apply).pack(side="right", padx=(6, 0))
-        ttk.Button(bot, text="取消", command=win.destroy).pack(side="right")
-        ttk.Button(bot, text="把配套编码器移出菜单",
+        theme.button(bot, text="确定", command=apply).pack(side="right", padx=(6, 0))
+        theme.button(bot, text="取消", command=win.destroy).pack(side="right")
+        theme.button(bot, text="把配套编码器移出菜单",
                    command=hide_companions).pack(side="right")
 
         page = widgets.ScrollPage(win)
@@ -895,9 +896,9 @@ class ModelsMixin:
 
         bf = ttk.Frame(d)
         bf.pack(padx=14, pady=(10, 14), anchor="e")
-        ttk.Button(bf, text="选择文件夹…", command=_pick_dir).pack(side="left", padx=(0, 6))
-        ttk.Button(bf, text="选择模型文件…", command=_pick_file).pack(side="left", padx=(0, 6))
-        ttk.Button(bf, text="取消", command=d.destroy).pack(side="left")
+        theme.button(bf, text="选择文件夹…", command=_pick_dir).pack(side="left", padx=(0, 6))
+        theme.button(bf, text="选择模型文件…", command=_pick_file).pack(side="left", padx=(0, 6))
+        theme.button(bf, text="取消", command=d.destroy).pack(side="left")
         widgets.center_on(d, host)
         d.deiconify()
 
@@ -990,8 +991,8 @@ class ModelsMixin:
                          % (ok, ("，失败 %d 个" % len(fails)) if fails else ""),
                          "meta")
 
-        ttk.Button(bar, text="执行", command=do_exec).pack(side="right", padx=4)
-        ttk.Button(bar, text="取消", command=dlg.destroy).pack(side="right")
+        theme.button(bar, text="执行", command=do_exec).pack(side="right", padx=4)
+        theme.button(bar, text="取消", command=dlg.destroy).pack(side="right")
         widgets.center_on(dlg, self.root)   # 摆到主窗口正中，别落在屏幕左上角
 
     # ---- 模型自动命名 ----

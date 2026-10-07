@@ -47,6 +47,11 @@ env:
   # 第一个运行期第三方依赖（2026-10-07 W 定「轻量、低第三方依赖」）：只用于
   # 图片解码（ui/imgdecode.py，懒加载）。锁版本保证打包产物可复现。
   PILLOW_VERSION: "12.3.0"
+  # 第二个运行期第三方依赖（ttkbootstrap 试验分支）：主页面主题层
+  # （ui/theme.py）。缺了它程序照跑（theme.py 降级回原生外观），但打包必须带上
+  # 才有主题效果。锁版本同上；tools/pyinstaller_hooks/hook-ttkbootstrap.py
+  # 会覆盖它自带的钩子、不打 assets（约 1MB 图标贴图，主页面用不到）。
+  TTKBOOTSTRAP_VERSION: "2.2.3"
 
 jobs:
   build:
@@ -62,11 +67,12 @@ jobs:
         with:
           python-version: ${{ env.PY_VERSION }}
 
-      - name: 装 PyInstaller 与 Pillow
+      - name: 装 PyInstaller 与 Pillow / ttkbootstrap
         run: |
           python -m pip install --upgrade pip
           python -m pip install "pyinstaller==${{ env.PYINSTALLER_VERSION }}"
           python -m pip install "pillow==${{ env.PILLOW_VERSION }}"
+          python -m pip install "ttkbootstrap==${{ env.TTKBOOTSTRAP_VERSION }}"
 
       - name: 校验 tag 与 APP_VERSION 一致
         if: startsWith(github.ref, 'refs/tags/v')

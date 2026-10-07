@@ -9,7 +9,7 @@ import threading
 import time
 import traceback
 import tkinter as tk
-from tkinter import ttk, scrolledtext, messagebox
+from tkinter import ttk, messagebox
 
 from ..core.config import (load_config, DEFAULT_CONFIG, APP_DIR, APP_VERSION,
                            CONFIG_PATH)
@@ -22,7 +22,7 @@ from ..core.server import _query_serving_model, server_process_alive, server_sta
 from ..connection import cloud_media
 from ..connection.proxy import ProxyServer
 from .dialogs import ExitDialog
-from . import guide, widgets
+from . import guide, theme, widgets
 from .chat import ChatMixin
 from .image_gen import ImageGenMixin
 from .video_gen import VideoGenMixin
@@ -184,7 +184,9 @@ class App(ChatMixin, ImageGenMixin, VideoGenMixin, ServiceMixin, ModelsMixin, Se
         self._dev_upd_start()        # 上次运行填过 GitHub 令牌 → 后台查更新这就接上
         self.input.focus_set()
         self._offer_cloud_recovery()
-        self._offer_crash_notice()
+        # 「上次异常退出」弹窗已按 W 2026-10-08 裁定砍除（普通用户用不上、日志
+        # 残留时反复弹窗纯打扰）：崩溃仍照常落盘（crashlog），排查入口在
+        # 设置 → 关于与诊断 →「诊断」的「打开错误日志」。
         # 首次打开（首次安装 / 升级后首次打开）先扫一遍引擎与模型，再考虑催办与引导 ——
         # 顺序有讲究：引导第一屏的缺件清单与输出栏那句催办都读"引擎在不在"，
         # 扫描（尤其是自动定向）跑在它们前面，用户已经配好的那份才会被判成"已配置"。
@@ -207,30 +209,6 @@ class App(ChatMixin, ImageGenMixin, VideoGenMixin, ServiceMixin, ModelsMixin, Se
             pass
         try:
             sys.stderr.write(text + "\n")
-        except Exception:
-            pass
-
-    def _offer_crash_notice(self):
-        """上次留下过崩溃记录就主动开口一次（下载 exe 用的用户不会自己去翻 .log）。
-
-        判据是"日志的 mtime+size 与上次看过时不一样"，所以同一条崩溃只说一次；
-        说完就把这个指纹写回配置。任何一步失败都不能拖住启动。
-        """
-        try:
-            p = crashlog.log_path()
-            if not os.path.isfile(p):
-                return
-            st = os.stat(p)
-            seen = "%d:%d" % (int(st.st_mtime), st.st_size)
-            if str(self.cfg.get("crashlog_seen", "")) == seen:
-                return
-            self.cfg["crashlog_seen"] = seen
-            config.save_config(self.cfg)
-            messagebox.showwarning(
-                "上次异常退出",
-                "这个程序上一次的错误记录还没被看过。\n\n日志文件：%s\n\n"
-                "最近几条：\n%s\n\n设置 → 关于与诊断 →「诊断」里有「打开错误日志」与「一键诊断」。"
-                % (p, crashlog.tail(6) or "（读不出内容）"))
         except Exception:
             pass
 
@@ -455,7 +433,7 @@ class App(ChatMixin, ImageGenMixin, VideoGenMixin, ServiceMixin, ModelsMixin, Se
 
         self.status_var = tk.StringVar(value="○ 检查中…")
         self.status_label = tk.Label(top, textvariable=self.status_var,
-                                     fg="#999999",
+                                     fg=theme.c("muted"),
                                      font=("Microsoft YaHei UI", 10, "bold"))
         self.status_label.pack(side="left")
 
@@ -464,8 +442,8 @@ class App(ChatMixin, ImageGenMixin, VideoGenMixin, ServiceMixin, ModelsMixin, Se
         self.model_btn = tk.Button(
             top, textvariable=self.model_var, command=self.show_model_menu,
             relief="flat", bd=0, highlightthickness=0, padx=2, pady=0,
-            bg="SystemButtonFace", fg="#0b57d0",
-            activebackground="SystemButtonFace", activeforeground="#0b57d0",
+            bg=theme.c("bg"), fg=theme.c("accent"),
+            activebackground=theme.c("bg"), activeforeground=theme.c("accent"),
             cursor="hand2", font=("Microsoft YaHei UI", 10, "bold"))
         # ⚠ 这里**不要**给模型名按钮加固定 width：试过 width=30，顶栏需求从 904 涨到
         # 1120，右侧「清空对话」被压到 1px 直接消失（2026-10-03 实测）。
@@ -478,41 +456,68 @@ class App(ChatMixin, ImageGenMixin, VideoGenMixin, ServiceMixin, ModelsMixin, Se
         # （原「🎨 生图」独立窗口已废弃：生图统一在主聊天流进行，见 model_kind=image 分支；
         #   ImageDialog / open_image_dialog 已于 2026-10-03 作为死代码从仓库版本移除，
         #   原实现本地留存于 D:\tmp\deadcode_ImageDialog_20261003.py.txt）
-        self.btn_settings = ttk.Button(top, text="设置", command=self.open_settings)
+        # 配色规范（W 定）：顶栏一律中性黑字描边（可点击=黑、禁用=灰、悬停/按下
+        # 灰底区分），不用彩色 —— 全部走默认 Round.Secondary.TButton，不给 bootstyle。
+        self.btn_settings = theme.button(top, command=self.open_settings,
+                                         style="Round.Icon.TButton",
+                                         image=self._gear_photo())
         self.btn_settings.pack(side="right", padx=3)
-        self.stop_svc_btn = ttk.Button(top, text="停止服务",
-                                       command=self.stop_server_async, state="disabled")
+        widgets.bind_tip(self.btn_settings, "设置")
+        self.stop_svc_btn = theme.button(top, text="停止服务",
+                                         command=self.stop_server_async, state="disabled")
         self.stop_svc_btn.pack(side="right", padx=3)
-        self.start_btn = ttk.Button(top, text="启动服务", command=self.on_start_restart)
+        self.start_btn = theme.button(top, text="启动服务", command=self.on_start_restart)
         self.start_btn.pack(side="right", padx=3)
-        self.stop_gen_btn = ttk.Button(top, text="停止生成",
-                                       command=self.stop_generate, state="disabled")
+        self.stop_gen_btn = theme.button(top, text="停止生成",
+                                         command=self.stop_generate, state="disabled")
         self.stop_gen_btn.pack(side="right", padx=3)
-        self.clear_btn = ttk.Button(top, text="清空对话", command=self.clear_chat)
+        self.clear_btn = theme.button(top, text="清空对话", command=self.clear_chat)
         self.clear_btn.pack(side="right", padx=3)
 
         # 按当前模型类型初始化按钮状态（生图模型：启动按钮即刻置灰）
         self._render_status(False, False)
 
+    def _gear_photo(self):
+        """「设置」齿轮图标：ui/gear_icon 内嵌 b64 → tk.PhotoImage（22px 档）。
+
+        master 显式给 self.root（多 root 的自检夹具里，默认 root 可能不是本窗）；
+        图引用挂 root 防 GC；b64 解码一次仅 ~1KB，加载零感知。
+        """
+        import base64
+        from . import gear_icon
+        photo = tk.PhotoImage(
+            master=self.root, data=base64.b64decode(gear_icon.GEAR_PNG_B64))
+        if not hasattr(self.root, "_gear_icon"):
+            self.root._gear_icon = photo
+        return self.root._gear_icon
+
     def _build_chat(self):
         mid = ttk.Frame(self.root)
         mid.pack(fill="both", expand=True, padx=10)
-        self.chat = scrolledtext.ScrolledText(
-            mid, state="disabled", wrap="word", relief="flat",
+        # 聊天区 = tk.Text + 圆角 ttk 滚动条（替代 ScrolledText：其内置滚动条是
+        # tk 原生件、主题管不到）。先 pack 滚动条再 pack 带 expand 的 Text
+        # （坑 160 同一条 pack 饥饿纪律），self.chat 的类型与全部用法不变。
+        self.chat = tk.Text(
+            mid, state="disabled", wrap="word", relief="flat", bd=0,
+            highlightthickness=0,
             # height 只是"最小请求高度"，不是显示高度：实际靠 expand 撑满。
             # 默认 20 行（约 460px）加上输入区 63px、顶栏 26px 就超过窗口最小高度 520px，
             # pack 会按入列顺序分配，最后入列的输入区被饿掉——窗口一缩输入框就没了（W 报）。
             # 现在给小一点的最小值，收缩时先压输出区，输入区保持固定。
-            background="#ffffff", height=6,
-            font=("Microsoft YaHei UI", 10))
-        self.chat.pack(fill="both", expand=True)
-        self.chat.tag_configure("user", foreground="#0b57d0",
+            height=6,
+            font=("Microsoft YaHei UI", 10),
+            **theme.text_kw(fallback_bg="#ffffff"))
+        self.chat_scroll = theme.scroll(mid, command=self.chat.yview)
+        self.chat.configure(yscrollcommand=self.chat_scroll.set)
+        self.chat_scroll.pack(side="right", fill="y")
+        self.chat.pack(side="left", fill="both", expand=True)
+        self.chat.tag_configure("user", foreground=theme.c("accent"),
                                 font=("Microsoft YaHei UI", 10, "bold"))
-        self.chat.tag_configure("assistant", foreground="#1f1f1f")
-        self.chat.tag_configure("thinking", foreground="#8f8f8f",
+        self.chat.tag_configure("assistant", foreground=theme.c("body"))
+        self.chat.tag_configure("thinking", foreground=theme.c("muted"),
                                 font=("Microsoft YaHei UI", 9, "italic"))
-        self.chat.tag_configure("error", foreground="#c01c28")
-        self.chat.tag_configure("meta", foreground="#a8a8a8",
+        self.chat.tag_configure("error", foreground=theme.c("error"))
+        self.chat.tag_configure("meta", foreground=theme.c("muted"),
                                 font=("Microsoft YaHei UI", 9))
         # 启动时按当前模型类型给出引导：只说"这一步怎么用"，细节留给选模型时那一句
         # 与设置页 / README（W 的要求：字数变少，不逐条罗列细节）
@@ -593,14 +598,14 @@ class App(ChatMixin, ImageGenMixin, VideoGenMixin, ServiceMixin, ModelsMixin, Se
                                      background=widgets.default_bg())
         self.refmode_zone.grid(row=0, column=1, sticky="ns", padx=(8, 0))
         tk.Label(self.refmode_zone, text="带图方式", background=widgets.default_bg(),
-                 foreground="#5a6a7a",
+                 foreground=theme.c("label"),
                  font=("Microsoft YaHei UI", 9)).pack(anchor="w", padx=8, pady=(4, 0))
         self._ref_mode_var = tk.StringVar(value="")
         self._refmode_radios = {}
         for m in capability.MODES:
-            rb = ttk.Radiobutton(self.refmode_zone, text=capability.MODE_LABEL[m],
-                                 variable=self._ref_mode_var, value=m,
-                                 command=self._on_ref_mode_pick)
+            rb = theme.radio(self.refmode_zone, text=capability.MODE_LABEL[m],
+                             variable=self._ref_mode_var, value=m,
+                             command=self._on_ref_mode_pick, bootstyle="primary")
             rb.pack(anchor="w", padx=8, pady=(0, 3))
             self._refmode_radios[m] = rb
         self.refmode_zone.grid_remove()   # 非生图模型不显示；_refresh_ref_mode_zone 决定
@@ -608,7 +613,8 @@ class App(ChatMixin, ImageGenMixin, VideoGenMixin, ServiceMixin, ModelsMixin, Se
         # -- 状态行（空时 grid_remove）--
         self._attach_note_var = tk.StringVar(value="")
         self.attach_note = ttk.Label(self.attach_frame, textvariable=self._attach_note_var,
-                                     foreground="#a8a8a8", font=("Microsoft YaHei UI", 9))
+                                     foreground=theme.c("muted"),
+                                     font=("Microsoft YaHei UI", 9))
         self.attach_note.grid(row=1, column=0, columnspan=2, sticky="w")
         self.attach_note.grid_remove()
 
@@ -630,16 +636,19 @@ class App(ChatMixin, ImageGenMixin, VideoGenMixin, ServiceMixin, ModelsMixin, Se
                              # 用户看到的就是"没有发送按钮"。实际宽度靠 expand 撑，不靠这个值。
                              width=20, font=("Microsoft YaHei UI", 10),
                              relief="flat", highlightthickness=1,
-                             highlightbackground="#cccccc")
+                             highlightbackground=theme.c("border"),
+                             **theme.text_kw())
         self.input.pack(side="left", fill="both", expand=True)
         self.input.bind("<Return>", self._on_return)
         self.input.bind("<Shift-Return>", self._on_shift_return)
 
         btns = ttk.Frame(bot)
         btns.pack(side="left", fill="y", padx=(6, 0))
-        self.send_btn = ttk.Button(btns, text="发送", command=self.send_message, width=10)
+        self.send_btn = theme.button(btns, text="发送", command=self.send_message,
+                                     width=10, bootstyle="primary")
         self.send_btn.pack(fill="both", expand=True)
-        self.attach_btn = ttk.Button(btns, text="📎 附件", command=self.pick_image, width=10)
+        self.attach_btn = theme.button(btns, text="📎 附件", command=self.pick_image,
+                                       width=10, bootstyle="secondary-outline")
         self.attach_btn.pack(fill="x", pady=(4, 0))
 
     # ---- 对话 ----
@@ -740,8 +749,9 @@ class App(ChatMixin, ImageGenMixin, VideoGenMixin, ServiceMixin, ModelsMixin, Se
                     text = "继续等"
                 else:
                     text = "取回"
-                btn = ttk.Button(self.chat, text=text,
-                                 command=lambda x=j: self._recover_job(x))
+                btn = theme.button(self.chat, text=text,
+                                   command=lambda x=j: self._recover_job(x),
+                                   bootstyle="primary-outline")
                 self.chat.window_create("end", window=btn)
                 self.chat.insert("end", "  ", "meta")
             self.chat.insert("end", "\n", "meta")
@@ -771,12 +781,14 @@ class App(ChatMixin, ImageGenMixin, VideoGenMixin, ServiceMixin, ModelsMixin, Se
             self.chat.insert("end", "\n[环境] 这台机器上三条路都还没通：\n", "meta")
             for m in q["missing"]:
                 self.chat.insert("end", "  · %s\n" % m, "meta")
-            btn = ttk.Button(self.chat, text="去配置引擎",
-                             command=lambda: self.open_settings(jump="eng"))
+            btn = theme.button(self.chat, text="去配置引擎",
+                               command=lambda: self.open_settings(jump="eng"),
+                               bootstyle="primary-outline")
             self.chat.window_create("end", window=btn)
             self.chat.insert("end", "  ", "meta")
-            btn2 = ttk.Button(self.chat, text="填云端密钥",
-                              command=lambda: self.open_settings(jump="c_prov"))
+            btn2 = theme.button(self.chat, text="填云端密钥",
+                                command=lambda: self.open_settings(jump="c_prov"),
+                                bootstyle="secondary-outline")
             self.chat.window_create("end", window=btn2)
             self.chat.insert("end", "\n", "meta")
             self.chat.see("end")
@@ -1136,16 +1148,16 @@ class App(ChatMixin, ImageGenMixin, VideoGenMixin, ServiceMixin, ModelsMixin, Se
             # 只写"云端就绪"：服务商名已经在那边的模型按钮上了（「模型名（云）」），
             # 这里再拼一遍会长到把模型按钮顶出顶栏（W 报的显示问题）
             self.status_var.set("☁ 云端就绪")
-            self.status_label.configure(fg="#0b57d0")
+            self.status_label.configure(fg=theme.c("accent"))
         elif ready:
             self.status_var.set("● 运行中 (端口 %s)" % self.cfg.get("port"))
-            self.status_label.configure(fg="#1a7f37")
+            self.status_label.configure(fg=theme.c("ok"))
         elif alive:
             self.status_var.set("◐ 模型加载中…")
-            self.status_label.configure(fg="#b58900")
+            self.status_label.configure(fg=theme.c("warn"))
         else:
             self.status_var.set("○ 未运行")
-            self.status_label.configure(fg="#999999")
+            self.status_label.configure(fg=theme.c("muted"))
 
         self._layout_topbar(
             show_start=(not cloud and not media_local) or self._guide_active,
@@ -1337,6 +1349,10 @@ def main():
             cfg["model_provider"] = got["provider"]
             cfg["model_auto_picked"] = True
     root = tk.Tk()
+    # 主页面主题层（ttkbootstrap 试验分支）：挂主题要在 root 建好之后、App 构造之前
+    # —— ttkbootstrap 的 Style 无参构造绑默认 root。ttkbootstrap 没安装时 apply()
+    # 是空操作，主页面回落到原生外观（ui/theme.py 的降级闸）。
+    theme.apply(root)
     root.title("LLM 本地对话台 - llama.cpp")
     # 1080x700 是量出来的，不是拍的（DPI-aware 严格档实测，含"模型名占满 22 字"的情况）：
     # 顶栏右侧 5 个按钮各要 120px，左侧状态灯 + 模型名合计要 904px。
