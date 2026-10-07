@@ -81,18 +81,18 @@ NAV_SPEC = [
                  "（给的是选中档位的安装包直链）。"},
     ]},
     {"key": "g_cloud", "label": "云端模型", "children": [
-        {"key": "c_prov", "label": "服务商与密钥", "page": "cloud", "section": "prov",
+        {"key": "c_prov", "label": "服务商与密钥", "page": "cloud_p", "section": "prov",
          "title": "服务商、密钥与模型清单",
          "help": "内置服务商只内置名称与 base_url；添加服务商**不会**把它名下所有模型塞进"
                  "主页面菜单。流程是：填信息 → 填密钥 → 测试连接 → 通过后在独立的「选择模型」"
                  "窗口里勾选要用的模型。清单拉过一次就缓存，只有点「刷新清单」才重新请求。\n"
                  "密钥单独存 secrets.json，只留在你这台机器上，不会跟配置一起被复制走。"},
-        {"key": "c_text", "label": "文本模型", "page": "cloud", "section": "ctext",
+        {"key": "c_text", "label": "文本模型", "page": "cloud_t", "section": "ctext",
          "title": "云端文本模型",
          "help": "云端文本走通用 OpenAI 兼容协议。这里的设置只影响文本对话"
                  "（生图 / 生视频在下一区块）。\n"
                  "附件会留在对话历史里**每一轮都重发**，所以预算有上限，不是能塞多塞。"},
-        {"key": "c_media", "label": "生图 / 生视频", "page": "cloud", "section": "cmedia",
+        {"key": "c_media", "label": "生图 / 生视频", "page": "cloud_m", "section": "cmedia",
          "title": "云端生图 / 生视频",
          "help": "云端生图与生视频走服务商的**原生接口**，不会启动本地 sd.cpp："
                  "生图是同步请求（可以挂参考图），生视频是异步任务"
@@ -102,7 +102,7 @@ NAV_SPEC = [
                  "压在下面那条横栏里。\n"
                  "云端产物地址只活 24 小时，所以拿到就立刻下载到本地，不在云上留原图；"
                  "没来得及下载的会记进任务台账，重启后对话开头给「取回」按钮。\n"
-                 "费用单价按模型填，点「成本预估算」开窗口。"},
+                 "费用单价按模型填，「成本估算」按钮生图 / 生视频两列各一个（各查各的表）。"},
     ]},
     {"key": "api", "label": "本地模型 API", "page": "api", "section": "api",
      "title": "本地模型 API（给 agent 或其他软件调用）",
@@ -119,6 +119,64 @@ NAV_SPEC = [
              "一键诊断只读本地信息：不联网、不启动推理引擎、不碰显卡。"
              "结果可以复制成一段文字贴给别人求助，也可以存成文件。"},
 ]
+
+
+# ---------------------------------------------------------------------------
+# 普通用户模式的导航（2026-10-07 W 定：新增"普通用户模式"并作为**默认模式**，
+# 上面那份 NAV_SPEC 原样保留成"高级用户模式"）。同一批区块的精简版：
+#   · 页更少更平：本地文本不再分「生成参数 / 服务参数」两页；本地生图与生视频
+#     **合成一项「本地生图/视频」**（一页两块，vid 走 nav_hide）；云端按 W 第二轮
+#     拆成三页 —— 「服务商与密钥」/「云端文本模型」/「云端生图/视频」（c_img +
+#     c_vid 一页两块，c_vid 走 nav_hide；**高级模式同样拆三页**，页 id cloud_p /
+#     cloud_t / cloud_m，但高级的导航名不改）；「本地模型 API」整页不出现
+#     （那是高级能力，默认关，只在高级模式手动开）。
+#   · 每页只留最常用的几件（清单是 W 逐页定的，见各区块构建函数的 simple 分支）。
+#   · 全页不放 "?" 气泡：help 一律空串（HelpDot 对空文案本来就不建控件），
+#     区块构建里散落的 HelpDot / 灰色小字也按 simple 分支裁掉。
+# 叶子 key 与高级模式尽量同名（gen/img/vid/files/eng/c_prov/c_text/about）：
+# 底部「用户模式」切换按钮重建窗口时按 key 落到对应页；c_img / c_vid 是普通模式
+# 专有的两个区块（对应高级模式 cmedia 的左右两列）。
+# nav_hide 与高级模式同一套语义（坑 142：不成行但仍在规格里、仍被建）。
+# ---------------------------------------------------------------------------
+SIMPLE_NAV_SPEC = [
+    {"key": "g_local", "label": "本地模型", "children": [
+        {"key": "gen", "label": "本地文本模型", "page": "local_text", "section": "gen",
+         "title": "本地文本模型", "help": ""},
+        {"key": "img", "label": "本地生图/视频", "page": "local_media", "section": "img",
+         "title": "本地生图", "help": ""},
+        # 生图与生视频在普通模式**合成一项**（W 2026-10-07 第二轮）：与「模型文件与
+        # 引擎」同一套 nav_hide 语义 —— vid 不成行但仍在规格里、区块照建（同页两块），
+        # 高亮记在替身行上（坑 142）
+        {"key": "vid", "label": "本地生视频", "page": "local_media", "section": "vid",
+         "nav_hide": "img",
+         "title": "本地生视频", "help": ""},
+        {"key": "files", "label": "模型文件与引擎", "page": "files", "section": "files",
+         "title": "模型文件与引擎", "help": ""},
+        {"key": "eng", "label": "引擎管理", "page": "files", "section": "eng",
+         "nav_hide": "files",
+         "title": "引擎管理", "help": ""},
+    ]},
+    {"key": "g_cloud", "label": "云端模型", "children": [
+        {"key": "c_prov", "label": "服务商与密钥", "page": "cloud_p", "section": "prov",
+         "title": "服务商与密钥", "help": ""},
+        {"key": "c_text", "label": "云端文本模型", "page": "cloud_t", "section": "ctext",
+         "title": "云端文本模型", "help": ""},
+        # 云端生图与生视频在普通模式也**合成一项**（W 2026-10-07 第二轮）：一页两块，
+        # 各自的「成本估算」按钮仍在各自块里；c_vid 走 nav_hide 不成行但照建（坑 142）
+        {"key": "c_img", "label": "云端生图/视频", "page": "cloud_m", "section": "cimg",
+         "title": "云端生图", "help": ""},
+        {"key": "c_vid", "label": "云端生视频", "page": "cloud_m", "section": "cvid",
+         "nav_hide": "c_img",
+         "title": "云端生视频", "help": ""},
+    ]},
+    {"key": "about", "label": "关于与诊断", "page": "about", "section": "about",
+     "title": "关于与诊断", "help": ""},
+]
+
+
+def _simple_mode(cfg):
+    """是不是普通用户模式：除显式 "advanced" 外一律按普通算（默认就是普通）。"""
+    return str((cfg or {}).get("user_mode", "simple") or "simple") != "advanced"
 
 
 # ---------------------------------------------------------------------------
@@ -146,12 +204,14 @@ DEV_TAP_TIMES = 5
 DEV_TAP_GAP = 3.0
 
 
-def _nav_items(dev_mode=False):
-    """左栏条目：普通用户 = NAV_SPEC；开发者模式 = 末尾多一项「开发者选项」。
+def _nav_items(dev_mode=False, simple=False):
+    """左栏条目：普通用户模式 = SIMPLE_NAV_SPEC；高级用户模式 = NAV_SPEC；
+    开发者模式 = 末尾多一项「开发者选项」（两种用户模式都追加，开发者模式不做改动）。
 
     尾部追加正好落在"关于与诊断"那组后面，也就是 W 要的"关于导航栏下方"。
     """
-    return list(NAV_SPEC) + ([DEV_NAV_ITEM] if dev_mode else [])
+    base = SIMPLE_NAV_SPEC if simple else NAV_SPEC
+    return list(base) + ([DEV_NAV_ITEM] if dev_mode else [])
 
 
 def _upd_help_text():
@@ -373,7 +433,8 @@ class SettingsMixin:
                          "先在 设置 → 本地模型 备好引擎与模型。\n", "meta")
             return
         self._proxy_usable = True
-        if self.cfg.get("proxy_enabled", True):
+        # 手动「重启代理」只看功能启用与否，不看「自启动」—— 自启动只管程序启动那一次
+        if self.cfg.get("proxy_enabled"):
             self.proxy.start()
         else:
             self._append("\n[API] 代理已停用（设置中可重新启用并重启代理）。\n", "meta")
@@ -418,8 +479,11 @@ class SettingsMixin:
         bodies = {}                # (page, section) → 区块内容 frame（已建则复用）
         heads = {}                 # (page, section) → 区块标题 frame（锚点）
         page_frames = {}           # page → 页面 frame
-        state = {"page": None, "section": None}
-        leaves = _nav_leaves(_nav_items(self._dev_mode))
+        state = {"page": None, "section": None, "leaf": None}
+        # 用户模式（2026-10-07 W 定）：普通（默认）/ 高级两套导航与两套页面裁剪，
+        # 底部按钮互切（存进配置、整窗重建 —— 预热全部重走，不留半态）
+        simple = _simple_mode(self.cfg)
+        leaves = _nav_leaves(_nav_items(self._dev_mode, simple))
         page_order, page_items = [], {}
         for it in leaves:
             if it["page"] not in page_order:
@@ -427,7 +491,7 @@ class SettingsMixin:
                 page_items[it["page"]] = []
             page_items[it["page"]].append(it)
 
-        nav = widgets.SideNav(main, _nav_items(self._dev_mode), width=232,
+        nav = widgets.SideNav(main, _nav_items(self._dev_mode, simple), width=232,
                               on_select=lambda it: _nav_select(it))
         self._settings_nav = nav            # 输出栏的按钮要能直接跳到某个叶子
 
@@ -440,7 +504,7 @@ class SettingsMixin:
             都闭包引着这个 dict 对象，换成新对象它们就永远看不见新页了。
             """
             nonlocal leaves
-            items = _nav_items(self._dev_mode)
+            items = _nav_items(self._dev_mode, simple)
             nav.spec = items
             leaves = _nav_leaves(items)
             page_order[:] = []
@@ -466,9 +530,8 @@ class SettingsMixin:
         fold_keys = {}      # name → [配置键]（算总数与"已改 N"）
         sess = getattr(self, "_settings_ui", None)
         if not isinstance(sess, dict):        # 老实例 / 直接构造时兜底
-            sess = {"show_all": False, "fold": {}}
+            sess = {"fold": {}}
             self._settings_ui = sess
-        sess.setdefault("show_all", False)
         sess.setdefault("fold", {})
 
         def _changed(key):
@@ -477,7 +540,7 @@ class SettingsMixin:
 
         def _render_fold(name):
             """按当前状态摆/收这一组，并刷新标题（▸/▾ + 项数 + 已改数）。"""
-            open_ = bool(sess.get("show_all")) or bool((sess.get("fold") or {}).get(name))
+            open_ = bool((sess.get("fold") or {}).get(name))
             for w in folds.get(name) or []:
                 try:
                     if open_:
@@ -569,7 +632,9 @@ class SettingsMixin:
             lab = tk.Frame(parent, background=bg)
             lab.grid(row=i, column=0, sticky="w", padx=(0, 8), pady=5)
             ttk.Label(lab, text=label, width=lw, anchor="w").pack(side="left")
-            widgets.HelpDot(lab, desc).pack(side="left", padx=(2, 0))
+            if not simple:
+                # 普通用户模式全页不放 "?"（2026-10-07 W 定）；说明照旧只给高级模式
+                widgets.HelpDot(lab, desc).pack(side="left", padx=(2, 0))
             widget.grid(row=i, column=1, sticky="w", padx=(0, 10), pady=5)
             cell = None
             if hint:
@@ -583,7 +648,7 @@ class SettingsMixin:
                     if w is not None:
                         grp.append(w)
                 # 登记后立刻按当前状态摆 / 收 —— 不能无条件 grid_remove：
-                # 「显示全部参数」勾着时重开设置窗，这些行本来就该是展开的
+                # 会话里展开过的组，重开设置窗时本来就该是展开的
                 _render_fold(fold)
 
         def row(parent, rows, label, widget, desc, hint="", lw=14, fold=None):
@@ -607,6 +672,29 @@ class SettingsMixin:
         # ---- 区块 1：本地文本模型 / 生成参数 ----
         @section("local_text", "gen")
         def _t1(t1, r1):
+            if simple:
+                # 普通用户模式（2026-10-07 W 定）：只留三件 —— 展示思考过程、随机性
+                # （temperature 的易理解命名）、系统提示词；不再区分「生成参数 / 服务参数」
+                # （服务参数整段只在高级模式出现，ngl / ctx / 端口那些由程序自动管）。
+                i = r1["i"]
+                r1["i"] += 1
+                v["show_reasoning"] = tk.BooleanVar(
+                    value=bool(self.cfg.get("show_reasoning", True)))
+                ttk.Checkbutton(t1, text="展示思考过程",
+                                variable=v["show_reasoning"]).grid(
+                    row=i, column=0, columnspan=3, sticky="w", pady=8)
+                ent(t1, r1, "temperature", "随机性",
+                    "采样温度（0~2）：越高输出越发散有创意，越低越稳定保守；接近 0 时几乎固定。")
+                i = r1["i"]
+                r1["i"] += 1
+                head = tk.Frame(t1, background=widgets.default_bg())
+                head.grid(row=i, column=0, sticky="nw", padx=(0, 8), pady=5)
+                ttk.Label(head, text="系统提示词", width=14, anchor="nw").pack(side="left")
+                v["system_prompt"] = tk.Text(t1, height=3, width=44,
+                                             font=("Microsoft YaHei UI", 9))
+                v["system_prompt"].grid(row=i, column=1, columnspan=2, sticky="nsew", pady=5)
+                v["system_prompt"].insert("1.0", str(self.cfg.get("system_prompt", "")))
+                return
             ent(t1, r1, "temperature", "temperature",
                 "采样温度（0~2）：越高输出越发散有创意，越低越稳定保守；接近 0 时几乎固定。")
             ent(t1, r1, "top_p", "top_p",
@@ -717,9 +805,32 @@ class SettingsMixin:
         #
         # 分层：状态行（依赖就绪与否）→ 常改的 7 项 → 「高级参数」折叠区（配套文件 + 后端 /
         # 种子 / 附加参数 / 输出目录 / 带图两档的可调项，共 13 项，默认收起）。折叠只挪格子不毁控件
-        # —— 值不丢、保存钩子照跑（见 _row 的 fold 说明）；底部「显示全部参数」一勾全展开。
+        # —— 值不丢、保存钩子照跑（见 _row 的 fold 说明）；每组标题点一下即可展开。
         @section("local_media", "img")
         def _t3(t3, r3):
+            if simple:
+                # 普通用户模式（2026-10-07 W 定）：分辨率 + 输出目录 + 打开输出目录 三件；
+                # 引擎目录 / 模型文件夹 / 模型族 / 步数 / CFG 与全部配套件都在高级模式
+                # （程序按扫描与模型族表自动安排，普通用户不需要碰）。
+                ent(t3, r3, "img_size", "分辨率",
+                    "宽x高，如 1024x1024。分辨率越高越慢。会自动补到本族要求的倍数"
+                    "（SD 系 8 的倍数、Flux/SD3/Wan 16 的倍数），不合适的尺寸会被抬上去。",
+                    width=12, hint="宽x高")
+                ent(t3, r3, "img_output_dir", "输出目录",
+                    "本地生图的落地目录；留空 = 产物文件夹下的 本地\\image。"
+                    "填相对路径时按程序目录解析。",
+                    width=30, hint="留空=产物文件夹")
+                fr_i = ttk.Frame(t3)
+                ttk.Button(fr_i, text="打开输出目录",
+                           command=lambda: _open_outdir(
+                               media.img_out_dir(self.cfg),
+                               "生图输出目录",
+                               "本地生图 → 输出目录")).pack(side="left")
+                row(t3, r3, "", fr_i,
+                    "生成结果写在「输出目录」指定的文件夹（留空 = 产物文件夹\\本地\\image）"
+                    "下的 img_时间戳.png。")
+                return
+
             def _fill_state(var):
                 """依赖就绪回显：认出几个生图模型（延后跑，要扫盘）。"""
                 try:
@@ -863,6 +974,32 @@ class SettingsMixin:
         # 后端 / 输出目录，共 13 项，默认收起）。
         @section("local_media", "vid")
         def _t3b(t3b, r3b):
+            if simple:
+                # 普通用户模式（2026-10-07 W 定）：分辨率 / 帧率 / 帧数 / 输出目录 /
+                # 打开输出目录 五件；主体文件 / 模型族 / 步数 / CFG 与全部配套件在高级模式。
+                ent(t3b, r3b, "vid_size", "分辨率",
+                    "宽x高，如 512x512。视频分辨率对显存和耗时都很敏感，先小后大。", width=12)
+                ent(t3b, r3b, "vid_fps", "帧率",
+                    "每秒帧数。MiniMax-H3 的参考视频按 24fps 组织。")
+                ent(t3b, r3b, "vid_frames", "帧数",
+                    "视频长度 = 帧数 ÷ 帧率。**不需要自己凑 4n+1**：引擎会自行对齐到合法帧数"
+                    "（例如填 17 会按 22 帧出片），估算时长也按对齐之后的算。",
+                    hint="引擎自动对齐")
+                ent(t3b, r3b, "vid_output_dir", "输出目录",
+                    "本地生视频的落地目录；留空 = 产物文件夹下的 本地\\video。"
+                    "填相对路径时按程序目录解析。",
+                    width=30, hint="留空=产物文件夹")
+                fr_v = ttk.Frame(t3b)
+                ttk.Button(fr_v, text="打开输出目录",
+                           command=lambda: _open_outdir(
+                               media.vid_out_dir(self.cfg),
+                               "生视频输出目录",
+                               "本地生视频 → 输出目录")).pack(side="left")
+                row(t3b, r3b, "", fr_v,
+                    "生成结果写在「输出目录」指定的文件夹（留空 = 产物文件夹\\本地\\video）"
+                    "下的 vid_时间戳.webm。")
+                return
+
             def _fill_state(var):
                 """依赖就绪回显：扫到几个视频扩散主体（延后跑，要读 GGUF 头）。"""
                 try:
@@ -1081,13 +1218,23 @@ class SettingsMixin:
                 "agent 接入端口（默认 8081）；改动后点「重启代理」生效，"
                 "并且要同步改 agent 里填的端口——8080 是后端服务端口，不是给 agent 的。",
                 width=8, hint="重启生效")
-            v_px = tk.BooleanVar(value=bool(self.cfg.get("proxy_enabled", True)) and usable)
-            cb_px = ttk.Checkbutton(t4, text="启用 API 代理（随程序启动）", variable=v_px,
+            # 启用与自启动是两个开关（2026-10-07 W 定）：
+            #   启用   = 这个功能开不开（默认关；普通用户模式整页不出现，切回去也不会被关）
+            #   自启动 = 程序启动时自动把代理服务带起来；不勾 = 要用时在本页手动启动
+            v_px = tk.BooleanVar(value=bool(self.cfg.get("proxy_enabled")) and usable)
+            cb_px = ttk.Checkbutton(t4, text="启用本地模型 API", variable=v_px,
                                     state="normal" if usable else "disabled")
-            row(t4, r4, "启用代理", cb_px,
+            row(t4, r4, "启用", cb_px,
                 "关闭后 agent 无法接入；改动后点「重启代理」生效。" if usable else
                 "现在锁着：这台机器上还没有能转发的本地文本模型。")
             v["proxy_enabled"] = v_px
+            v_auto = tk.BooleanVar(value=bool(self.cfg.get("proxy_autostart", True)))
+            cb_auto = ttk.Checkbutton(t4, text="自启动（打开本程序时自动开启这个服务）",
+                                      variable=v_auto,
+                                      state="normal" if usable else "disabled")
+            row(t4, r4, "自启动", cb_auto,
+                "只在「启用」勾着时算数；不勾就要每次在本页手动「启动 / 重启服务」。")
+            v["proxy_autostart"] = v_auto
 
             ttk.Label(t4, textvariable=self.api_hint_var, foreground="#1a7f37",
                       font=("Microsoft YaHei UI", 9)).grid(
@@ -1113,7 +1260,7 @@ class SettingsMixin:
             # 底部「保存」在本页时的额外动作：端口/启停真的变了就把代理重启一次，
             # 否则"保存了却没生效"和"保存了却关窗"一样让人以为配好了
             init_proxy = (int(self.cfg.get("proxy_port", 8081) or 0),
-                          bool(self.cfg.get("proxy_enabled", True)))
+                          bool(self.cfg.get("proxy_enabled")))
 
             def _api_hook():
                 try:
@@ -1128,7 +1275,7 @@ class SettingsMixin:
             save_hooks[t4] = _api_hook
 
         # ---- 区块 6：云端模型 / 服务商与密钥 ----
-        @section("cloud", "prov")
+        @section("cloud_p", "prov")
         def _t4b(t4b, r4b):
             """云端服务商区块。页面开头那段说明在 NAV_SPEC 的 help 里（标题旁的 "?"）。
 
@@ -1262,7 +1409,14 @@ class SettingsMixin:
                 editable = providers.builtin_base_editable(pid)
                 # 内置服务商：名称一律不开放；地址只在"按量百炼"这类**因账号而异**的条目上
                 # 开放（grid_remove 记住原位，切回别的服务商时原样还回来）
-                if st["builtin"]:
+                if simple:
+                    # 普通用户模式（2026-10-07 W 定）：名称 / 地址 / 原生协议那些字段
+                    # 整段不出现，页面只留 选服务商 / 测试连接 / 填 API / 选择模型。
+                    # 控件照建、vars_ 照填 —— commit / do_test / 选模型窗口都要读它们
+                    built_note.grid_remove()
+                    fields.grid_remove()
+                    fields2.grid_remove()
+                elif st["builtin"]:
                     # 只在"这一条能改地址"这个特殊情况下留一行说明（W 2026-10-03）：
                     # 字段本来已经收起，"名称与 base_url：内置"纯属重复
                     if editable:
@@ -2070,7 +2224,10 @@ class SettingsMixin:
             combo = ttk.Combobox(bar, width=24, state="readonly")
             combo.pack(side="left", padx=(0, 6))
             combo.bind("<<ComboboxSelected>>", on_pick)
-            ttk.Button(bar, text="删除", width=6, command=do_delete).pack(side="left", padx=3)
+            if not simple:
+                # 「删除」是管理动作，普通用户模式不出现（测试连接按 W 的口径保留）
+                ttk.Button(bar, text="删除", width=6,
+                           command=do_delete).pack(side="left", padx=3)
             ttk.Button(bar, text="测试连接", width=10, command=do_test).pack(side="left", padx=3)
 
             kr = ttk.Frame(t4b)
@@ -2129,50 +2286,61 @@ class SettingsMixin:
                  hint="自动/手动")
             r4b["i"] += 1
 
-            ttk.Label(t4b, textvariable=media_lbl, foreground="#808080", wraplength=680,
-                      justify="left", font=("Microsoft YaHei UI", 9)).grid(
-                row=r4b["i"], column=0, columnspan=3, sticky="w", pady=(2, 6))
+            if not simple:
+                # 灰色小字提示只在高级模式出现（普通模式只留「已存密钥」那一条，W 定）
+                ttk.Label(t4b, textvariable=media_lbl, foreground="#808080", wraplength=680,
+                          justify="left", font=("Microsoft YaHei UI", 9)).grid(
+                    row=r4b["i"], column=0, columnspan=3, sticky="w", pady=(2, 6))
             r4b["i"] += 1
 
             mf = ttk.Frame(t4b)
-            mf.grid(row=r4b["i"], column=1, columnspan=2, sticky="w", pady=(2, 4))
+            mf.grid(row=r4b["i"], column=1 if not simple else 0,
+                    columnspan=2 if not simple else 3, sticky="w", pady=(2, 4))
             r4b["i"] += 1
             lb = tk.Listbox(mf, height=5, width=34, exportselection=False,
                             font=("Microsoft YaHei UI", 9))
-            lb.pack(side="left")
+            if not simple:
+                lb.pack(side="left")
+            # lb 在普通模式下不摆出来但**照建**：refresh_menu_list / do_remove_selected
+            # 都操作它，对没映射的 Listbox 做 delete/insert 完全合法
             btns = ttk.Frame(mf)
-            btns.pack(side="left", padx=(6, 0), fill="y")
+            btns.pack(side="left", padx=(6, 0) if not simple else (0, 0), fill="y")
             ttk.Button(btns, text="选择模型…", width=12,
                        command=do_pick_models).pack(anchor="w", pady=1)
-            ttk.Button(btns, text="移出选中项", width=12,
-                       command=do_remove_selected).pack(anchor="w", pady=1)
-            ttk.Button(btns, text="刷新清单", width=12,
-                       command=lambda: (commit(silent=True),
-                                        open_picker(fetch=True))).pack(anchor="w", pady=1)
+            if not simple:
+                ttk.Button(btns, text="移出选中项", width=12,
+                           command=do_remove_selected).pack(anchor="w", pady=1)
+                ttk.Button(btns, text="刷新清单", width=12,
+                           command=lambda: (commit(silent=True),
+                                            open_picker(fetch=True))).pack(anchor="w", pady=1)
 
-            ttk.Label(t4b, textvariable=menu_lbl, foreground="#808080", wraplength=430,
-                      justify="left", font=("Microsoft YaHei UI", 9)).grid(
-                row=r4b["i"], column=1, columnspan=2, sticky="w")
+            if not simple:
+                ttk.Label(t4b, textvariable=menu_lbl, foreground="#808080", wraplength=430,
+                          justify="left", font=("Microsoft YaHei UI", 9)).grid(
+                    row=r4b["i"], column=1, columnspan=2, sticky="w")
             r4b["i"] += 1
-            ttk.Label(t4b, textvariable=cat_lbl, foreground="#808080", wraplength=430,
-                      justify="left", font=("Microsoft YaHei UI", 9)).grid(
-                row=r4b["i"], column=1, columnspan=2, sticky="w", pady=(0, 6))
+            if not simple:
+                ttk.Label(t4b, textvariable=cat_lbl, foreground="#808080", wraplength=430,
+                          justify="left", font=("Microsoft YaHei UI", 9)).grid(
+                    row=r4b["i"], column=1, columnspan=2, sticky="w", pady=(0, 6))
             r4b["i"] += 1
 
-            ent(t4b, r4b, None, "超时（秒）", "单次请求超时；思考型模型建议 300 以上。",
-                var=vars_["timeout"])
-            ent(t4b, r4b, None, "上下文窗口",
-                "该服务商模型的上下文长度（token），0 = 不声明。"
-                "留 0 时文本附件按默认 %d token 折行；填上真实窗口（例如 1000000）"
-                "就多带一些。注意上限还夹在 %d token：附件会留在历史里，"
-                "之后每一轮都重发一遍，塞太满等于把后续每轮都变成大账单。"
-                % (textfile.CLOUD_TOKEN_BUDGET, textfile.CLOUD_TOKEN_CAP),
-                var=vars_["ctx"])
+            if not simple:
+                ent(t4b, r4b, None, "超时（秒）", "单次请求超时；思考型模型建议 300 以上。",
+                    var=vars_["timeout"])
+                ent(t4b, r4b, None, "上下文窗口",
+                    "该服务商模型的上下文长度（token），0 = 不声明。"
+                    "留 0 时文本附件按默认 %d token 折行；填上真实窗口（例如 1000000）"
+                    "就多带一些。注意上限还夹在 %d token：附件会留在历史里，"
+                    "之后每一轮都重发一遍，塞太满等于把后续每轮都变成大账单。"
+                    % (textfile.CLOUD_TOKEN_BUDGET, textfile.CLOUD_TOKEN_CAP),
+                    var=vars_["ctx"])
 
-            i = r4b["i"]
-            r4b["i"] += 1
-            ttk.Checkbutton(t4b, text="启用该服务商", variable=vars_["enabled"]).grid(
-                row=i, column=1, sticky="w", pady=4)
+                i = r4b["i"]
+                r4b["i"] += 1
+                ttk.Checkbutton(t4b, text="启用该服务商",
+                                variable=vars_["enabled"]).grid(
+                    row=i, column=1, sticky="w", pady=4)
 
             # 「每轮显示用量」与「让云端模型自选读取区间」属于云端**文本**对话，
             # 移到本区块之后（左栏「云端模型 → 文本模型」），别混在服务商清单里。
@@ -2180,13 +2348,14 @@ class SettingsMixin:
             # ---- 云端生图 / 生视频的档位单独一页（见 _t4c）----
             # 这一页本来就到 1143px 的申请高度，已经超过屏幕可用高度；再叠 9 行
             # 就永远看不见底部了（坑 32：懒加载页要逐页量内容边界 vs 可用面积）。
-            i = r4b["i"]
-            r4b["i"] += 1
-            ttk.Label(t4b, textvariable=jobs_lbl, foreground="#808080", wraplength=680,
-                      justify="left", font=("Microsoft YaHei UI", 9)).grid(
-                row=i, column=0, columnspan=3, sticky="w", pady=(6, 2))
-            ttk.Button(t4b, text="刷新任务台账", width=14,
-                       command=refresh_jobs).grid(row=i, column=2, sticky="e", pady=(6, 2))
+            if not simple:
+                i = r4b["i"]
+                r4b["i"] += 1
+                ttk.Label(t4b, textvariable=jobs_lbl, foreground="#808080", wraplength=680,
+                          justify="left", font=("Microsoft YaHei UI", 9)).grid(
+                    row=i, column=0, columnspan=3, sticky="w", pady=(6, 2))
+                ttk.Button(t4b, text="刷新任务台账", width=14,
+                           command=refresh_jobs).grid(row=i, column=2, sticky="e", pady=(6, 2))
 
             def save_page():
                 """「保存本页」= 通用档位 + 本页 provider 字段，和底部「保存」同一条路。
@@ -2201,12 +2370,14 @@ class SettingsMixin:
                 commit()
                 refresh_combo(keep=st["pid"])
 
-            sf = ttk.Frame(t4b)
-            sf.grid(row=r4b["i"], column=0, columnspan=3, sticky="w", pady=(4, 4))
-            r4b["i"] += 1
-            ttk.Button(sf, text="保存本页", width=12, command=save_page).pack(side="left")
-            ttk.Label(sf, textvariable=url_lbl, foreground="#808080", wraplength=430,
-                      justify="left", font=("Microsoft YaHei UI", 9)).pack(side="left", padx=10)
+            if not simple:
+                sf = ttk.Frame(t4b)
+                sf.grid(row=r4b["i"], column=0, columnspan=3, sticky="w", pady=(4, 4))
+                r4b["i"] += 1
+                ttk.Button(sf, text="保存本页", width=12, command=save_page).pack(side="left")
+                ttk.Label(sf, textvariable=url_lbl, foreground="#808080", wraplength=430,
+                          justify="left", font=("Microsoft YaHei UI", 9)).pack(side="left", padx=10)
+            # 蓝色状态行两种模式都留：测试连接 / 选模型的结果要有地方说话
             ttk.Label(t4b, textvariable=msg_lbl, foreground="#0b57d0", wraplength=680,
                       justify="left", font=("Microsoft YaHei UI", 9)).grid(
                 row=r4b["i"], column=0, columnspan=3, sticky="w", pady=(2, 0))
@@ -2216,9 +2387,25 @@ class SettingsMixin:
             refresh_combo()
             refresh_jobs()
         # ---- 区块 6b：云端 / 文本模型（对话行为与附件预算，跟具体服务商无关）----
-        @section("cloud", "ctext")
+        @section("cloud_t", "ctext")
         def _t4d(t4d, r4d):
-            """云端文本对话的两项开关：用量显示 + 附件自选区间。"""
+            """云端文本对话的开关：思考过程（独立存储）+ 用量显示 + 附件自选区间。
+
+            「展示思考过程」与本地模型的那个**完全独立**（2026-10-07 W 定）：
+            本地存 cfg["show_reasoning"]、云端存 cfg["cloud_show_reasoning"]，
+            渲染侧按本轮链路分流（ui/app.py 的 _poll + _turn_cloud）。
+            """
+            i = r4d["i"]
+            r4d["i"] += 1
+            v["cloud_show_reasoning"] = tk.BooleanVar(
+                value=bool(self.cfg.get("cloud_show_reasoning", True)))
+            ttk.Checkbutton(t4d, text="展示思考过程（云端模型；与本地模型的开关互不影响）",
+                            variable=v["cloud_show_reasoning"]).grid(
+                row=i, column=0, columnspan=3, sticky="w", pady=6)
+            if simple:
+                # 普通用户模式：这一页只留上面那一个开关（2026-10-07 W 定）
+                return
+
             i = r4d["i"]
             r4d["i"] += 1
             v["show_usage"] = tk.BooleanVar(value=bool(self.cfg.get("show_usage", True)))
@@ -2249,8 +2436,18 @@ class SettingsMixin:
                 "上限 200000 是成本护栏，不是拍脑袋：附件会留在历史里**每一轮都重发**，"
                 "声明 1M 也不代表该一次塞 1M。窗口在上一区块「服务商与密钥」里按服务商填。",
                 hint="上限 20 万")
+
+            # 云端文本自己的成本估算（2026-10-07 W 定：三条云端链路各一个入口、
+            # 单价表与计费单位各自独立；文本这条只在高级模式出现）
+            fc = ttk.Frame(t4d)
+            ttk.Button(fc, text="成本估算", width=14,
+                       command=lambda: self.open_cost_window(
+                           providers.KIND_TEXT)).pack(side="left")
+            _row(t4d, r4d, "费用单价", fc,
+                 "云端文本按 token 计费：单价按**模型**填（元/千token）。"
+                 "填了就在每轮「用量」行尾附一句预估费用；没填就不提钱，以账单为准。")
         # ---- 区块 7：云端 / 生图与生视频（服务商原生接口，与本地 sd.cpp 无关）----
-        @section("cloud", "cmedia")
+        @section("cloud_m", "cmedia")
         def _t4c(t4c, r4c):
             """云端生图 / 生视频的档位与落地目录。
 
@@ -2258,7 +2455,7 @@ class SettingsMixin:
             （原先目录两行夹在中间，扫一眼看不出哪条属于哪边）。
             轮询间隔与等待上限是**两条链路共用**的（生图万一回的是 task_id 也会就地转轮询），
             所以不属于任何一列，压在两列下面一条横栏里。
-            费用单价不在这里填：它按模型走，点「成本预估算」开次级窗口。
+            费用单价不在这里填：它按模型走，「成本估算」按钮两列各一个（各查各的表）。
             """
             cols = ttk.Frame(t4c)
             cols.grid(row=r4c["i"], column=0, columnspan=3, sticky="nw")
@@ -2293,6 +2490,15 @@ class SettingsMixin:
             row(col_l, rl, "输出目录", fl,
                 "产物一落地就在这里。云端地址只活 24 小时，本地这份是唯一的留存；"
                 "目录还没生成时点一下会先建出来再打开。", lw=8)
+            # 成本估算按链路拆开（2026-10-07 W 定）：生图 / 生视频各一个按钮、
+            # 各一张单价表、各自的计费单位（原来两条链路共用一个「成本预估算」）
+            flc = ttk.Frame(col_l)
+            ttk.Button(flc, text="成本估算", width=14,
+                       command=lambda: self.open_cost_window(
+                           providers.KIND_IMAGE)).pack(side="left")
+            row(col_l, rl, "费用单价", flc,
+                "生图按**张**计费：单价按模型填（元/张）。填了就在提交前报金额；"
+                "没填就明说「以账单为准」，不编数字。", lw=8)
 
             ent(col_r, rr, "cloud_video_resolution", "视频分辨率",
                 "各家档位不一样（阿里云/MiniMax 用 720P、1080P、768P、2K 这类标签，"
@@ -2318,6 +2524,13 @@ class SettingsMixin:
                            "云端模型 → 生图 / 生视频 → 视频存放")).pack(side="left")
             row(col_r, rr, "输出目录", fr,
                 "同上：这条链路下它是唯一留存，服务端地址 24 小时就失效。", lw=8)
+            frc = ttk.Frame(col_r)
+            ttk.Button(frc, text="成本估算", width=14,
+                       command=lambda: self.open_cost_window(
+                           providers.KIND_VIDEO)).pack(side="left")
+            row(col_r, rr, "费用单价", frc,
+                "生视频按**秒**或按**条**计费（同一家两种都有）：单价按模型填。"
+                "填没填都会在提交前弹一次确认；没填就明说「以账单为准」。", lw=8)
 
             ttk.Separator(t4c).grid(row=r4c["i"], column=0, columnspan=3,
                                     sticky="we", pady=(12, 4))
@@ -2342,13 +2555,68 @@ class SettingsMixin:
             ent(t4c, r4c, "cloud_wait_minutes", "等待上限",
                 "分钟。超了就不再干等，任务留在台账里，重启后对话开头会给「取回」按钮。",
                 lw=8)
-            fc = ttk.Frame(t4c)
-            ttk.Button(fc, text="成本预估算", width=14,
-                       command=self.open_cost_window).pack(side="left")
-            row(t4c, r4c, "费用单价", fc,
-                "单价按**模型**填（同一家不同模型不同价，计费单位还可能一个按秒、一个按条）。"
-                "填了就在提交前的确认框与对话流里报金额；没填就明说「以账单为准」，不编数字。"
-                "生视频无论有没有单价都会二次确认，生图不确认但把价格打在对话流里。", lw=8)
+            # 原来这里有一条共用的「费用单价 → 成本预估算」：2026-10-07 起成本估算
+            # 按链路拆开（W 定），按钮分别挂在左右两列的底部（各自的单价表与计费单位）
+
+        # ---- 区块 7b / 7c（**普通用户模式专有**）：云端生图 / 云端生视频各自一页 ----
+        # 高级模式用的是上面 cmedia 那一屏（左右两列合一页）；普通模式把两条链路拆成
+        # 两个导航项，各留 W 点名的几件（2026-10-07）。区块键 cimg / cvid 只出现在
+        # SIMPLE_NAV_SPEC 里（tools/check_structure.py 的 [2] 段按两份规格一起判死区块）。
+        @section("cloud_m", "cimg")
+        def _t4e(t4e, r4e):
+            ent(t4e, r4e, "cloud_img_size", "分辨率",
+                "填「宽x高」或「宽*高」都行，发出去前会按这一家的写法换算；"
+                "超出这一家允许的区间时，服务端会点名报错。",
+                width=11, hint="宽x高")
+            ent(t4e, r4e, "cloud_img_dir", "输出目录",
+                "云端生图的落地目录；留空 = 产物文件夹（程序目录下的「产物」）里的 云端\\image。",
+                width=30, hint="留空=产物文件夹")
+            fl = ttk.Frame(t4e)
+            ttk.Button(fl, text="打开输出目录", width=14,
+                       command=lambda: _open_outdir(
+                           cloud_media_dir(self.cfg, "image"),
+                           "云端生图的落地目录",
+                           "云端生图 → 输出目录")).pack(side="left")
+            row(t4e, r4e, "", fl,
+                "产物一落地就在这里。云端地址只活 24 小时，本地这份是唯一的留存。")
+            fc = ttk.Frame(t4e)
+            ttk.Button(fc, text="成本估算", width=14,
+                       command=lambda: self.open_cost_window(
+                           providers.KIND_IMAGE)).pack(side="left")
+            row(t4e, r4e, "费用单价", fc,
+                "生图按**张**计费：单价按模型填（元/张）。填了就在提交前报金额；"
+                "没填就明说「以账单为准」，不编数字。")
+
+        @section("cloud_m", "cvid")
+        def _t4f(t4f, r4f):
+            ent(t4f, r4f, "cloud_video_resolution", "分辨率",
+                "各家档位不一样（720P、1080P 这类标签，或 1280x720 这种宽高）。"
+                "留空 = 用服务端默认；不知道这一家允许什么时，留空最安全。",
+                hint="留空=默认")
+            ent(t4f, r4f, "cloud_video_duration", "时长",
+                "秒。各家允许区间不同，超范围会被服务端点名报错（原话会显示在对话里）。"
+                "提交前一律弹一次确认，单价填过就报金额、没填就说明以账单为准。",
+                hint="各家不同")
+            ent(t4f, r4f, "cloud_video_ratio", "比例",
+                "例如 16:9 / 9:16 / 1:1；留空 = 不传（画面比例常由素材决定）。")
+            ent(t4f, r4f, "cloud_vid_dir", "输出目录",
+                "云端生视频的落地目录；留空 = 产物文件夹（程序目录下的「产物」）里的 云端\\video。",
+                width=30, hint="留空=产物文件夹")
+            fr = ttk.Frame(t4f)
+            ttk.Button(fr, text="打开输出目录", width=14,
+                       command=lambda: _open_outdir(
+                           cloud_media_dir(self.cfg, "video"),
+                           "云端生视频的落地目录",
+                           "云端生视频 → 输出目录")).pack(side="left")
+            row(t4f, r4f, "", fr,
+                "这条链路下它是唯一留存，服务端地址 24 小时就失效。")
+            fc = ttk.Frame(t4f)
+            ttk.Button(fc, text="成本估算", width=14,
+                       command=lambda: self.open_cost_window(
+                           providers.KIND_VIDEO)).pack(side="left")
+            row(t4f, r4f, "费用单价", fc,
+                "生视频按**秒**或按**条**计费（同一家两种都有）：单价按模型填。"
+                "填没填都会在提交前弹一次确认；没填就明说「以账单为准」。")
 
         @section("about", "about")
         def _t9(t9, r9):
@@ -2550,7 +2818,10 @@ class SettingsMixin:
                                   command=lambda: _open_page(up_url["v"]),
                                   state="disabled")
             btn_open.pack(side="left", padx=(0, 6))
-            upd_help = widgets.HelpDot(uf, _upd_help_text())
+            # 普通用户模式不放 "?"（2026-10-07 W 定：关于页完整保留、仅移除 ? 组件）。
+            # 对象照建（文案给空 = 不建点控件）：st["help"] 与 _sync_upd_help
+            # （开发者选项改令牌后回来重算文案）都还指着它，None 会把那条路打断
+            upd_help = widgets.HelpDot(uf, "" if simple else _upd_help_text())
             upd_help.pack(side="left")
             # 挂在 App 级状态里：开发者选项改了令牌，要能回头把这段说明改成实话
             st["help"] = upd_help
@@ -2619,11 +2890,12 @@ class SettingsMixin:
             ttk.Label(df, text="现在：%s" % ("已开" if now else "没开"),
                       foreground="#808080", font=("Microsoft YaHei UI", 9)).pack(
                 side="left", padx=(10, 0))
-            widgets.HelpDot(df, "屏幕缩放不是 100% 时开的：开着 = 界面按显示器的真实像素画，"
-                                 "文字锐利，同一块屏幕上窗口看着比现在小一档；"
-                                 "关着 = 交给 Windows 拉伸，看着大但发虚。\n"
-                                 "改完要**重开程序**才生效（这一项只能冷切换）。"
-                                 "远程桌面里建议关着。").pack(side="left", padx=(6, 0))
+            if not simple:      # 普通用户模式不放 "?"（2026-10-07 W 定）
+                widgets.HelpDot(df, "屏幕缩放不是 100% 时开的：开着 = 界面按显示器的真实像素画，"
+                                     "文字锐利，同一块屏幕上窗口看着比现在小一档；"
+                                     "关着 = 交给 Windows 拉伸，看着大但发虚。\n"
+                                     "改完要**重开程序**才生效（这一项只能冷切换）。"
+                                     "远程桌面里建议关着。").pack(side="left", padx=(6, 0))
             ttk.Label(t9, textvariable=dpi_status, foreground="#808080", wraplength=360,
                       justify="left", font=("Microsoft YaHei UI", 9)).grid(
                 row=r9["i"], column=0, columnspan=3, sticky="w")
@@ -2973,12 +3245,13 @@ class SettingsMixin:
                 th.grid(row=i, column=0, columnspan=3, sticky="w", pady=(10, 2))
                 tk.Label(th, text=title, font=("Microsoft YaHei UI", 10, "bold"),
                          background=widgets.default_bg(), anchor="w").pack(side="left")
-                widgets.HelpDot(th, "「更新引擎」会把压缩包整包解压（不要只放那一个 exe，"
-                                     "同目录的运行库都要），落到程序目录下的 engines 里。\n"
-                                     + note +
-                                     "\n引擎本来就装在这台机器上、只是换了位置的，"
-                                     "用「自动定向」按 exe 名找出来、或「手动定向」自己指，"
-                                     "都不用重装。").pack(side="left", padx=(6, 0))
+                if not simple:      # 普通用户模式不放 "?"（引擎管理的功能与按钮本身不变）
+                    widgets.HelpDot(th, "「更新引擎」会把压缩包整包解压（不要只放那一个 exe，"
+                                         "同目录的运行库都要），落到程序目录下的 engines 里。\n"
+                                         + note +
+                                         "\n引擎本来就装在这台机器上、只是换了位置的，"
+                                         "用「自动定向」按 exe 名找出来、或「手动定向」自己指，"
+                                         "都不用重装。").pack(side="left", padx=(6, 0))
 
                 # 状态行：四态文案（未就位 / 已就位 / 正在查 / 查询到新版本）**都写在这一行**，
                 # 不另设提示行（W 2026-10-05）。变量挂控件保活（坑 145 ①）。
@@ -3300,6 +3573,19 @@ class SettingsMixin:
         # ---- 区块 8：模型文件管理（左栏「模型文件与引擎」那一项指到这里）----
         @section("files", "files")
         def _t5(t5, r5):
+            if simple:
+                # 普通用户模式（2026-10-07 W 定）：管理本地模型 / 全部重新计算 /
+                # 手动定向模型 三件 + 引擎管理那一屏（eng 区块本身不变）。
+                # 「补全缺失项」与「整理模型文件夹」在高级模式；进页自动补全照旧在后台跑。
+                for _txt, _cmd in (("管理本地模型…", self.open_local_models),
+                                   ("全部重新计算", lambda: self._manual_scan(True)),
+                                   ("手动定向模型", self._manual_point_model)):
+                    ttk.Button(t5, text=_txt, width=18, command=_cmd).grid(
+                        row=r5["i"], column=0, columnspan=3, sticky="w", pady=4)
+                    r5["i"] += 1
+                enter_hooks.setdefault("files", []).append(self._auto_scan_models)
+                return
+
             def _files_head(n_models):
                 # 只留"有多少个模型"：原来把层数 / context / mmproj / 未进菜单四个计数
                 # 也拼在这一行里（5 段用 ｜ 隔开），760px 的换行宽度根本兜不住，
@@ -3446,6 +3732,7 @@ class SettingsMixin:
 
         def _nav_select(item):
             page_id, sec_id = item["page"], item["section"]
+            state["leaf"] = item.get("key")     # 模式切换后按它落回对应页
             # 连点左栏**当前这一项**时不再重闪（W 2026-10-03 报的"管理本地模型"按钮闪烁）：
             # 那一项下面紧跟着的就是这个区块的标题，黄底每 1200ms 重画一轮，
             # 看着就像按钮在闪。页面与目标都没动，只有滚动照做。
@@ -3512,19 +3799,27 @@ class SettingsMixin:
             if restart:
                 self.restart_server()
 
-        # 「显示全部参数」：常驻底部按钮条（固定外框，不随滚动消失）。勾上 = 把**所有**
-        # 「高级参数」折叠区一起展开（含还没建起来的页 —— 那些页建的时候会问会话状态）。
-        # 状态存在 App._settings_ui（会话内记住：关掉设置窗再开还在，退程序才清），
-        # **不写进配置文件** —— 它纯粹是界面偏好，不是功能设置。
-        show_var = tk.BooleanVar(value=bool(sess.get("show_all")))
+        # 「用户模式」切换入口（2026-10-07 W 定，顶替原「显示全部参数」的位置）：
+        # 点一下在 普通 / 高级 之间互切。切换 = 写配置 + **整窗重建** —— 配置加载、
+        # 按页懒建、进页钩子（模型列表刷新、进页自动查更新…）全部重新走一遍，
+        # 不在旧窗口上"就地换皮"（那才会出空白与状态错乱）。没保存的编辑会丢，
+        # 与「关闭」按钮同一语义。折叠区的展开状态仍存 App._settings_ui（会话内记住）。
+        def _switch_mode():
+            new_simple = not simple
+            self.cfg["user_mode"] = "simple" if new_simple else "advanced"
+            try:
+                save_config(self.cfg)
+            except Exception:
+                pass
+            cur = state.get("leaf") or ""
+            keys = {it.get("key") for it in
+                    _nav_leaves(_nav_items(self._dev_mode, new_simple))}
+            win.destroy()
+            self._settings_win = None
+            self.open_settings(jump=cur if cur in keys else "")
 
-        def _apply_show_all():
-            sess["show_all"] = bool(show_var.get())
-            for _n in list(fold_heads):
-                _render_fold(_n)
-
-        ttk.Checkbutton(bar, text="显示全部参数", variable=show_var,
-                        command=_apply_show_all).pack(side="left", padx=(2, 0))
+        ttk.Button(bar, text="切换到高级模式" if simple else "切换到普通模式",
+                   command=_switch_mode).pack(side="left", padx=(2, 0))
         ttk.Button(bar, text="关闭", command=win.destroy).pack(side="right", padx=4)
         ttk.Button(bar, text="保存并重启服务",
                    command=lambda: _global_save(restart=True)).pack(side="right", padx=4)
@@ -3604,11 +3899,19 @@ class SettingsMixin:
             c["system_prompt"] = v["system_prompt"].get("1.0", "end").rstrip("\n")
         if "show_reasoning" in v:
             c["show_reasoning"] = bool(v["show_reasoning"].get())
+        # 云端「展示思考过程」独立存储（2026-10-07 W 定）：与本地那个键互不影响
+        if "cloud_show_reasoning" in v:
+            c["cloud_show_reasoning"] = bool(v["cloud_show_reasoning"].get())
         # 代理开关：**只有这台机器真能转发时才回写**。没有本地文本模型时那个复选框是锁着的，
         # 它的值是"偏好 and usable"= False —— 照原样回写就会把用户存过的偏好静默改成关，
         # 等他后来装好模型也不会自己变回来（§5.6 的口径：锁住的那项默认关，但不吃配置）
         if "proxy_enabled" in v and self._proxy_usable:
             c["proxy_enabled"] = bool(v["proxy_enabled"].get())
+        # 「自启动」与「启用」同一把锁（坑 136 同款）：锁着的项不回写。
+        # 普通用户模式整页不建 ⇒ v 里没有这两个键 ⇒ 切模式绝不会把它们关掉
+        # （W 点名：开启自启动后切回普通用户模式不得自动关闭）
+        if "proxy_autostart" in v and self._proxy_usable:
+            c["proxy_autostart"] = bool(v["proxy_autostart"].get())
         if "show_usage" in v:
             c["show_usage"] = bool(v["show_usage"].get())
         if "cloud_file_model_decides" in v:

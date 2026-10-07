@@ -2,7 +2,7 @@
 """llm_console.ui.subwindows — 从「设置」派生出去的独立小窗口（Mixin）。
 
 现在有两个：**诊断**（这台机器怎么了：程序与配置在哪儿、运行库、一键诊断、报告怎么拿出去）
-与**成本预估算**（云端单价按模型填，点「写入」即落盘）。它们的共同点：
+与**成本估算**（云端单价按模型 × 按链路填，点「写入」即落盘）。它们的共同点：
 
   · **不占设置页的版面** —— 设置页是固定外框（1080x740、横向不可滚），往里塞只会挤掉
     别人；所以两者都是"按钮开一个独立 Toplevel"（同一个形状，W 2026-10-01 定的口径）。
@@ -51,10 +51,15 @@ def open_file(path, what):
 
 
 class SubWindowMixin:
-    """App 的「诊断」与「成本预估算」两个独立窗口（Mixin）；self._xxx 经 MRO 解析。"""
+    """App 的「诊断」与「成本估算」两个独立窗口（Mixin）；self._xxx 经 MRO 解析。"""
 
-    def open_cost_window(self, parent=None):
-        """「成本预估算」次级窗口：单价**按模型**填，点「写入单价」立即落盘。
+    def open_cost_window(self, kind=None, parent=None):
+        """「成本估算」次级窗口：单价**按模型 × 按链路**填，点「写入单价」立即落盘。
+
+        2026-10-07 W 定：原来云端生图 / 生视频共用一个「成本预估算」（一张表、单位
+        秒/张/条混着），现在按链路拆开 —— 文本（元/千token）/ 生图（元/张）/
+        生视频（元/秒、元/条）各开各的窗、各查各的表（providers._PRICE_KEY），
+        计费单位下拉也只列本链路认得的那几个。本地链路不产生 API 费用，没有这个入口。
 
         为什么不跟设置窗口底部那个「保存」共用一次提交：单价是"给某一次生成估费用"的独立
         事实，跟"这一页别的档位改不改"没关系（同坑 61 —— 声明与提交不是一件事）。这里点
@@ -63,20 +68,30 @@ class SubWindowMixin:
         为什么单价挂模型不挂服务商：同一家下 happyhorse-1.0 与 1.1 不同价，MiniMax 的 H3
         按秒、Hailuo 按条 —— 连**计费单位**都是模型属性，挂在服务商上算出来的就是错价。
 
-        模型下拉只列**已勾进主页面菜单**的媒体模型（W 定的口径）：没进菜单的模型本来发不出去，
+        模型下拉只列**已勾进主页面菜单**的本链路模型（W 定的口径）：没进菜单的模型本来发不出去，
         给它定价没有意义；媒体模型大多不在各家 /models 清单里，要先进 选择模型 → 直接加入。
         """
+        kind = kind if kind in providers.KINDS else providers.KIND_IMAGE
+        _kind_name = providers.KIND_LABEL[kind]
         host = parent or self.root
         cfg = self.cfg
         win = tk.Toplevel(host)
         win.withdraw()          # 先藏起来，摆正了再显示（否则左上角闪一下）
-        win.title("成本预估算")
+        win.title("成本估算 · 云端%s" % _kind_name)
         win.geometry("620x470")
         win.minsize(560, 420)
         win.transient(host)
-        ttk.Label(win, text="单价按模型记，只用于提交前的费用预估。不填就在确认框与对话流里"
-                            "明说「以账单为准」，不编数字。点「写入单价」立即生效，"
-                            "不需要到底部「保存」。",
+        _unit_words = {providers.KIND_TEXT: "元/千token（输入 + 输出合并按这一个均价估）",
+                       providers.KIND_IMAGE: "元/张",
+                       providers.KIND_VIDEO: "元/秒 或 元/条（同一家两种都有，按模型选）"}
+        _effect_words = {
+            providers.KIND_TEXT: "填了就在每轮「用量」行尾附一句预估费用",
+            providers.KIND_IMAGE: "填了就在提交前把价格打进对话流",
+            providers.KIND_VIDEO: "填没填都会在提交前弹一次确认，填了就报金额"}
+        ttk.Label(win, text="云端%s的单价按模型记，只用于费用预估（%s）。"
+                            "不填就明说「以账单为准」，不编数字。%s。"
+                            "点「写入单价」立即生效，不需要到底部「保存」。"
+                  % (_kind_name, _unit_words[kind], _effect_words[kind]),
                   wraplength=580, justify="left", font=("Microsoft YaHei UI", 9)).pack(
             side="top", fill="x", padx=14, pady=(12, 4))
         body = ttk.Frame(win)
@@ -93,7 +108,7 @@ class SubWindowMixin:
         pid_var = tk.StringVar(value="")
         model_var = tk.StringVar(value="")
         price_var = tk.StringVar(value="")
-        unit_var = tk.StringVar(value="秒")
+        unit_var = tk.StringVar(value=providers.default_unit(kind=kind))
         status_var = tk.StringVar(value="")
         _pl = providers.provider_labels(cfg)
 
@@ -101,14 +116,15 @@ class SubWindowMixin:
                                values=[lb for lb, _p in _pl])
         combo_m = ttk.Combobox(body, state="readonly", width=30,
                                textvariable=model_var, values=[])
+        # 计费单位只列**本链路**认得的（拆分的另一半：单位跟着链路走，不再混在一格）
         combo_u = ttk.Combobox(body, state="readonly", width=8, textvariable=unit_var,
-                               values=list(providers.PRICE_UNITS))
+                               values=list(providers.UNITS_BY_KIND[kind]))
         # 已填清单用 Text 而不是"拼全部模型名"的 Label（坑 92：状态类 Label 必须定长）
         lst = tk.Text(body, height=8, width=46, font=("Microsoft YaHei UI", 9),
                       state="disabled", wrap="none")
 
         def refresh_list():
-            got = providers.price_table(providers.get_provider(cfg, pid_var.get()))
+            got = providers.price_table(providers.get_provider(cfg, pid_var.get()), kind)
             lst.configure(state="normal")
             lst.delete("1.0", "end")
             lst.insert("1.0", "（这家一个都没填）" if not got else "")
@@ -117,19 +133,20 @@ class SubWindowMixin:
             lst.configure(state="disabled")
 
         def load_price():
-            """选中模型就把已填的单价与单位顶上来；没填过按能力给个起始单位。"""
+            """选中模型就把已填的单价与单位顶上来；没填过按链路给个起始单位。"""
             p = providers.get_provider(cfg, pid_var.get()) or {}
-            per, unit = providers.price_of(p, model_var.get())
+            per, unit = providers.price_of(p, model_var.get(), kind)
             if per > 0:
                 price_var.set("%g" % per)
                 unit_var.set(unit)
             else:
                 price_var.set("")
-                unit_var.set(providers.default_unit(
-                    model_var.get(), providers.model_kind_of(p, model_var.get())))
+                unit_var.set(providers.default_unit(kind=kind))
 
         def refresh_models():
-            ms = providers.media_menu_models(providers.get_provider(cfg, pid_var.get()))
+            p = providers.get_provider(cfg, pid_var.get())
+            ms = (providers.text_menu_models(p) if kind == providers.KIND_TEXT
+                  else providers.media_menu_models(p, kind))
             combo_m.configure(values=ms)
             model_var.set(model_var.get() if model_var.get() in ms
                           else (ms[0] if ms else ""))
@@ -144,8 +161,11 @@ class SubWindowMixin:
             else:
                 pid_var.set("")
             if not refresh_models():
-                status_var.set("这家还没有勾进菜单的生图 / 生视频模型："
-                               "先去「选择模型」里加进来（媒体模型名要用「直接加入」）。")
+                status_var.set(
+                    "这家还没有勾进菜单的%s模型：先去「选择模型」里加进来%s。"
+                    % (_kind_name,
+                       "（媒体模型名要用「直接加入」）"
+                       if kind != providers.KIND_TEXT else ""))
             else:
                 status_var.set("")
             refresh_list()
@@ -166,7 +186,7 @@ class SubWindowMixin:
                     status_var.set("单价要大于 0。要清掉就点「清除该模型单价」。")
                     return
                 unit = unit_var.get()
-            if not providers.set_price(cfg, pid, model, per, unit):
+            if not providers.set_price(cfg, pid, model, per, unit, kind):
                 status_var.set("这个服务商不在了，没写进去。")
                 return
             save_config(cfg)

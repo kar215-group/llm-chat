@@ -167,11 +167,16 @@ PROVIDER_TEMPLATE = {
     "media_api": "auto",
     # 个别模型要额外 parameters（各家档位不一致，留个不用改代码的口子）
     "media_extra_params": {},
-    # 单价（元）：**按模型记，不按服务商**。同一家下 happyhorse-1.0 与 1.1 就不同价，
-    # MiniMax 的 H3 按秒、Hailuo 按条，连计费单位都不一样 —— 挂在服务商上必然算错。
-    # 形状：{"模型名": {"price": 0.5, "unit": "秒"|"张"|"条"}}；空 = 没填，界面明说
-    # "以账单为准"，绝不编一个数字出来。
-    "media_prices": {},
+    # 单价（元）：**按模型记，不按服务商**，且**按链路分三张表**（2026-10-07 W 定：
+    # 成本估算按 文本 / 生图 / 生视频 拆开，计费单位也各自一套）。同一家下
+    # happyhorse-1.0 与 1.1 就不同价，MiniMax 的 H3 按秒、Hailuo 按条 ——
+    # 挂在服务商上必然算错。形状：{"模型名": {"price": 0.5, "unit": …}}；
+    # 空 = 没填，界面明说"以账单为准"，绝不编一个数字出来。
+    # 旧的单张 media_prices 由 normalize_provider 按 model_kinds / 单位自动拆进两张
+    # 媒体表（幂等，拆完即弃）。
+    "text_prices": {},             # 云端文本：元/千token
+    "image_prices": {},            # 云端生图：元/张
+    "video_prices": {},            # 云端生视频：元/秒、元/条
 }
 
 # 阿里云原生媒体接口可用的域名（文档 §12.1/§12.3：Token Plan 专属域名与百炼按量的
@@ -276,14 +281,27 @@ def media_extra_params(p, model):
     return dict(val) if isinstance(val, dict) else {}
 
 
-PRICE_UNITS = ("秒", "张", "条")      # 元/秒（按秒计费的视频）、元/张（图）、元/条（整条计费的视频）
+# ---- 单价与计费单位（2026-10-07 W 定：成本估算按 文本 / 生图 / 生视频 三条链路拆开，
+# 计费单位与价格表也各自一套，不再共用一张 media_prices）----
 # 各家计费口径不同这件事是实测出来的：H3 ≈0.50 元/秒、Hailuo 768P/6s ≈2 元/条、
-# 图像按张 ≈0.025~0.5 元 —— 只给"元/秒 + 元/张"两档就会把按条的模型算成 0。
-_DEFAULT_UNIT = {KIND_IMAGE: "张", KIND_VIDEO: "秒"}
+# 图像按张 ≈0.025~0.5 元、文本按千 token —— 只给"元/秒 + 元/张"两档就会把按条的模型算成 0。
+TEXT_PRICE_UNIT = "千token"
+UNITS_BY_KIND = {KIND_TEXT: (TEXT_PRICE_UNIT,), KIND_IMAGE: ("张",),
+                 KIND_VIDEO: ("秒", "条")}
+# 旧单表时代的媒体单位集合（秒/张/条）：现在只用于 media_prices 的迁移判据
+PRICE_UNITS = UNITS_BY_KIND[KIND_IMAGE] + UNITS_BY_KIND[KIND_VIDEO]
+_DEFAULT_UNIT = {KIND_TEXT: TEXT_PRICE_UNIT, KIND_IMAGE: "张", KIND_VIDEO: "秒"}
+_PRICE_KEY = {KIND_TEXT: "text_prices", KIND_IMAGE: "image_prices",
+              KIND_VIDEO: "video_prices"}
 
 
-def _norm_prices(raw):
-    """把 provider 记录里的单价表洗成 {模型: {"price": float>0, "unit": 认识的单位}}。"""
+def _norm_prices(raw, kind=None):
+    """把 provider 记录里的单价表洗成 {模型: {"price": float>0, "unit": 该链路认识的单位}}。
+
+    `kind` 给链路时按 `UNITS_BY_KIND[kind]` 认单位（跨链路的单位进不了表）；
+    不给 kind（None）= 迁移旧 media_prices 用的宽口径（秒/张/条都认）。
+    """
+    units = UNITS_BY_KIND.get(kind, PRICE_UNITS) if kind is not None else PRICE_UNITS
     out = {}
     if not isinstance(raw, dict):
         return out
@@ -296,26 +314,52 @@ def _norm_prices(raw):
         except Exception:
             continue
         u = str(e.get("unit") or "").strip()
-        if per > 0 and u in PRICE_UNITS:
+        if per > 0 and u in units:
             out[m] = {"price": per, "unit": u}
     return out
 
 
-def price_of(p, model):
-    """某个媒体模型的单价与计费单位 → (元, 单位)；没填或形状不对 → (0.0, "")。"""
-    e = _norm_prices((p or {}).get("media_prices")).get(str(model or "").strip())
+def _split_legacy_media_prices(out):
+    """旧单张 media_prices → 生图 / 生视频两张表（幂等：旧表不在就什么都不做）。
+
+    归属判据先用 model_kinds（勾选窗口记下的能力），记不了就按单位退（张=生图、
+    秒/条=生视频）—— 媒体表里不该有文本模型，认不出的一律进生视频（宁可显式可见，
+    不静默丢价）。拆完把旧表整个弃掉。
+    """
+    legacy = out.get("media_prices")
+    if isinstance(legacy, dict) and legacy:
+        kinds = out.get("model_kinds") or {}
+        for m, e in _norm_prices(legacy).items():
+            k = kinds.get(m)
+            if k not in (KIND_IMAGE, KIND_VIDEO):
+                k = KIND_IMAGE if e["unit"] == "张" else KIND_VIDEO
+            key = _PRICE_KEY[k]
+            tbl = _norm_prices(out.get(key), k)
+            tbl.setdefault(m, e)
+            out[key] = tbl
+    out.pop("media_prices", None)
+
+
+def price_of(p, model, kind):
+    """某个模型在**某条链路**上的单价与计费单位 → (元, 单位)；没填或形状不对 → (0.0, "")。"""
+    key = _PRICE_KEY.get(kind)
+    if not key:
+        return (0.0, "")
+    e = _norm_prices((p or {}).get(key), kind).get(str(model or "").strip())
     return (e["price"], e["unit"]) if e else (0.0, "")
 
 
-def set_price(cfg, pid, model, price, unit):
-    """写某个模型的单价（元）。**price<=0 = 删掉这条记录**；单位不认识 = 直接拒写。
+def set_price(cfg, pid, model, price, unit, kind):
+    """写某个模型在某条链路上的单价（元）。**price<=0 = 删掉这条记录**；
+    单位不属于这条链路 = 直接拒写。
 
     单位不认时不能顺手删：那会让一个手滑的配置值把已经填好的单价抹掉，
     而"抹掉"在界面上长得像"我没填过" —— 拒写返回 False，让调用方去解释。
     只改内存里的 cfg，**落盘由调用方负责**（与 update_provider 同一条约定）。
     """
     model = str(model or "").strip()
-    if not model:
+    key = _PRICE_KEY.get(kind)
+    if not model or not key:
         return False
     p = get_provider(cfg, pid)
     if not p:
@@ -325,33 +369,38 @@ def set_price(cfg, pid, model, price, unit):
     except Exception:
         return False
     unit = str(unit or "").strip()
-    if per > 0 and unit not in PRICE_UNITS:
+    if per > 0 and unit not in UNITS_BY_KIND[kind]:
         return False
-    prices = _norm_prices(p.get("media_prices"))
+    prices = _norm_prices(p.get(key), kind)
     if per <= 0:
         prices.pop(model, None)
     else:
         prices[model] = {"price": per, "unit": unit}
-    return bool(update_provider(cfg, pid, {"media_prices": prices}))
+    return bool(update_provider(cfg, pid, {key: prices}))
 
 
-def price_table(p):
-    """这家填过的单价表 → {模型名: {"price": float, "unit": str}}（形状已洗净）。"""
-    return _norm_prices((p or {}).get("media_prices"))
+def price_table(p, kind):
+    """这家某条链路填过的单价表 → {模型名: {"price": float, "unit": str}}（形状已洗净）。"""
+    key = _PRICE_KEY.get(kind)
+    if not key:
+        return {}
+    return _norm_prices((p or {}).get(key), kind)
 
 
-def default_unit(model, kind=None):
-    """没填过时给个起始计费单位：图片按张、视频按秒（认不出能力就按秒）。"""
+def default_unit(model=None, kind=None):
+    """没填过时给个起始计费单位：文本按千token、图片按张、视频按秒（认不出能力就按秒）。"""
     k = kind or guess_kind(model)
     return _DEFAULT_UNIT.get(k, "秒")
 
 
 def priced_models(p, kind=None):
-    """这家填过单价的模型名（可按能力筛，筛据 = 名字猜的 kind，仅用于分组显示）。"""
-    out = sorted(_norm_prices((p or {}).get("media_prices")))
-    if kind:
-        out = [m for m in out if guess_kind(m) == kind]
-    return out
+    """这家填过单价的模型名（kind 给链路就只列那张表；不给 = 三张表合并）。"""
+    p = p or {}
+    keys = ([_PRICE_KEY[kind]] if kind in _PRICE_KEY else list(_PRICE_KEY.values()))
+    out = set()
+    for key in keys:
+        out.update(_norm_prices(p.get(key)))
+    return sorted(out)
 
 
 def media_price_note(p, kind, seconds=0, model=""):
@@ -359,17 +408,43 @@ def media_price_note(p, kind, seconds=0, model=""):
 
     单价**按模型**查 —— 同一家不同模型不同价、不同单位，按服务商查是这次改掉的那个错。
     """
-    per, unit = price_of(p, model)
+    per, unit = price_of(p, model, kind)
     if per <= 0:
-        return ("模型「%s」的单价未填（设置 → 云端模型 → 成本预估算），"
+        return ("模型「%s」的单价未填（设置 → 云端模型 → 成本估算），"
                 "费用以服务商账单为准。" % model if model else
-                "单价未填（设置 → 云端模型 → 成本预估算），费用以服务商账单为准。")
+                "单价未填（设置 → 云端模型 → 成本估算），费用以服务商账单为准。")
     if unit == "秒":
         n = int(seconds or 0)
         return "预估 %.2f 元/秒 × %d 秒 ≈ %.2f 元。" % (per, n, per * n)
     if unit == "张":
         return "预估 %.2f 元/张。" % per
     return "预估 %.2f 元/条。" % per
+
+
+def text_cost_note(p, model, usage):
+    """云端文本每轮「用量」行尾的费用预估；单价没填返回空串（不编数字，同 media_price_note）。
+
+    口径：(输入 + 输出) 合计 token ÷ 1000 × 单价（元/千token）。各家 input/output
+    实际不同价，这里只有一个均价档 —— 是预估不是账单，行尾措辞也写"约"。
+    """
+    per, _unit = price_of(p, model, KIND_TEXT)
+    if per <= 0 or not isinstance(usage, dict):
+        return ""
+
+    def pick(*names):
+        for n in names:
+            v = usage.get(n)
+            if isinstance(v, (int, float)):
+                return int(v)
+        return None
+
+    tot = pick("total_tokens")
+    if tot is None:
+        tot = (pick("prompt_tokens", "input_tokens") or 0) \
+            + (pick("completion_tokens", "output_tokens") or 0)
+    if tot <= 0:
+        return ""
+    return "、费用约 %.2f 元" % (per * tot / 1000.0)
 
 
 def supports_media(p, kind):
@@ -519,7 +594,11 @@ def normalize_provider(p):
     out["media_api"] = ma if ma in MEDIA_APIS else "auto"
     if not isinstance(out.get("media_extra_params"), dict):
         out["media_extra_params"] = {}
-    out["media_prices"] = _norm_prices(out.get("media_prices"))
+    # 单价三张表（文本 / 生图 / 生视频各一张）：先把旧单张 media_prices 拆掉（幂等），
+    # 再逐张洗净 —— 跨链路的单位进不了各自的表（2026-10-07 拆分，见 _PRICE_KEY）
+    _split_legacy_media_prices(out)
+    for _k, _key in _PRICE_KEY.items():
+        out[_key] = _norm_prices(out.get(_key), _k)
     # 旧的"按服务商单价"两个字段直接作废、不迁移也不回退：一家多价、多种计费单位，
     # 挂在服务商上给出的预估就是错价（W 定的口径，2026-10-01）
     out.pop("price_per_image", None)
@@ -834,7 +913,7 @@ def kind_of_current(cfg):
 # 这一层只把注册表翻成"给人看的字"：标签 ↔ pid、某家已进菜单的媒体模型名。
 # 放在 core 而不是留在某一个窗口里，理由与 short_labels / fold_groups 相同：
 # 显示与标识分离（坑 84 / 97），而且现在有**两个**窗口要用（「服务商与密钥」区
-# 与「成本预估算」窗口）—— 留在 UI 里就得让两个窗口互相 import。
+# 与「成本估算」窗口）—— 留在 UI 里就得让两个窗口互相 import。
 # ---------------------------------------------------------------------------
 
 def provider_labels(cfg):
@@ -863,17 +942,25 @@ def provider_label_for(cfg, pid, fallback=""):
     return (builtin(pid).get("name") or fallback or pid or "")
 
 
-def media_menu_models(provider):
-    """这家**已勾进主页面菜单**的生图 / 生视频模型名（成本窗口只列这些，W 定的口径）。
+def media_menu_models(provider, kind=None):
+    """这家**已勾进主页面菜单**的媒体模型名（成本窗口只列这些，W 定的口径）。
 
+    `kind` 给链路（image / video）就只列那一条的；不给 = 生图 + 生视频都列（旧口径）。
     媒体模型大多不在各家 `/models` 清单里（§12.1），只能靠「选择模型」窗口的「直接加入」
     手填进菜单 —— 所以这里读的是菜单清单而不是清单缓存：没进菜单的模型本来也用不到。
     """
+    want = (kind,) if kind in (KIND_IMAGE, KIND_VIDEO) else (KIND_IMAGE, KIND_VIDEO)
     out = []
     for m in models_in_menu(provider):
-        if model_kind_of(provider, m) in (KIND_IMAGE, KIND_VIDEO):
+        if model_kind_of(provider, m) in want:
             out.append(m)
     return out
+
+
+def text_menu_models(provider):
+    """这家**已勾进主页面菜单**的文本模型名（云端文本的成本窗口只列这些，口径同上）。"""
+    return [m for m in models_in_menu(provider)
+            if model_kind_of(provider, m) == KIND_TEXT]
 
 
 def validate_for_send(cfg):

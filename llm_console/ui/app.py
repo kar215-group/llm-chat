@@ -62,9 +62,20 @@ class App(ChatMixin, ImageGenMixin, VideoGenMixin, ServiceMixin, ModelsMixin, Se
         self._stop_flag = None
         self._settings_win = None
         self._settings_nav = None       # 设置窗口的左栏（输出栏的按钮要 jump 到某个叶子）
-        # 设置页的会话内界面状态：{"show_all": 底部「显示全部参数」勾没勾, "fold": {区块名: 展开}}
-        # 挂在 App 上（不是窗口上）→ 关掉设置窗再开，勾选与展开状态还在；程序一退就没了
-        self._settings_ui = {"show_all": False, "fold": {}}
+        # 设置页的会话内界面状态：{"fold": {区块名: 展开}}
+        # 挂在 App 上（不是窗口上）→ 关掉设置窗再开，展开状态还在；程序一退就没了。
+        # （原来的 "show_all" 随底部「显示全部参数」一起移除，2026-10-07 W 定：
+        #   那个位置换成了「用户模式」切换按钮）
+        self._settings_ui = {"fold": {}}
+        # 遮罩引导开着时为 True：顶栏的「启动服务」等按钮平时按模型类型显隐（生图 /
+        # 生视频 / 云端时不出现），但引导的步骤目标指着它们 —— 引导期间一律强制可见，
+        # 关掉再按当前模型恢复（不然 SpotlightGuide 量一个没映射的控件，洞和面板全错位，
+        # 坑 162 ③）。
+        self._guide_active = False
+        # 本轮对话是不是云端链路：「展示思考过程」本地与云端是两个独立开关
+        # （cfg["show_reasoning"] / cfg["cloud_show_reasoning"]），_poll 渲染时按它分流。
+        # 在 _do_send 开线程前置位；忙碌守卫保证一轮中间不会换链路。
+        self._turn_cloud = False
         # 「检查更新」的会话内状态，同样挂 App（关掉设置窗再开，冷却与上次结果都还在）：
         #   at     = 上次真发起检查的墙钟时刻（time.time()；进页自动查的 10 分钟冷却看它）
         #   busy   = 有请求正在飞（互斥，别叠第二个请求）
@@ -152,12 +163,16 @@ class App(ChatMixin, ImageGenMixin, VideoGenMixin, ServiceMixin, ModelsMixin, Se
         root.report_callback_exception = self.report_callback_exception
 
         # OpenAI 兼容中转：供 agent 应用接入（127.0.0.1:proxy_port）。
-        # 没有本地可转发的文本模型就不起 —— 代理空跑着也只是让 agent 连上来拿不到回答
+        # 两道闸都过才随程序自动起（2026-10-07 W 定）：
+        #   proxy_enabled   = 功能启用（默认关，只在高级用户模式的「本地模型 API」页手动开）
+        #   proxy_autostart = 「自启动」开关（启用后还要不要开机自动带起来）
+        # 没有本地可转发的文本模型也不起 —— 代理空跑着也只是让 agent 连上来拿不到回答。
         self.proxy = ProxyServer(cfg, note_fn=lambda m: self._sq.put(("note", m)))
         self._proxy_usable = has_local_chat(cfg)
-        if cfg.get("proxy_enabled", True) and self._proxy_usable:
+        _proxy_want = bool(cfg.get("proxy_enabled")) and bool(cfg.get("proxy_autostart", True))
+        if _proxy_want and self._proxy_usable:
             self.proxy.start()
-        elif cfg.get("proxy_enabled", True):
+        elif _proxy_want:
             # 不起代理必须说一声：否则 agent 那边是"连不上"，用户在这儿什么线索都没有
             self._sq.put(("note", "API 代理没有启动：这台机器上还没有可转发的本地文本模型。"
                                   "备好引擎与模型后在 设置 → 本地模型 API 里启用。"))
@@ -403,6 +418,13 @@ class App(ChatMixin, ImageGenMixin, VideoGenMixin, ServiceMixin, ModelsMixin, Se
             except Exception:
                 pass
             self._guide = None
+            # 引导期间顶栏是强制全显的（步骤目标指着「启动服务」与状态灯）；
+            # 收尾后按当前模型恢复按需显隐
+            self._guide_active = False
+            try:
+                self._render_status(self._server_alive_flag, self._server_ready_flag)
+            except Exception:
+                pass
             # 遮罩引导收尾之后才问签名（W 2026-10-05）：首跑那次两个浮层叠在一起很糟，
             # 所以首跑不在启动流程里问，留到这儿。内部有"只跑一次 + 问过就不再问"的判据。
             try:
@@ -412,10 +434,16 @@ class App(ChatMixin, ImageGenMixin, VideoGenMixin, ServiceMixin, ModelsMixin, Se
 
         try:
             self.root.lift()           # 主窗口先回到最前，遮罩才有东西可盖
+            # 引导步骤的目标是 start_btn / status_label 这些：生图 / 生视频 / 云端场景下
+            # 它们本来被藏起来了，引导期间一律强制可见，不然洞和面板量到的是没映射的控件
+            self._guide_active = True
+            self._render_status(self._server_alive_flag, self._server_ready_flag)
             self._guide = widgets.SpotlightGuide(self.root, guide.steps(self, missing),
                                                  on_close=_done)
         except Exception as e:
             self._guide = None
+            self._guide_active = False
+            self._render_status(self._server_alive_flag, self._server_ready_flag)
             messagebox.showwarning("新手引导",
                                    "引导没能打开（%s: %s），界面照常可用。"
                                    % (type(e).__name__, e))
@@ -904,7 +932,10 @@ class App(ChatMixin, ImageGenMixin, VideoGenMixin, ServiceMixin, ModelsMixin, Se
             try:
                 kind, text = item
                 if kind == "reasoning":
-                    if self.cfg.get("show_reasoning", True):
+                    # 「展示思考过程」本地与云端是两个独立开关（2026-10-07 W 定）：
+                    # 按本轮链路分流（_turn_cloud 在 _do_send 开线程前置位）
+                    if self.cfg.get("cloud_show_reasoning" if self._turn_cloud
+                                    else "show_reasoning", True):
                         if not self._reasoning_started:
                             pending.append(("thinking", "\n【思考】\n"))
                             self._reasoning_started = True
@@ -1068,9 +1099,39 @@ class App(ChatMixin, ImageGenMixin, VideoGenMixin, ServiceMixin, ModelsMixin, Se
             self.open_update_window(info, auto=True)
         self._dev_upd_start()       # 续排下一次
 
+    def _layout_topbar(self, show_start, show_stop, show_status):
+        """按可见性重排顶栏（2026-10-07 W 定：无用按钮不出现，而不是置灰摆着）。
+
+        右侧那排全是 `side="right"` 的 pack：pack_forget 再 pack 会排到队尾，
+        所以每次都按固定顺序整排重放 —— 显隐只影响"谁在场"，不影响相对顺序。
+        状态灯在左侧、model_btn 之前，重新入列要用 `before=` 钉回原位。
+        """
+        for w in (self.btn_settings, self.stop_svc_btn, self.start_btn,
+                  self.stop_gen_btn, self.clear_btn):
+            w.pack_forget()
+        self.btn_settings.pack(side="right", padx=3)
+        if show_stop:
+            self.stop_svc_btn.pack(side="right", padx=3)
+        if show_start:
+            self.start_btn.pack(side="right", padx=3)
+        self.stop_gen_btn.pack(side="right", padx=3)
+        self.clear_btn.pack(side="right", padx=3)
+        if show_status:
+            self.status_label.pack(side="left", before=self.model_btn)
+        else:
+            self.status_label.pack_forget()
+
     def _render_status(self, alive, ready):
-        """渲染状态灯 + 状态驱动的按钮样式。"""
+        """渲染状态灯 + 状态驱动的按钮样式与显隐。
+
+        显隐规则（2026-10-07 W 定）：选中**本地生图 / 生视频或云端模型**时
+        「启动服务」不出现（那条链路根本不经过它，置灰摆着只会让人以为要点）；
+        「停止服务」只在文本服务真的还在跑时出现（一键释放显存的出口要留着）；
+        状态灯云端常显「☁ 云端就绪」，本地生图 / 生视频在服务没跑时一起藏。
+        遮罩引导期间（`_guide_active`）一律强制可见 —— 引导步骤的目标指着它们。
+        """
         cloud = providers.is_cloud(self.cfg)
+        media_local = (not cloud) and self.cfg.get("model_kind") in ("image", "video")
         if cloud:
             # 只写"云端就绪"：服务商名已经在那边的模型按钮上了（「模型名（云）」），
             # 这里再拼一遍会长到把模型按钮顶出顶栏（W 报的显示问题）
@@ -1086,11 +1147,16 @@ class App(ChatMixin, ImageGenMixin, VideoGenMixin, ServiceMixin, ModelsMixin, Se
             self.status_var.set("○ 未运行")
             self.status_label.configure(fg="#999999")
 
+        self._layout_topbar(
+            show_start=(not cloud and not media_local) or self._guide_active,
+            show_stop=bool(alive) or self._guide_active,
+            show_status=cloud or bool(alive) or not media_local or self._guide_active)
+
         if self._svc_busy:
             self.start_btn.configure(state="disabled")
             self.stop_svc_btn.configure(state="disabled")
-        elif cloud or self.cfg.get("model_kind") in ("image", "video"):
-            # 云端 / 生图 / 生视频都不需要聊天服务：启动按钮置灰（点击无效、不弹窗）；
+        elif cloud or media_local:
+            # 云端 / 生图 / 生视频都不需要聊天服务：启动按钮即使可见（引导期）也置灰；
             # 停止按钮仍按实际服务状态（若旧聊天服务还在运行可停掉）
             self.start_btn.configure(text="启动服务", state="disabled")
             self.stop_svc_btn.configure(state="normal" if alive else "disabled")

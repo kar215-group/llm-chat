@@ -30,9 +30,9 @@ CONFIG_PATH = os.path.join(APP_DIR, "gui_config.json")
 
 # 版本号：发版时改这一处（--selfcheck / --version 会打印它）。
 # GitHub Release 的 tag 要与它一致（tag 去掉开头的 v），Actions 工作流会做一致性校验。
-APP_VERSION = "1.0.9beta1"
+APP_VERSION = "1.0.9beta2"
 
-CFG_VERSION = 2
+CFG_VERSION = 3
 
 # 统一 User-Agent：多家平台会按 UA 判断"是不是官方 CLI/SDK"，认出自建工作台就可能限流或
 # 拒答（Token Plan 的定位就是给 Claude Code / Codex 这类工具用的）。版本号只是外形，
@@ -74,7 +74,14 @@ DEFAULT_CONFIG = {
     "seed": -1,
     "system_prompt": "",
     # ---- 界面 ----
+    # 用户模式（2026-10-07 W 定）：simple = 普通用户模式（默认，精简导航、无 "?" 气泡）；
+    # advanced = 高级用户模式（原有的完整设置页）。设置窗底部按钮互切，写进配置重启仍算数。
+    "user_mode": "simple",
     "show_reasoning": True,
+    # 云端文本对话的「展示思考过程」独立开关（2026-10-07 W 定：与本地 show_reasoning
+    # 完全独立存储）。老配置里没有这个键时，load_config 按当时 show_reasoning 的值
+    # 继承一次（升级前后行为不变），此后各改各的。
+    "cloud_show_reasoning": True,
     "show_usage": True,            # 每轮结束后显示 token 用量（云端计费可见性）
     # ---- 模型分类 ----
     "model_kind": "chat",          # 当前选中模型的类型：chat / image / video
@@ -139,7 +146,13 @@ DEFAULT_CONFIG = {
     "vid_extra_args": "--vae-tiling --temporal-tiling",  # 分块解码，降显存占用
     "vid_seed": -1,
     # ---- 本地模型 API（OpenAI 兼容中转，供 agent 应用调用）----
-    "proxy_enabled": True,
+    # 默认关（2026-10-07 W 定）：这是给 agent 的高级能力，普通用户用不上；
+    # 只在高级用户模式的「本地模型 API」页手动开启。cfg_version<3 的老配置升级时
+    # 一律强制关一次（load_config 的闸），要用的自己去开。
+    "proxy_enabled": False,
+    # 「自启动」：程序启动时自动把代理服务带起来（只在 proxy_enabled 开着时算数）。
+    # 与"启用"分成两个开关：启用了但没勾自启动 = 只在设置页手动「启动 / 重启服务」。
+    "proxy_autostart": True,
     "proxy_port": 8081,
     "proxy_last_model": "",        # 上次成功经代理加载的模型（回退用）
     # ---- 云端 API（v31 一期：OpenAI 兼容文本；密钥存 secrets.json，不进备份）----
@@ -283,6 +296,15 @@ def load_config():
                 cfg["max_tokens"] = DEFAULT_CONFIG["max_tokens"]
         except Exception:
             pass
+    if ver < 3:
+        # 2026-10-07 W 定：「本地模型 API」改为默认关闭的能力（普通用户模式整页隐藏）。
+        # 老配置里 proxy_enabled 几乎必然存着 True（旧默认值被整份保存下来），照搬等于
+        # "默认关"只对新装用户成立 —— 所以升级这一次强制关，要用的人自己去高级模式开。
+        cfg["proxy_enabled"] = False
+    if "cloud_show_reasoning" not in user:
+        # 云端「展示思考过程」新键首次落地：继承本地开关的当前值，升级前后行为不变；
+        # 此后两个键完全独立（各自页面各自改）。
+        cfg["cloud_show_reasoning"] = bool(cfg.get("show_reasoning", True))
     cfg["cfg_version"] = CFG_VERSION
     # 内置服务商种进清单（幂等，只补不覆盖）；这里延迟导入避开 config ↔ providers 的环
     try:

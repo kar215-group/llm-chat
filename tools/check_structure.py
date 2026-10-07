@@ -14,13 +14,18 @@
       规则清单.md`。App MRO 之外的独立类（widgets.* 也有 `self._proc` 这类同名字段）
       不在类集合里，天然不判。
 
-  [2] NAV_SPEC ↔ @section(page, sec) 键一致（坑 142 同族）
-      `NAV_SPEC` 必须是纯字面量（`ast.literal_eval` 是原子求值：要么全量成功、要么
+  [2] NAV_SPEC / SIMPLE_NAV_SPEC ↔ @section(page, sec) 键一致（坑 142 同族）
+      2026-10-07 起设置页有两种用户模式，导航规格是**两份**：NAV_SPEC（高级用户模式）
+      与 SIMPLE_NAV_SPEC（普通用户模式，默认）。两份都必须是纯字面量
+      （`ast.literal_eval` 是原子求值：要么全量成功、要么
       抛错判红——机制上不存在"看起来是字面量、实际是调用、却被漏检"的中间态）。
-      三向判据：① NAV 叶子 − registry 差集非空 = 红（左栏点过去显示"还没接上构建
-      函数"）；② registry − NAV 叶子差集非空 = 红（注册了但导航到不了）；③ NAV 内部
-      一致性：每叶子 page / section / title / help 四项齐全、`nav_hide` 的替身 key
-      必须是有效叶子（替身改名则悬空）；同一 (page, sec) 键注册两次 = 红（静默覆盖）。
+      三向判据：① 两份叶子并集 − registry 差集非空 = 红（左栏点过去显示"还没接上构建
+      函数"）；② registry − 并集差集非空 = 红（注册了但两种模式都到不了；只挂其中
+      一份的区块——api/svc/cmedia 只在高级、cimg/cvid 只在普通——不算死区块）；
+      ③ NAV 内部一致性：高级每叶子 page / section / title / help 四项齐全，普通模式
+      help 允许为空（那一套不放 "?" 气泡，2026-10-07 W 定）、其余三项齐全、同一份内
+      叶子 key 不重复、`nav_hide` 的替身 key
+      必须是同一份里的有效叶子（替身改名则悬空）；同一 (page, sec) 键注册两次 = 红（静默覆盖）。
       ② 有一处**明账**豁免：NAV_HIDDEN（一行一键一理由）—— 给"确实到得了、但有意不走
       左栏"的隐藏页用（如开发者选项，入口在关于页版本号上）。豁免不是免检：豁免的键
       必须有模块级**字面量**导航项指向它，否则照旧判红。
@@ -180,7 +185,7 @@ NAV_HIDDEN = {
 
 
 def check_g2():
-    print("[2] NAV_SPEC ↔ @section 键一致（导航到不了 / 接不上，都在这一段抓）")
+    print("[2] NAV_SPEC / SIMPLE_NAV_SPEC ↔ @section 键一致（导航到不了 / 接不上，都在这一段抓）")
     src = (UI / "settings.py").read_text(encoding="utf-8")
     tree = ast.parse(src)
     # --- @section 常量参数注册集（搜全树：decorator 都是嵌套在 open_settings 里的用法）---
@@ -195,36 +200,50 @@ def check_g2():
                     red("[2]", "settings.py:%d @section 参数不是两个常量 —— 键必须能被静态读到" % d.lineno)
                     continue
                 reg_pairs.append((d.args[0].value, d.args[1].value))
-    # --- NAV_SPEC 静态求值（原子：要么全成、要么判据过期判红）---
-    nav_node = None
-    for n in tree.body:
-        if isinstance(n, ast.Assign) and any(
-                getattr(t, "id", None) == "NAV_SPEC" for t in n.targets):
-            nav_node = n.value
-    if nav_node is None:
-        red("[2]", "settings.py 模块级找不到 NAV_SPEC 赋值 —— 判据失效，请更新本工具 [2] 段")
-        return
-    try:
-        spec = ast.literal_eval(nav_node)
-    except (ValueError, SyntaxError, TypeError):
-        bad = next((x for x in ast.walk(nav_node) if isinstance(x, _NON_LITERAL)), None)
-        loc = ("settings.py:%d:%d — %s" % (bad.lineno, bad.col_offset, type(bad).__name__)
-               if bad is not None else "（未定位到具体节点）")
-        red("[2]", "NAV_SPEC 不再是纯字面量（首处非法节点 %s）——判据过期：静态求值、双向差集、"
-                   "键完整性本轮均未执行。出路二选一：(a) 改回纯字面量（NAV_SPEC 是注册表数据，"
-                   "代码不进数据）；(b) 结构确实要变（i18n / 路径计算）：先更新本工具 [2] 段的"
-                   "求值方式，再改 NAV_SPEC —— 顺序勿反" % loc)
-        return
-    leaves = []
-    _flatten_nav(spec, leaves)
-    nav_keys = {(it.get("page"), it.get("section")) for it in leaves}
+    # --- 两份规格的静态求值（原子：要么全成、要么判据过期判红）---
+    # 2026-10-07 起设置页有**两种用户模式**：NAV_SPEC = 高级用户模式（原样），
+    # SIMPLE_NAV_SPEC = 普通用户模式（默认；无 "?" ⇒ help 一律空串，且允许出现
+    # 普通模式专有的区块键 cimg/cvid）。死区块判据按**两份的并集**算：
+    # 只挂其中一份的区块（api/svc/cmedia 只在高级；cimg/cvid 只在普通）都不是死区块。
+    def _spec_node(name):
+        for n in tree.body:
+            if isinstance(n, ast.Assign) and any(
+                    getattr(t, "id", None) == name for t in n.targets):
+                return n.value
+        return None
+
+    specs = {}
+    for name, help_required in (("NAV_SPEC", True), ("SIMPLE_NAV_SPEC", False)):
+        node = _spec_node(name)
+        if node is None:
+            red("[2]", "settings.py 模块级找不到 %s 赋值 —— 判据失效，请更新本工具 [2] 段" % name)
+            return
+        try:
+            specs[name] = (ast.literal_eval(node), help_required)
+        except (ValueError, SyntaxError, TypeError):
+            bad = next((x for x in ast.walk(node) if isinstance(x, _NON_LITERAL)), None)
+            loc = ("settings.py:%d:%d — %s" % (bad.lineno, bad.col_offset, type(bad).__name__)
+                   if bad is not None else "（未定位到具体节点）")
+            red("[2]", "%s 不再是纯字面量（首处非法节点 %s）——判据过期：静态求值、双向差集、"
+                       "键完整性本轮均未执行。出路二选一：(a) 改回纯字面量（导航规格是注册表数据，"
+                       "代码不进数据）；(b) 结构确实要变（i18n / 路径计算）：先更新本工具 [2] 段的"
+                       "求值方式，再改规格 —— 顺序勿反" % (name, loc))
+            return
+
+    all_leaves = {}          # name → leaves
+    nav_keys = set()
+    for name, (spec, _hr) in specs.items():
+        leaves = []
+        _flatten_nav(spec, leaves)
+        all_leaves[name] = leaves
+        nav_keys |= {(it.get("page"), it.get("section")) for it in leaves}
     reg_keys = set(reg_pairs)
     missing = sorted(nav_keys - reg_keys)
     dead = sorted(reg_keys - nav_keys - set(NAV_HIDDEN))
     if missing:
         red("[2]", "NAV 叶子未接 @section（点过去显示「还没接上构建函数」）：%s" % missing)
     if dead:
-        red("[2]", "@section 注册了但导航到不了（死区块 / 漏挂 NAV_SPEC）：%s" % dead)
+        red("[2]", "@section 注册了但两种模式的导航都到不了（死区块 / 漏挂规格）：%s" % dead)
     # 豁免项得真的"到得了"：模块级必须有个**字面量**导航项（如 DEV_NAV_ITEM）指向它。
     # 少了这一验，NAV_HIDDEN 就成了死区块的遮羞布 —— 写进去一行就再没人管它了。
     hid_ok = set()
@@ -240,21 +259,31 @@ def check_g2():
     for k in sorted(set(NAV_HIDDEN) - hid_ok):
         red("[2]", "NAV_HIDDEN 豁免的 %s 找不到模块级字面量导航项（如 DEV_NAV_ITEM）——"
                    "「隐藏」不能当「死区块」的遮羞布：要么把它接回去，要么说明为什么到得了" % (k,))
-    key_set = {it.get("key") for it in leaves}
-    for it in leaves:
-        for need in ("page", "section", "title", "help"):
-            if not str(it.get(need) or "").strip():
-                red("[2]", "叶子 key=%r 缺 %-7s —— 四项不全（坑 142 同族的注册数据完整性）"
-                    % (it.get("key"), need))
-        if it.get("nav_hide") is not None and it.get("nav_hide") not in key_set:
-            red("[2]", "叶子 key=%r 的 nav_hide 指向不存在的替身 %r —— 替身改名后悬空"
-                % (it.get("key"), it.get("nav_hide")))
+    for name, (spec, help_required) in specs.items():
+        leaves = all_leaves[name]
+        key_set = {it.get("key") for it in leaves}
+        if len(key_set) != len(leaves):
+            dup = sorted(k for k in key_set
+                         if sum(1 for it in leaves if it.get("key") == k) > 1)
+            red("[2]", "%s 里叶子 key 重复（SideNav 选中/跳转会认错行）：%s" % (name, dup))
+        for it in leaves:
+            needs = ("page", "section", "title", "help") if help_required \
+                else ("page", "section", "title")
+            for need in needs:
+                if not str(it.get(need) or "").strip():
+                    red("[2]", "%s 叶子 key=%r 缺 %-7s —— 四项不全（坑 142 同族的注册数据完整性）"
+                        % (name, it.get("key"), need))
+            if it.get("nav_hide") is not None and it.get("nav_hide") not in key_set:
+                red("[2]", "%s 叶子 key=%r 的 nav_hide 指向不存在的替身 %r —— 替身改名后悬空"
+                    % (name, it.get("key"), it.get("nav_hide")))
     if len(reg_pairs) != len(reg_keys):
         dup = sorted(k for k in reg_keys if reg_pairs.count(k) > 1)
         red("[2]", "同一 (page, section) 注册了两次（registry 后写覆盖先写）：%s" % dup)
     hid = sorted(set(NAV_HIDDEN) & reg_keys)
-    ok("NAV %d 叶子 ↔ @section %d 处注册，双向差集为空；四项齐全；nav_hide 替身有效%s"
-       % (len(leaves), len(reg_pairs),
+    ok("NAV 高级 %d 叶子 + 普通 %d 叶子（并集 %d 键）↔ @section %d 处注册，双向差集为空；"
+       "四项齐全（普通模式 help 允许为空 = 不放 \"?\"）；nav_hide 替身有效%s"
+       % (len(all_leaves["NAV_SPEC"]), len(all_leaves["SIMPLE_NAV_SPEC"]),
+          len(nav_keys), len(reg_pairs),
           ("；隐藏页豁免 %d 处（%s，均有模块级字面量导航项兜着）"
            % (len(hid), ", ".join("%s/%s" % k for k in hid))) if hid else ""))
 

@@ -723,6 +723,9 @@ class ChatMixin:
         self._content_started = False
         self._set_busy_ui(True)
         self._last_usage = None
+        # 本轮走哪条链路（本地 / 云端）：「展示思考过程」两个开关独立存储，
+        # _poll 渲染时按它分流（2026-10-07 W 定）。忙碌守卫保证一轮中间换不了模型。
+        self._turn_cloud = bool(providers.is_cloud(self.cfg))
         # 本地走 llama-server 的 SSE，云端走 OpenAI 兼容端点；两者推的事件完全一致，
         # 所以 _poll / _flush_stream / _finish_turn 这些渲染逻辑一行都不用改
         args = (self.cfg, msgs, self._q, self._stop_flag)
@@ -808,7 +811,17 @@ class ChatMixin:
             self.history.append({"role": "assistant", "content": content})
         usage, self._last_usage = self._last_usage, None
         if usage and not error and self.cfg.get("show_usage", True):
-            self._append("\n〔用量〕%s\n" % format_usage(usage), "meta")
+            # 云端文本填过单价（设置 → 云端文本模型 → 成本估算）就在用量行尾附一句
+            # 预估费用；没填什么都不加 —— 不编数字（与 media_price_note 同一口径）
+            cost = ""
+            if self._turn_cloud:
+                try:
+                    p = providers.current_provider(self.cfg)
+                    sp = providers.split_cloud_id(self.cfg.get("model", ""))
+                    cost = providers.text_cost_note(p, sp[1] if sp else "", usage)
+                except Exception:
+                    cost = ""
+            self._append("\n〔用量〕%s%s\n" % (format_usage(usage), cost), "meta")
         # 每轮结束落一次盘：断电 / 强杀 / 关窗都只丢"正在跑的这一轮"
         _, note = self._save_chat_log()
         if note:
