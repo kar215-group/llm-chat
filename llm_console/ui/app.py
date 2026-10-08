@@ -62,6 +62,7 @@ class App(ChatMixin, ImageGenMixin, VideoGenMixin, ServiceMixin, ModelsMixin, Se
         self._stop_flag = None
         self._settings_win = None
         self._settings_nav = None       # 设置窗口的左栏（输出栏的按钮要 jump 到某个叶子）
+        self._settings_sp = None        # 设置窗口的滚动内容区（页面栈；"当前页"判据走它）
         # 设置页的会话内界面状态：{"fold": {区块名: 展开}}
         # 挂在 App 上（不是窗口上）→ 关掉设置窗再开，展开状态还在；程序一退就没了。
         # （原来的 "show_all" 随底部「显示全部参数」一起移除，2026-10-07 W 定：
@@ -386,6 +387,9 @@ class App(ChatMixin, ImageGenMixin, VideoGenMixin, ServiceMixin, ModelsMixin, Se
                 except Exception:
                     pass
                 setattr(self, attr, None)
+        # 设置窗销毁后它的滚动区句柄必须一起清掉 —— 否则输出栏的「去配置引擎」
+        # 之类跳转还会往一个已销毁的页面栈上select（is_current 判据会拿到野对象）
+        self._settings_sp = None
         if self._guide is not None and self._guide.alive():
             self._guide.close()        # 不叠两层：重看 = 关掉旧的再开
 

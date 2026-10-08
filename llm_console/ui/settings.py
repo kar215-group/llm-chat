@@ -518,6 +518,10 @@ class SettingsMixin:
             nav.render()
 
         sp = widgets.ScrollPage(main)
+        # 页面栈挂在实例上：判断"某个控件是不是在当前页"要走 `sp.is_current()`
+        # （叠放实现里所有页都ismapped，`winfo_ismapped()` 不再能区分 —— 见
+        # widgets.PageStack 类注释）。自检也按这个判据筛当前页。
+        self._settings_sp = sp
 
         # ---- 「高级参数」折叠区（设置页分层）----
         # 口径：把"族相关 / 高级"参数默认收起来，页面只剩常用的那几项；控件**照旧建**
@@ -3709,7 +3713,23 @@ class SettingsMixin:
                 pass
 
         def _flash(head):
-            """定位过去之后把区块标题闪一下底色：不闪的话用户不知道页面滚到了哪儿。"""
+            """定位过去之后把区块标题闪一下底色：不闪的话用户不知道页面滚到了哪儿。
+
+            **普通模式不闪**（W 2026-10-08）：那一页的区块少、层级浅，页面切换本身就够
+            明显，黄底除了晃眼没有指引作用 —— W 报的"切换页面有闪烁"有一半来自它。
+            高级模式页内区块多、同页跳转容易"看不出滚到哪"，黄底仍保留。
+            """
+            if simple:                     # 普通模式：只要"不闪"，不留残色
+                if flashed["timer"] is not None:
+                    try:
+                        win.after_cancel(flashed["timer"])
+                    except Exception:
+                        pass
+                    flashed["timer"] = None
+                if flashed["lbl"] is not None:
+                    _unflash(flashed["lbl"])
+                    flashed["lbl"] = None
+                return
             if flashed["timer"] is not None:
                 try:
                     win.after_cancel(flashed["timer"])
@@ -3827,6 +3847,7 @@ class SettingsMixin:
                     _nav_leaves(_nav_items(self._dev_mode, new_simple))}
             win.destroy()
             self._settings_win = None
+            self._settings_sp = None
             self.open_settings(jump=cur if cur in keys else "")
 
         theme.button(bar, text="切换到高级模式" if simple else "切换到普通模式",

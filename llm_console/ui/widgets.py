@@ -983,6 +983,105 @@ def attach_wheel(canvas, viewport=None, step=3):
     return _on
 
 
+class PageStack(object):
+    """同一容器里"多页常驻、一次只显示一页"的叠放器。
+
+    **为什么不用 pack_forget + pack**（2026-10-08 实测，W 报"设置页切页卡 + 整页跳一下"）：
+    `pack_forget` 会让那一支的**几何缓存全部失效**，下一次 `update_idletasks()`
+    必须重算该支所有控件的几何。代价按"被标脏的控件数"线性增长，而 ttkbootstrap
+    主题又把单控件成本放大了约 6 倍（cosmo 下只改 23 个 Label 的**颜色**就要
+    4.1ms，vista 下 0.7ms）。于是那一次"整页硬切"既卡（几何全废）又跳
+    （旧页已收、新页未画，中间态被 Windows 合成器看见）。
+
+      |切法 | 隔离树实测 | 真实设置窗 |
+      |---|---|---|
+      | `pack_forget` + `pack`（旧） | 30.9 ms（最大 67.3） | **89.3 ms** |
+      | `grid` + `grid_remove` | 4.6 ms（最大 46.0） | — |
+      | **同格 `grid` 常驻 + `tkraise()`** | **0.94 ms（最大 2.0）** | **2.0 ms** |
+
+    做法：所有页 `grid` 到**同一个格子**（row=0, column=0）互相重叠，
+    切页只调`tkraise()` 把目标页提到最前 —— Tk 里`tkraise` 只改叠放次序，
+    **不产生几何失效**，切页近乎免费（实测 44倍）。
+
+    ⚠ **代价 A：几何不再标脏 = 内容变了不会自己重排**。所以增删控件后仍要调
+    `_refresh()`（`set_page` 的首屏分支、以及任何会改内容的路径）。
+
+    两条必须知道的性质（调用方要按这个来）：
+      · `inner` 的高度 = **最高页**的高度，不再随当前页变。
+        好处是切页不再改变 scrollregion（少一次滚动跳变）；
+        代价是"矮页滚不动"（内容比视口矮时，本来到底也滚不了，语义不变）。
+      · **所有页始终 `ismapped`**。判断"当前是哪一页"要用
+        `PageStack.current`，**不能**再用 `winfo_ismapped()`（旧实现靠后者区分，
+        自检 `test_settings_layout.py` 有多处这么写，改栈后要一并改）。
+
+    只做几何与可见性，不碰滚动、不碰内容 —— 那些仍归 `ScrollPage`。
+    """
+
+    CELL = (0, 0)                # 所有页重叠的格子
+    PADX = (16, 18)              # 内容左右留白（与旧 set_page 的 pack 参数一致）
+    PADY = (12, 16)
+
+    def __init__(self, container):
+        self.container = container
+        self._frames = []                # 按加入顺序（= 建页顺序）保序
+        self._current = None
+
+    # ---- 对外 ----
+    def add(self, frame):
+        """把一页挂进容器（同格叠放）。重复挂同一帧是幂等的。"""
+        if frame in self._frames:
+            return frame
+        self._frames.append(frame)
+        frame.grid(row=self.CELL[0], column=self.CELL[1], sticky="nsew",
+                   padx=self.PADX, pady=self.PADY)
+        # 页面自己内部用 pack/grid 混排时，需要内层格子能撑开
+        try:
+            self.container.grid_rowconfigure(self.CELL[0], weight=1)
+            self.container.grid_columnconfigure(self.CELL[1], weight=1)
+        except Exception:
+            pass
+        return frame
+
+    def show(self, frame):
+        """显示某一页（提到最前）。这一页没被add 过就先add。
+
+        **不触发几何重算** —— 这是本类存在的全部意义。
+        """
+        if frame not in self._frames:
+            self.add(frame)
+        self._current = frame
+        frame.tkraise()
+
+    @property
+    def current(self):
+        """当前显示的那一页（`show` 的最后一次）。没显示过就是None。"""
+        return self._current
+
+    @property
+    def frames(self):
+        """全部已挂进来的页（建过的都留着，与旧实现"建过就不销毁"一致）。"""
+        return list(self._frames)
+
+    def is_current(self, widget):
+        """`widget` 是否属于当前页 —— **取代 `winfo_ismapped()` 判当前页**。
+
+        叠放后所有页都 mapped，`winfo_ismapped` 不再能区分"当前页"。
+        调用方（自检、页内逻辑）判断页归属一律走这里。
+        """
+        cur = self._current
+        if cur is None or widget is None:
+            return False
+        try:
+            w = widget
+            while w is not None:
+                if w is cur:
+                    return True
+                w = getattr(w, "master", None)
+        except Exception:
+            return False
+        return False
+
+
 class ScrollPage(object):
     """固定外框里的滚动内容区。
 
@@ -1006,8 +1105,45 @@ class ScrollPage(object):
         self.canvas.pack(side="left", fill="both", expand=True)
         self.inner.bind("<Configure>", self._on_inner_configure)
         self.canvas.bind("<Configure>", self._on_canvas_configure)
-        self._page = None
-        self._wheel = attach_wheel(self.canvas)      # 滚轮走全窗口共用那套（见 attach_wheel）
+        self._stack = PageStack(self.inner)   # 页面叠放（见 PageStack 类注释）
+        self._wheel = attach_wheel(self.canvas)  # 滚轮走全窗口共用那套（见 attach_wheel）
+
+    # ---- 页切换 ----
+    def set_page(self, frame):
+        """显示某一页。
+
+        内部走 `PageStack`（同格叠放 + `tkraise`），**不再 pack_forget/pack** ——
+        后者会让整支几何失效、切页付 30~67ms（实测，见 `PageStack` 类注释）。
+        这里仍保留一次 `_refresh()`：新页刚挂进来时它的 reqwidth/reqheight 还没算，
+        要算出来才能定scrollregion 与 `goto` 用的偏移。
+        """
+        first = self._stack.current is None
+        self._stack.show(frame)
+        if first:
+            # 首屏：内容从无到有，这一次几何重算是必须的
+            self._refresh()
+        else:
+            # 切页：页面几何早已算好（它一直在容器里），这里只更新滚动区域
+            self.canvas.yview_moveto(0)
+            self._sync_region()
+
+    @property
+    def current_page(self):
+        """当前显示的页（`set_page` 的最后一次）。"""
+        return self._stack.current
+
+    def is_current(self, widget):
+        """`widget` 是否在当前页里。
+
+        ⚠ 叠放后**所有页都 `ismapped`**，"当前页"只能这么判 —— 判 `winfo_ismapped()`
+        会把所有页都算进去（自检 `test_settings_layout.py` 原先就是这么筛的，
+        已随本次改造改成走这里）。
+        """
+        return self._stack.is_current(widget)
+
+    def page_frames(self):
+        """全部已挂进来的页（建过的都留着，与旧实现"建过就不销毁"一致）。"""
+        return self._stack.frames
 
     # ---- 尺寸 ----
     def _sync_region(self, _e=None):
@@ -1040,22 +1176,7 @@ class ScrollPage(object):
         self.canvas.itemconfigure(self._win, width=max(1, event.width))
         self._sync_region()
 
-    # ---- 页切换 ----
-    def set_page(self, frame):
-        if self._page is not None and self._page is not frame:
-            try:
-                self._pack_forget()
-            except Exception:
-                pass
-        self._page = frame
-        frame.pack(in_=self.inner, fill="both", expand=True, padx=(16, 18), pady=(12, 16))
-        self.canvas.yview_moveto(0)
-        self._refresh()
-
-    def _pack_forget(self):
-        if self._page is not None:
-            self._page.pack_forget()
-
+    # ---- 几何 ----
     def _refresh(self):
         self.canvas.update_idletasks()
         self.inner.update_idletasks()
@@ -1065,14 +1186,19 @@ class ScrollPage(object):
     def goto(self, widget, offset=8):
         """滚到某个区块标题的正上方（左栏点「服务参数」这类跳转就靠它）。
 
-        只付**一次**布局。原来是"refresh → 滚到顶 → 再 refresh → 拿屏幕坐标差量位置"，
-        三次 update_idletasks，而每次都是整棵控件树的几何重算（实测单次 17ms、
-        占一次左栏点击的大头）。改成沿父链累加 winfo_y() 求"在滚动内容里的偏移"：
-        这个值与当前滚到哪儿无关，所以既不用先滚到顶，也不用滚完再量一次。
+        **几何已在 `set_page` 里算好了**（叠放实现下页面一直挂在容器里，
+        它的reqwidth/reqheight 不会因为切页而失效），所以这里**不再**付一次
+        全树 `update_idletasks`。确有变化时才补算：`widget` 不是当前页的
+        （理论上不会 —— 定位的都是刚显示的那页）或它还没被映射过。
+
+        原来写的是"只付一次布局"（沿父链累加 `winfo_y()` 求偏移，与当前滚到
+        哪儿无关，所以不用先滚到顶再量）。那条继续成立；本次去掉的只是
+        那次多余的 `update_idletasks`（实测 0.02~0.9ms，慢主题下更高）。
         """
         if widget is None:
             return
-        self._refresh()
+        if not self._geom_ready(widget):
+            self._refresh()
         try:
             y, w = 0, widget
             while w is not None and w is not self.inner:
@@ -1086,6 +1212,18 @@ class ScrollPage(object):
         frac = (y - int(offset)) / float(total)
         # 末尾的区块要允许滚到底：moveto(1.0) 正好把最后一屏露出来
         self.canvas.yview_moveto(max(0.0, min(1.0, frac)))
+
+    def _geom_ready(self, widget):
+        """`widget` 的几何是否已经可信（当前页 + 容器已完成过布局）。"""
+        try:
+            if not widget.winfo_ismapped():
+                return False
+            if self._stack.current is not None and not self._stack.is_current(widget):
+                return False
+            # 内层高度为 1 表示画布窗口还没真正 layout 过
+            return self.canvas.winfo_width() > 1
+        except Exception:
+            return False
 
 
 def center_on(win, host=None, size=None):
