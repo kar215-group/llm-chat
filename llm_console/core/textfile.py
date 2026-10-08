@@ -60,10 +60,16 @@ def kind_of(path):
 
 
 def file_dialog_types():
-    """给"选择附件"对话框用的 filetypes（只列能读的，别让人选了废的）。"""
+    """给"选择附件"对话框用的 filetypes。
+
+    **「所有文件」排第一 = 默认档**（W 2026-10-08）：附件默认允许选任何文件类型，
+    能不能读由读取那一刻判（读不了的在 `read_document` 里给出对应提示）；
+    把常用类型摆成过滤器只是方便挑选，不再默认把它们之外的文件藏起来。
+    第一项与"默认选中"是同一件事：Windows 的文件框打开时选中的就是第一项。
+    """
     text_pat = " ".join("*" + e for e in sorted(TEXT_EXTS))
-    return [("文本与代码", text_pat), ("Word 文档 (.docx)", "*.docx"),
-            ("所有文件", "*.*")]
+    return [("所有文件", "*.*"), ("文本与代码", text_pat),
+            ("Word 文档 (.docx)", "*.docx")]
 
 
 def _decode(raw):

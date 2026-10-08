@@ -51,11 +51,8 @@ def set_hidden(cfg, names, known=None):
 
 
 def slot_name(slot):
-    """槽位的短中文标签（管理页用；`sdprofile.slot_label` 那条带引擎参数名，太长）。"""
-    if slot == "high_noise":
-        return "高噪段扩散模型"
-    info = sdprofile.SLOTS.get(slot)
-    return info[1] if info else slot
+    """槽位的短中文标签（管理页用；词表在 sdprofile —— 与整理预览共用一处）。"""
+    return sdprofile.slot_name(slot)
 
 
 def _entry(cfg, path, kind, hidden, pairs):

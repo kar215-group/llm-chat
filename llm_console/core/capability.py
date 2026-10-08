@@ -140,15 +140,33 @@ def resolve(cfg):
 
 
 def resolve_key(cfg, key, kind=None):
-    """按指定模型（文件名或 "pid::model"）判，供模型菜单逐行标注用。"""
+    """按指定模型（文件名或 "pid::model"）判，供模型菜单逐行标注用。
+
+    **探针的"云 / 本地"与"类型"一律由 `key` 自身决定**，不跟着当前选中的模型走
+    （W 2026-10-08 报的 bug：选着云端 / 生图 / 生视频模型时，本地文本模型会被套上
+    "当前选中那一类"的判据 —— 云端取不到能力字段、视频按变体标记猜 —— 菜单里一排
+    「（看图未确认）」，那是"当前模型的上下文"漏进了"逐行标注"）。
+
+    · 云 id（含 `::`）：带上它**自己的** provider 与注册表里的能力类型（调用方给了
+      `kind` 就用调用方的，模型菜单的分组自己知道是哪一类）；
+    · 本地文件名 / 路径：一律按 `model_provider="local"` 判，类型默认 `chat` ——
+      本地这条"能不能看图"的标注只对聊天模型有意义（生图 / 生视频带图走发送链路的
+      `resolve_modes`，是另一套判据）。
+    """
     from . import providers
     probe = dict(cfg)
-    probe["model_kind"] = kind or probe.get("model_kind", "chat")
-    if providers.is_cloud(cfg):
-        probe["model"] = key if providers.CLOUD_SEP in str(key) \
-            else providers.make_cloud_id(cfg.get("model_provider"), key)
+    k = str(key or "")
+    pid, model = providers.split_cloud_id(k) or ("", "")
+    if pid:
+        probe["model_provider"] = pid
+        probe["model"] = k
+        probe["model_kind"] = kind or {"text": "chat", "image": "image",
+                                       "video": "video"}.get(
+            providers.model_kind_of(providers.get_provider(cfg, pid), model), "chat")
     else:
-        probe["model"] = key
+        probe["model_provider"] = providers.LOCAL
+        probe["model"] = k
+        probe["model_kind"] = kind or "chat"
     return resolve(probe)
 
 

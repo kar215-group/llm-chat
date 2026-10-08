@@ -31,6 +31,10 @@ from .models_ui import ModelsMixin, NO_MODEL_LABEL, model_missing
 from .settings import SettingsMixin
 from .subwindows import SubWindowMixin
 
+# 输出栏那条「[环境] 三条路都还没通」提示的文字标签：首个可用模型一出现，
+# `_dismiss_env_hint` 按它把整块（连嵌进来的两个按钮）删掉（W 2026-10-08）。
+ENV_HINT_TAG = "env_hint"
+
 
 class App(ChatMixin, ImageGenMixin, VideoGenMixin, ServiceMixin, ModelsMixin, SettingsMixin,
           SubWindowMixin):
@@ -73,6 +77,10 @@ class App(ChatMixin, ImageGenMixin, VideoGenMixin, ServiceMixin, ModelsMixin, Se
         # 关掉再按当前模型恢复（不然 SpotlightGuide 量一个没映射的控件，洞和面板全错位，
         # 坑 162 ③）。
         self._guide_active = False
+        # 开机那条「[环境] 三条路都还没通」提示有没有插进输出栏（插过才谈得上收掉）。
+        # 记状态是为了让 3 秒一轮的探活不必每次去做 tag_ranges 查询；首个可用模型
+        # 一出现就由 `_dismiss_env_hint` 把它整块删掉（W 2026-10-08）。
+        self._env_hint_ins = False
         # 本轮对话是不是云端链路：「展示思考过程」本地与云端是两个独立开关
         # （cfg["show_reasoning"] / cfg["cloud_show_reasoning"]），_poll 渲染时按它分流。
         # 在 _do_send 开线程前置位；忙碌守卫保证一轮中间不会换链路。
@@ -773,6 +781,10 @@ class App(ChatMixin, ImageGenMixin, VideoGenMixin, ServiceMixin, ModelsMixin, Se
         只要**任意一条**路通了就不催 —— 只想用云端的人不缺东西，催他下引擎是噪音；
         只想用本地生图的人也不缺 llama 引擎（坑 150：原来这里只认 llama + 对话模型，
         装着 sd 引擎和生图模型的用户照样被催一遍）。
+
+        **首个可用模型一出现就自动收掉**（W 2026-10-08）：整块文字带 `ENV_HINT_TAG`
+        标签，`_dismiss_env_hint` 按标签删除（嵌在里面的按钮一并销毁）。留着的话，
+        用户已经配好引擎、模型也加载完了，输出栏顶上还挂着一句"三条路都还没通"。
         """
         try:
             q = diagnose.quick_paths(self.cfg)
@@ -780,24 +792,54 @@ class App(ChatMixin, ImageGenMixin, VideoGenMixin, ServiceMixin, ModelsMixin, Se
             return                      # 提示坏了不能把窗口开不成
         if q["usable"]:
             return
+        if self._env_hint_ins:
+            return                      # 已经有一条在输出栏里了，别叠第二条
         self.chat.configure(state="normal")
         try:
-            self.chat.insert("end", "\n[环境] 这台机器上三条路都还没通：\n", "meta")
+            self.chat.insert("end", "\n[环境] 这台机器上三条路都还没通：\n",
+                             ("meta", ENV_HINT_TAG))
             for m in q["missing"]:
-                self.chat.insert("end", "  · %s\n" % m, "meta")
+                self.chat.insert("end", "  · %s\n" % m, ("meta", ENV_HINT_TAG))
             btn = theme.button(self.chat, text="去配置引擎",
                                command=lambda: self.open_settings(jump="eng"),
                                bootstyle="primary-outline")
             self.chat.window_create("end", window=btn)
-            self.chat.insert("end", "  ", "meta")
+            self.chat.insert("end", "  ", ("meta", ENV_HINT_TAG))
             btn2 = theme.button(self.chat, text="填云端密钥",
                                 command=lambda: self.open_settings(jump="c_prov"),
                                 bootstyle="secondary-outline")
             self.chat.window_create("end", window=btn2)
-            self.chat.insert("end", "\n", "meta")
+            self.chat.insert("end", "\n", ("meta", ENV_HINT_TAG))
+            self._env_hint_ins = True
             self.chat.see("end")
         except Exception as e:
             crashlog.note("[环境提示渲染失败] %s" % e)
+        finally:
+            self.chat.configure(state="disabled")
+
+    def _dismiss_env_hint(self):
+        """把开机那条「[环境] 三条路都还没通」提示从输出栏收掉（W 2026-10-08）。
+
+        触发点 = "已经有一个能用的模型"的每个出口：`_maybe_adopt_first_model` 里判成
+        可用的四条分支 + 服务加载就绪（`_handle_status` 的 status 分支，即"模型加载
+        完成"）。那条提示说的是"这台机器还差一步"，差的那步补上了就该消失。
+        """
+        if not self._env_hint_ins:
+            return
+        self._env_hint_ins = False
+        try:
+            ranges = self.chat.tag_ranges(ENV_HINT_TAG)
+        except Exception:
+            return
+        if not ranges:
+            return                      # 用户清过对话：内容连着标签一起没了
+        self.chat.configure(state="normal")
+        try:
+            # 删除整段带标签文字：两个按钮是嵌在这段区间里的（window_create），
+            # 删除它们所在位置的字符时 Tk 一并销毁嵌入窗。
+            self.chat.delete(ranges[0], ranges[-1])
+        except Exception as e:
+            crashlog.note("[环境提示移除失败] %s" % e)
         finally:
             self.chat.configure(state="disabled")
 
@@ -1187,6 +1229,10 @@ class App(ChatMixin, ImageGenMixin, VideoGenMixin, ServiceMixin, ModelsMixin, Se
             self._server_alive_flag = item[1]
             self._server_ready_flag = item[2]
             self._render_status(item[1], item[2])
+            if item[2]:
+                # 服务把模型加载完成 = 本地这条链路已经通了（也可能是换载完成，
+                # 幂等、没插过提示时是空操作）⇒ 收掉开机那条"[环境] 都没通"。
+                self._dismiss_env_hint()
             # 兜底：第一个"能用的模型"配好了就切过去（带冷却，判据在 core.models）。
             # 真正让它"立即响应"的是事件钩子；这一处只兜"程序外面发生的变化"（坑 150）。
             try:

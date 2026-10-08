@@ -22,6 +22,11 @@ from . import theme
 from . import widgets
 
 
+# 「选择附件」文件框里的图片过滤器（默认档是「所有文件」，见 textfile.file_dialog_types；
+# 这一个只是给"就想挑张图"的人省点滚动，不再当默认档）。
+_IMG_FILTER = ("图片", "*.png *.jpg *.jpeg *.webp *.bmp")
+
+
 def _shorten_name(name, keep=10):
     """瓷砖上的文件名大幅缩短：保住扩展名好认类型，正文折叠，全名进悬停气泡。"""
     name = str(name or "")
@@ -95,6 +100,10 @@ class ChatMixin:
         函数名沿用 pick_image 是因为工具栏、测试与既有调用都指它。
         生图/生视频模式差的只是图片附件的语义（参考图/首帧）；文本附件与聊天模式
         同走文档通路，发送时把内容并进提示词（见 _doc_merge）。
+
+        文件框**默认放开所有文件类型**（W 2026-10-08）：选完之后才按扩展名分派 ——
+        图片走图片通路，其余走文档通路；系统读不了的格式（PDF / 老 .doc / 不认识的
+        扩展名）由 `textfile.read_document` 在挂附件那一刻弹出对应提示，不在挑选时拦。
         """
         kind = self.cfg.get("model_kind")
         cloud = providers.is_cloud(self.cfg)
@@ -113,19 +122,20 @@ class ChatMixin:
             # 所以不查聊天那条判据 —— 之前视频模式误查过一次，报"当前模型不支持看图"。
             # 标题不写"底图"：云端各家把这张图当底图还是当主体参考不一样
             # （providers.ref_image_mode），具体语义在发送后的回显里说。
+            # 文件框默认档 = 「所有文件」（W 2026-10-08）：任何类型都允许选，
+            # 读不了的在挂附件那一刻给提示（走 _attach_picked → read_document）。
             p = filedialog.askopenfilename(
                 title=("选择首帧图片或文本附件（图片作为图生视频的第一帧）"
                        if kind == "video" else "选择参考图或文本附件"),
-                filetypes=([("图片", "*.png *.jpg *.jpeg *.webp *.bmp")]
-                           + list(textfile.file_dialog_types())))
+                filetypes=(list(textfile.file_dialog_types())
+                           + [_IMG_FILTER]))
             if p:
                 self._attach_picked(p)
             return
         p = filedialog.askopenfilename(
             title="选择附件（图片或文本文件）",
-            filetypes=([("图片", "*.png *.jpg *.jpeg *.webp *.bmp")]
-                       if not cloud else [])
-                      + list(textfile.file_dialog_types()))
+            filetypes=(list(textfile.file_dialog_types())
+                       + ([_IMG_FILTER] if not cloud else [])))
         if not p:
             return
         k = textfile.kind_of(p)

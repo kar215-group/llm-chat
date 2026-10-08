@@ -624,45 +624,236 @@ def is_vl_model(cfg, path):
         return True
     return path in find_vl_pairs(cfg)
 
-def plan_tidy(cfg):
-    """生成"模型文件夹整理"计划（只对名称可明确配对的文件动手）。
+# ---------------------------------------------------------------------------
+# 「一键整理模型文件夹」（2026-10-08 W 定，整段重写）
+# ---------------------------------------------------------------------------
+# 结构：<根目录>\model\<文本模型|生图模型|生视频模型>\
+#   · 类内**平铺**（不搞"每个模型一个子夹"）；
+#   · **共用同一文本编码器的多个模型**（如 qwen-image 2.1 的两个量化版本）合成同一个
+#     子文件夹，子夹名取模型名公共前缀；那台编码器与配套 VAE 一并放进去（编码器自己的
+#     mmproj 也跟上 —— 参考图编辑的 `--llm_vision` 靠它）。
+# 边界（W 定"暂仅处理该场景"）：只处理"模型都放在同一个目录"的情形 —— models_dir 里
+# 没有模型就看「手动定向来源」；检测到**多个**装着模型的目录（模型分散在多个文件夹）
+# 时一个文件都不动，由界面给出说明。
+# 纪律：只移动不删除；名称无法判断归属的 mmproj 保持原位（交用户手动处理）。
+TIDY_DIR = "model"
+TIDY_CLASS_DIR = {"chat": "文本模型", "image": "生图模型", "video": "生视频模型"}
 
-    返回 (moves, unpaired)：
-      moves    —— [(src, dst_dir, 类型)] 建议移动的文件及其目标文件夹
-      unpaired —— 无法判断归属的 mmproj（一律不动，交用户手动处理）
-    规则：仅处理 models_dir 顶层散落的模型与其配对 mmproj（生图目录不参与），
-    把"模型 + 它的 mmproj"归入以模型名（去扩展名）命名的子文件夹。
+_BAD_FS_CHARS = '<>:"/\\|?*'
+
+
+def _safe_name(s):
+    """文件夹名净化：Windows 不允许的字符换成下划线（模型名里本来极少出现）。"""
+    return "".join("_" if c in _BAD_FS_CHARS else c for c in str(s or "")).strip(" .")
+
+
+def _tidy_files(root):
+    """整理候选项：root 下（含子目录，深度口径与 `_expand_dirs` 一致）的模型类文件。
+
+    廉价初筛（只看扩展名）：`.gguf` + 扩散权重那几种（safetensors / sft / ckpt / pt / bin）。
+    真正的角色判定在后面（读 GGUF 头 / 认族），认不出的不动。
     """
-    d = cfg.get("models_dir") or os.path.dirname(cfg.get("model", "")) or "."
-    try:
-        names = sorted(n for n in os.listdir(d) if n.lower().endswith(".gguf"))
-    except Exception:
-        return [], []
-    # 视频链路组件（kv=0 的裸权重）不参与整理：它们不属于"模型 + mmproj"这套组织方式，
-    # 由视频功能按目录自行识别，整理时保持原位。
-    models = [n for n in names
-              if not _is_mmproj(n) and gguf_is_chat_capable(os.path.join(d, n))]
-    projs = [n for n in names if _is_mmproj(n)]
-    moves, unpaired, paired = [], list(projs), set()
-    for m in models:
-        mn = _norm_model_name(m)
-        for pj in list(unpaired):
-            pn = _norm_model_name(pj)
-            if pn.startswith("mmproj"):
-                pn = pn[len("mmproj"):].strip("-")
-            if pn and (pn == mn or pn in mn or mn in pn):
-                folder = os.path.join(d, os.path.splitext(m)[0])
-                moves.append((os.path.join(d, m), folder, "模型"))
-                moves.append((os.path.join(d, pj), folder, "mmproj"))
-                unpaired.remove(pj)
-                paired.add(m)
-                break
-    for m in models:
-        if m not in paired:
-            moves.append((os.path.join(d, m),
-                          os.path.join(d, os.path.splitext(m)[0]),
-                          "模型（未找到 mmproj）"))
-    return moves, unpaired
+    out = []
+    for folder in _expand_dirs(root):
+        for n in _listdir(folder):
+            fp = os.path.join(folder, n)
+            if os.path.isfile(fp) and str(n).lower().endswith(sdprofile.DIFFUSION_EXTS):
+                out.append(fp)
+    return out
+
+
+def _tidy_root(cfg):
+    r""""模型所在目录"：整理只认**唯一一个**装着模型的目录。
+
+    → (root, status, roots)
+      · status="ok"（唯一根，root 有效）；
+      · status="empty"（没有任何装着模型的目录 —— 没东西可整理）；
+      · status="scattered"（两个以上装着模型的目录 —— "模型分散在多个文件夹"这个
+        特殊情况，一个文件都不动，界面照实列出检测到的目录）。
+    判据顺序（W 2026-10-08 定）：models_dir 里有模型就用它；没有就看「手动定向来源」
+    （文件夹本身，或单个 .gguf 所在目录）。内层根并入外层 —— 用户同时登记了
+    `D:\models` 与 `D:\models\生图` 时不当作"分散"。
+    """
+    roots = []
+
+    def _add(p):
+        np = os.path.normpath(str(p or ""))
+        if np and os.path.isdir(np) and _tidy_files(np) and np not in roots:
+            roots.append(np)
+
+    d = str((cfg or {}).get("models_dir") or "").strip()
+    if os.path.isdir(d):
+        _add(d)
+    for p in extra_sources(cfg):
+        if os.path.isdir(p):
+            _add(p)
+        elif os.path.isfile(p):
+            _add(os.path.dirname(p))       # 单文件来源：它所在的目录
+    keep = []
+    for r in sorted(roots, key=len):       # 外层在前：内层根并入外层
+        # 按 normcase 比：Windows 上 D:\Models 与 d:\models 是同一个目录，
+        # 不归一就会被当成"两个来源"、误报"分散"
+        rc = os.path.normcase(r)
+        if not any(rc == os.path.normcase(k)
+                   or rc.startswith(os.path.normcase(k) + os.sep) for k in keep):
+            keep.append(r)
+    if not keep:
+        return "", "empty", []
+    if len(keep) > 1:
+        return "", "scattered", keep
+    return keep[0], "ok", keep
+
+
+def _tidy_group_name(models_, enc=""):
+    """共享编码器那一组子文件夹的名字：模型名（去扩展名）的公共前缀，切在最后一个
+    分隔符上（`qwen_image_2.1-Q5_0` + `-Q6_K` → `qwen_image_2.1`）。前缀太短看不清
+    就退到编码器名，再不行给个通用名（正常现场走不到这两步）。"""
+    stems = [os.path.splitext(os.path.basename(p))[0] for p in models_]
+    pre = os.path.commonprefix(stems) if stems else ""
+    cut = max([pre.rfind(c) for c in ("-", "_", ".", " ")] or [-1])
+    if cut >= 3:
+        pre = pre[:cut]
+    pre = _safe_name(pre.strip("-_."))
+    if len(pre) >= 3:
+        return pre
+    e = _safe_name(os.path.splitext(os.path.basename(enc or ""))[0])
+    return e or "共享编码器组"
+
+
+def plan_tidy(cfg):
+    """生成"模型文件夹整理"计划 → (moves, unpaired, info)。
+
+    moves    —— [(src, dst_dir, 标签)]：要移动的文件与目标目录（标签给预览窗分行）
+    unpaired —— 名称无法判断归属的 mmproj（一律不动，交用户手动处理）
+    info     —— {"status", "root", "roots"}（见 `_tidy_root`）
+    结构与边界见本节开头的注释；角色判定复用扫描 / 发送链路同一批判据
+    （`is_diffusion_file` / `video_component_role` / `find_vl_pairs` / `media.resolve_*`），
+    这里的"认"与菜单、发送侧永远是一个说法。
+    """
+    root, status, roots = _tidy_root(cfg)
+    if status != "ok":
+        return [], [], {"status": status, "root": "", "roots": roots}
+    model_dir = os.path.join(root, TIDY_DIR)
+    files = _tidy_files(root)
+    fs = set(os.path.normcase(os.path.normpath(p)) for p in files)
+    pairs = find_vl_pairs(cfg)
+
+    # media 在模块级 import 会成环（media → models）⇒ 函数内局部 import：调用发生在
+    # 运行期，那时两个模块都已就绪（capability.py 同款做法）。
+    from . import media
+
+    def _in_root(p):
+        return os.path.normcase(os.path.normpath(str(p or ""))) in fs
+
+    # ---- 1) 角色分派：文本（可聊天 gguf）/ 生图扩散 / 生视频扩散 ----
+    # ⚠ 顺序有讲究：视频角色必须先判 —— `is_diffusion_file` 是**生图**的判据
+    # （"能不能当生图扩散模型用"），它会把视频主体与视频编码器都排除掉
+    # （前者 `... != "video"` 为假，后者 kv=0 走不到语言模型那条排除）。
+    text_models, img_models, vid_models = [], [], []
+    for fp in files:
+        if _is_mmproj(os.path.basename(fp)):
+            continue
+        role = video_component_role(fp)
+        if role == "video":
+            vid_models.append(fp)
+            continue
+        if role == "encoder":
+            continue                       # 视频文本编码器：配套件，随主体走
+        if is_diffusion_file(fp):
+            img_models.append(fp)          # 生图扩散主体（含 .safetensors / .ckpt 单文件）
+            continue
+        if str(fp).lower().endswith(".gguf") and gguf_is_chat_capable(fp):
+            text_models.append(fp)
+
+    # ---- 2) 生图 / 生视频：认配套件（与发送链路同一处判据），按"文本编码器"分组 ----
+    def _comps(model, kind):
+        try:
+            got = (media.resolve_img_files(cfg, model) if kind == "image"
+                   else media.resolve_video_files(cfg, model)) or {}
+        except Exception:
+            return []                      # 认族失败不拦整理：该模型按"没有配套件"处理
+        out = []
+        for slot, val in got.items():
+            p = str(val or "")
+            if slot in ("diffusion", "family", "basis", "note", "missing") or not p:
+                continue
+            if os.path.isfile(p) and _in_root(p):
+                out.append((os.path.normpath(p), slot))
+        return out
+
+    moves, claimed = [], set()
+
+    def _claim(src, dst, label):
+        """登记一条移动（同一个文件只登记一次；已经在目标目录里就不再动）。"""
+        key = os.path.normcase(os.path.normpath(src))
+        if key in claimed:
+            return
+        claimed.add(key)
+        if os.path.normcase(os.path.normpath(os.path.dirname(src))) \
+                == os.path.normcase(os.path.normpath(dst)):
+            return                         # 已就位
+        moves.append((src, dst, label))
+
+    # ---- 3) 生图 / 生视频分组：**共用同一文本编码器的模型并进同一个组** ----
+    comps_by_model = {}
+    groups = {"image": [], "video": []}        # [(成员列表, 编码器路径), …]
+    for kind, models_ in (("image", img_models), ("video", vid_models)):
+        by_enc, order = {}, []
+        for m in sorted(models_, key=lambda x: os.path.basename(x).lower()):
+            comps = _comps(m, kind)
+            comps_by_model[m] = comps
+            enc = next((p for p, slot in comps if slot == "llm"), "")
+            key = os.path.normcase(os.path.normpath(enc or m))
+            if key not in by_enc:
+                by_enc[key] = {"enc": enc, "members": []}
+                order.append(key)
+            by_enc[key]["members"].append(m)
+        for key in order:
+            groups[kind].append((by_enc[key]["members"], by_enc[key]["enc"]))
+
+    # 编码器（可聊天的 gguf 自己会进"文本模型"清单）不该被当成文本模型搬走 ——
+    # 它已经是生图 / 生视频那一组里的配套件了
+    companion_paths = {os.path.normcase(os.path.normpath(p))
+                       for grps in groups.values()
+                       for members, _enc in grps
+                       for m in members
+                       for p, _slot in comps_by_model.get(m, [])}
+    text_models = [m for m in text_models
+                   if os.path.normcase(os.path.normpath(m)) not in companion_paths]
+
+    # ---- 4) 文本模型（+ 配对 mmproj）→ model\文本模型\ ----
+    t_dir = os.path.join(model_dir, TIDY_CLASS_DIR["chat"])
+    for m in sorted(text_models, key=lambda x: os.path.basename(x).lower()):
+        pj = pairs.get(m)
+        if pj and _in_root(pj):
+            _claim(m, t_dir, TIDY_CLASS_DIR["chat"])
+            _claim(os.path.normpath(pj), t_dir, "mmproj")
+        else:
+            _claim(m, t_dir, "%s（未找到 mmproj）" % TIDY_CLASS_DIR["chat"])
+
+    # ---- 5) 生图 / 生视频 → 各自类目录（≥2 个成员共用编码器的组进同一个子夹）----
+    for kind, grps in groups.items():
+        base = os.path.join(model_dir, TIDY_CLASS_DIR[kind])
+        for members, enc in grps:
+            target = (os.path.join(base, _tidy_group_name(members, enc))
+                      if len(members) >= 2 else base)
+            for m in members:
+                _claim(m, target, TIDY_CLASS_DIR[kind])
+                for p, slot in comps_by_model.get(m, []):
+                    if slot == "llm":
+                        _claim(p, target, "文本编码器")
+                        # 编码器自己的 mmproj（参考图编辑 --llm_vision 要用的那个）也进这一组
+                        pj = pairs.get(p)
+                        if pj and _in_root(pj):
+                            _claim(os.path.normpath(pj), target, "mmproj")
+                    else:
+                        _claim(p, target, sdprofile.slot_name(slot))
+
+    # ---- 6) 认不出归属的 mmproj：保持原位，列出交用户手动处理 ----
+    unpaired = [p for p in files
+                if _is_mmproj(os.path.basename(p))
+                and os.path.normcase(os.path.normpath(p)) not in claimed]
+    return moves, unpaired, {"status": "ok", "root": root, "roots": roots}
 
 def apply_tidy(moves):
     """执行整理计划（同盘移动，瞬时完成）；返回 (成功数, 失败清单)。"""

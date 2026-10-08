@@ -74,8 +74,10 @@ class ModelsMixin:
         if self.cfg.get("model_auto_picked"):
             # 已接管过。绝大多数轮询在这里就收工（`selected_usable` 走快路径，不扫盘）。
             if selected_usable(self.cfg):
+                self._dismiss_env_hint()     # 有能用的模型 ⇒ 开机那条"[环境]"提示收掉
                 return
             if first_usable(self.cfg):
+                self._dismiss_env_hint()     # 同上：能用的已经有了（只是用户选过，不插手）
                 return                # 还有别的可用模型，但用户已经选过 ⇒ 不插手
             # 一个可用的都不剩 = 用户把模型删光了 ⇒ 重新武装，下一个配好的会再切一次
             self.cfg.pop("model_auto_picked", None)
@@ -83,10 +85,12 @@ class ModelsMixin:
             return
         if selected_usable(self.cfg):
             self.cfg["model_auto_picked"] = True     # 已经有一个能用的了
+            self._dismiss_env_hint()
             return
         got = first_usable(self.cfg)
         if not got:
             return                                   # 还没有可用的：等下一轮（标记不置位）
+        self._dismiss_env_hint()
         # 三类都存**绝对路径**（与 `pick_model` 同一形状）：`media.resolve_*_model_path`
         # 判的是 `os.path.isfile(cfg["model"])`，存文件名会让生图 / 生视频直接报"未找到模型"
         self.cfg["model"] = got["id"]
@@ -940,7 +944,18 @@ class ModelsMixin:
                                 "当前有任务正在进行（生成 / 生图 / 生视频 / 服务操作），\n"
                                 "请等任务结束、服务停止后再整理文件。")
             return
-        moves, unpaired = plan_tidy(self.cfg)
+        moves, unpaired, info = plan_tidy(self.cfg)
+        if info["status"] == "scattered":
+            # "模型分散在多个文件夹"这个特殊情况（W 2026-10-08 定）：一个文件都不动，
+            # 照实列出检测到的目录，并给收拢办法。
+            messagebox.showinfo(
+                "整理模型文件夹",
+                "暂不整理：模型分散在多个文件夹里。\n\n装着模型的目录：\n%s\n\n"
+                "整理只在\"模型都放在同一个目录\"时生效，不会跨目录搬动文件。\n"
+                "想整理：先把手动定向来源收敛成一个目录，或在 设置 → 服务参数 → "
+                "models_dir 把模型目录指到那个目录。"
+                % "\n".join("  · %s" % d for d in info["roots"]))
+            return
         if not moves and not unpaired:
             messagebox.showinfo("整理模型文件夹",
                                 "未发现需要整理的文件：\n"
@@ -952,13 +967,31 @@ class ModelsMixin:
         dlg.geometry("780x520")
         dlg.transient(self.root)
         txt = tk.Text(dlg, font=("Consolas", 9), wrap="none")
-        txt.pack(fill="both", expand=True, padx=10, pady=(10, 4))
+        # 滚动条**先于**带 expand 的 Text pack（坑 160 同款纪律）：移动条目多时
+        # （本机模型库就是 12 条），这一窗是"执行前唯一的核对面"，得能翻到底
+        _sb = ttk.Scrollbar(dlg, orient="vertical", command=txt.yview)
+        txt.configure(yscrollcommand=_sb.set)
+        _sb.pack(side="right", fill="y", pady=(10, 4))
+        txt.pack(side="left", fill="both", expand=True, padx=10, pady=(10, 4))
         out = []
         if moves:
             out.append("将创建子文件夹并移动以下文件（同盘操作，瞬时完成）：\n")
+            # 标签列按**真实像素宽**补齐：中日韩字走字体回退，`%-18s` 与"宽字符算两格"
+            # 的估算都会把列怼歪（坑 116 同款纪律 —— 折行/对齐都先 measure 再动手）
+            _pf = tkfont.Font(family="Consolas", size=9)
+
+            def _col(text, width_px=132):
+                s = str(text)
+                while _pf.measure(s) < width_px:
+                    s += " "
+                return s
+
             for src, dst, kind in moves:
-                out.append("  [%-18s] %s" % (kind, os.path.basename(src)))
-                out.append("  %22s -> %s\\\n" % ("", os.path.basename(dst)))
+                # 目标列写**相对根目录**的路径（model\生图模型\qwen_image_2.1\ 这类），
+                # 谁和谁进同一个子夹（共享编码器的组）一眼能看出来
+                rel = os.path.relpath(dst, info["root"])
+                out.append("  [%s] %s" % (_col(kind), os.path.basename(src)))
+                out.append("  %22s -> %s\\\n" % ("", rel))
         if unpaired:
             out.append("\n以下 mmproj 名称无法判断归属，将保持原位（请手动处理）：\n")
             for p in unpaired:
@@ -971,13 +1004,57 @@ class ModelsMixin:
         def do_exec():
             ok, fails = apply_tidy(moves)
             c = self.cfg
-            for src, dst, kind in moves:
-                new = os.path.join(dst, os.path.basename(src))
-                sb = os.path.basename(src)
+            # 只按**真的搬成功**的那些文件改配置：某个文件被占用（比如服务正加载着它）
+            # 时 os.rename 会失败（Windows 上句柄锁着就是"另一个程序正在使用此文件"），
+            # 若无条件按计划表改写，配置会指向一个**不存在的新路径** —— 顶栏挂空模型、
+            # 发送侧报"文件不存在"，而文件其实还在老地方。"搬成功"的判据 = 老路径没了
+            # 且新路径在了（apply_tidy 因"目标已存在"跳过的那些两者都在，不算成功）。
+            remap = {}
+            for src, dst_dir, _kind in moves:
+                new = os.path.join(dst_dir, os.path.basename(src))
+                if os.path.exists(src) or not os.path.isfile(new):
+                    continue
+                remap[os.path.normcase(os.path.normpath(src))] = new
                 if os.path.normpath(c.get("model", "")) == os.path.normpath(src):
                     c["model"] = new
-                if sb in (c.get("model_mmproj") or {}):
-                    c["model_mmproj"][sb] = new
+
+            def _remap(p):
+                return remap.get(os.path.normcase(os.path.normpath(str(p or ""))))
+
+            # model_mmproj 的**值是投影器路径**（key 才是模型名）—— 按"被搬的是不是
+            # 这条记录里的那个文件"更新。旧写法是"被搬文件的 basename 命中 key 就写新
+            # 路径"：搬模型本体时会把模型自己的新路径写进投影器记录（之后加载会把模型
+            # 当 mmproj 喂给引擎），而搬投影器那一步又匹配不到 key、老路径留在记录里。
+            rec = c.get("model_mmproj") or {}
+            for k, v in list(rec.items()):
+                nv = _remap(v)
+                if nv:
+                    rec[k] = nv
+            c["model_mmproj"] = rec
+
+            # 其余"记了完整路径"的键跟着搬（生图 / 生视频手工指定过的文件、手动定向的
+            # 单文件、性能登记表）：不跟着改就会指向空气 —— 发送侧报"未找到模型"，
+            # 而文件明明在。
+            for key in ("img_model_file", "img_vae_file", "img_llm_file",
+                        "img_clip_l_file", "img_clip_g_file", "img_t5_file",
+                        "img_tokenizer_file", "vid_model_file", "vid_vae_file",
+                        "vid_llm_file", "vid_t5_file", "vid_tokenizer_file",
+                        "vid_high_noise_file", "vid_audio_vae_file"):
+                v = str(c.get(key) or "")
+                if os.path.isabs(v):
+                    nv = _remap(v)
+                    if nv:
+                        c[key] = nv
+            em = []
+            for p in (c.get("extra_models") or []):
+                # ⚠ 不要在这里判 os.path.isfile：调用时文件**已经搬完**了，老路径
+                # 一律不存在 —— 只看它有没有出现在本次搬动的对照表里。
+                em.append(_remap(p) or p)
+            if em != (c.get("extra_models") or []):
+                c["extra_models"] = em
+            pr = c.get("perf_reported") or {}
+            if pr:
+                c["perf_reported"] = {(_remap(k) or k): v for k, v in pr.items()}
             save_config(c)
             self._reindex_after_tidy()
             dlg.destroy()

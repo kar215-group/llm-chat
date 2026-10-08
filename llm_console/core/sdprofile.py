@@ -675,6 +675,15 @@ def _pick_high_noise(files, folders, pbase, want):
 
 
 # ---------------------------------------------------------------- 缺件预检
+def slot_name(slot):
+    """槽位的短中文标签（「管理本地模型」页与「整理模型文件夹」预览**共用这一处**，
+    `slot_flag` 那条带引擎参数名、太长）。"""
+    if slot == "high_noise":
+        return "高噪段扩散模型"
+    info = SLOTS.get(slot)
+    return info[1] if info else slot
+
+
 def slot_flag(slot):
     """槽位对应的引擎参数名（`high_noise` 不在 SLOTS 里，它是主体的第二段）。"""
     if slot == "high_noise":

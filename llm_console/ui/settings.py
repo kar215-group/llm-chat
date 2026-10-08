@@ -1427,10 +1427,17 @@ class SettingsMixin:
                 if simple:
                     # 普通用户模式（2026-10-07 W 定）：名称 / 地址 / 原生协议那些字段
                     # 整段不出现，页面只留 选服务商 / 测试连接 / 填 API / 选择模型。
-                    # 控件照建、vars_ 照填 —— commit / do_test / 选模型窗口都要读它们
+                    # 控件照建、vars_ 照填 —— commit / do_test / 选模型窗口都要读它们。
+                    # **「＋ 新建服务商…」是例外**（W 2026-10-08）：新建这一条路必须
+                    # 能把连接配置填完整，所以选中"还没建起来"的空条目时把两个框放开；
+                    # 建好之后 load() 再走一遍，字段照样收起。
                     built_note.grid_remove()
-                    fields.grid_remove()
-                    fields2.grid_remove()
+                    if st["pid"]:
+                        fields.grid_remove()
+                        fields2.grid_remove()
+                    else:
+                        fields.grid()
+                        fields2.grid()
                 elif st["builtin"]:
                     # 只在"这一条能改地址"这个特殊情况下留一行说明（W 2026-10-03）：
                     # 字段本来已经收起，"名称与 base_url：内置"纯属重复
@@ -3646,8 +3653,9 @@ class SettingsMixin:
             theme.button(fr2, text="手动定向模型", width=18,
                        command=self._manual_point_model).pack(side="left")
             row(t5, r5, "文件整理", fr2,
-                "把模型目录顶层散落的模型与其配对 mmproj 归入各自子文件夹"
-                "（先预览、后执行；只移动不删除；名称无法判断归属的保持原位）。"
+                "把模型按 文本模型 / 生图模型 / 生视频模型 归入模型目录下的 model 文件夹；"
+                "共用同一文本编码器的模型（如 qwen-image 2.1 的两个量化版本）收进同一个"
+                "子文件夹（先预览、后执行；只移动不删除；名称无法判断归属的保持原位）。"
                 "「手动定向模型」把别处的文件夹或单个 .gguf 加进来源 —— 只登记，不动文件。")
 
             # 进「模型文件与引擎」页自动补全一次（10 分钟冷却；与「检查更新」共用
