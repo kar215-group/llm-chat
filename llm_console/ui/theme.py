@@ -547,6 +547,35 @@ def _make_render(fill, outline, outline_w, bg, w=BTN_MIN_W):
     return render
 
 
+def _build_native_flat(ttk_style, colors, bg):
+    """中性描边按钮换 vista 原生按钮元素（2026-10-08，W 定「只换中性按钮」）。
+
+    ttk 的 image 元素**每档窗口缩放都要按目标尺寸重合成整幅贴图**，且与源图
+    几何无关——按宽度预切、拆三件套、恒等尺寸全部实测省不掉（坑 173：
+    三件套反而慢 7 倍，已回滚）。真加速只有换原生 OS 元素：同窗拖动
+    -56~67 ms/档（`08` §10.6）。中性按钮是数量大头（设置页几乎全部），
+    它们换原生；彩色 / 实心按钮数量少、税小，保留圆角贴图（发送的蓝色
+    主操作、取回的描边强调不丢）。输入框 / 下拉 / 开关与图标按钮照旧
+    （开关与图标是固定尺寸贴图，从不缩放，本就无税）。
+    外观：方角系统按钮 + 系统悬停态，文字边距沿用 BTN_PAD_X（几何与
+    圆角版对齐，预览与实测见 `08` §10.6）。复制不到 vista 元素时抛错，
+    调用方落回圆角贴图路径。
+    """
+    from ttkbootstrap.constants import NSEW
+    from ttkbootstrap.style.layout import El, layout
+    _style.element_create("Native.Flat.button", "from", "vista", "Button.button")
+    _style.element_create("Native.Flat.label", "from", "vista", "Button.label")
+    layout(_style, ttk_style,
+           El("Native.Flat.button", sticky=NSEW, children=[
+               El("Native.Flat.label", sticky=NSEW)]))
+    _style.configure(ttk_style, anchor="center",
+                     padding=(BTN_PAD_X, 0, BTN_PAD_X, 0),
+                     foreground=colors.get("fg"), background=bg,
+                     borderwidth=0, relief="flat",
+                     focusthickness=0, focuscolor="")
+    _style.map(ttk_style, foreground=[("disabled", colors.get("secondary"))])
+
+
 def _build_round_buttons():
     """构建 Round.* 圆角按钮样式（apply 时调一次）。
 
@@ -573,6 +602,16 @@ def _build_round_buttons():
     ]
     for ttk_style, colorkey, solid in variants:
         icon_geom = ttk_style == "Round.Icon.TButton"
+        if ttk_style == "Round.Secondary.TButton":
+            # 中性按钮 = 数量大头（设置页几乎全部），换 vista 原生按钮元素
+            # 免掉贴图税（W 2026-10-08 定「只换中性按钮」；机制与实测见
+            # `_build_native_flat` 与 `08` §10.6）。复制不到 vista 元素就
+            # 落回下面的圆角贴图路径，绝不拖垮启动。
+            try:
+                _build_native_flat(ttk_style, colors, bg)
+                continue
+            except Exception:
+                pass
         if solid:
             accent = colors.get(colorkey)
             hov = _blend(accent, "#ffffff", 0.12)
