@@ -81,6 +81,10 @@ class App(ChatMixin, ImageGenMixin, VideoGenMixin, ServiceMixin, ModelsMixin, Se
         # 记状态是为了让 3 秒一轮的探活不必每次去做 tag_ranges 查询；首个可用模型
         # 一出现就由 `_dismiss_env_hint` 把它整块删掉（W 2026-10-08）。
         self._env_hint_ins = False
+        # 顶栏上一次的显隐状态（show_start/show_stop/show_status 三元组）：
+        # 状态队列每 3 秒叫一次 `_render_status`，而"整排重放"要 6~12 ms —— 状态没变
+        # 就直接跳过（W 2026-10-08，见 `_layout_topbar`）。
+        self._topbar_state = None
         # 本轮对话是不是云端链路：「展示思考过程」本地与云端是两个独立开关
         # （cfg["show_reasoning"] / cfg["cloud_show_reasoning"]），_poll 渲染时按它分流。
         # 在 _do_send 开线程前置位；忙碌守卫保证一轮中间不会换链路。
@@ -1163,7 +1167,16 @@ class App(ChatMixin, ImageGenMixin, VideoGenMixin, ServiceMixin, ModelsMixin, Se
         右侧那排全是 `side="right"` 的 pack：pack_forget 再 pack 会排到队尾，
         所以每次都按固定顺序整排重放 —— 显隐只影响"谁在场"，不影响相对顺序。
         状态灯在左侧、model_btn 之前，重新入列要用 `before=` 钉回原位。
+
+        **显隐状态没变就直接返回**（W 2026-10-08）：`_render_status` 每 3 秒被状态
+        队列叫一次，而"整排重放"实测要 6~12 ms —— 状态没变时那是纯浪费，拖动窗口
+        时撞上还会多一次顿挫。layout 只由这三个开关（+ 引导期的 `_guide_active`，
+        它已经在入参里被折算进三个开关）决定，所以比一下上次的元组就够。
         """
+        key = (bool(show_start), bool(show_stop), bool(show_status))
+        if key == self._topbar_state:
+            return
+        self._topbar_state = key
         for w in (self.btn_settings, self.stop_svc_btn, self.start_btn,
                   self.stop_gen_btn, self.clear_btn):
             w.pack_forget()

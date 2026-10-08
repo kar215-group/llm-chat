@@ -431,7 +431,7 @@ class SubWindowMixin:
         nfr = ttk.Frame(body)
         nfr.pack(side="top", fill="both", expand=True)
         notes = tk.Text(nfr, height=7, font=("Microsoft YaHei UI", 9), wrap="char")
-        notes_sb = ttk.Scrollbar(nfr, command=notes.yview)
+        notes_sb = theme.scroll(nfr, command=notes.yview)
         notes.configure(yscrollcommand=notes_sb.set)
         # 滚动条先 pack：Text 带 expand 会把整条 cavity 吃掉，后 pack 的滚动条只剩 1x1
         notes_sb.pack(side="right", fill="y")

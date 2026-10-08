@@ -88,6 +88,9 @@ _ROUND_STYLE = {
 
 _style = None                 # ttkbootstrap Style 单例（apply 后非 None）
 _ROUND_OK = False             # 圆角样式族构建成功（工厂据此决定套样式还是裸原生控件）
+# 滚动条样式名 {vertical/horizontal}（apply() 里 _build_fast_scroll 自建）；
+# 建不出来就是空 dict，scroll() 回落旧路径
+_SCROLL_STYLES = {}
 try:
     from ttkbootstrap.style import Style as _TBStyle
     import ttkbootstrap as _ttb
@@ -130,6 +133,12 @@ def apply(root):
     except Exception:
         # 圆角层失败不拖垮启动：按钮退回 2.x 原生变体（工厂里 get 不到样式名
         # 时走原生 bootstyle；这里失败时样式名指向不存在的样式 → ttk 默认外观）
+        pass
+    try:
+        _build_fast_scroll()
+    except Exception:
+        # 滚动条样式建不出来（非 Windows / vista 主题缺失）：scroll() 回落旧路径，
+        # 只是拖着窗口缩放时会慢，不影响功能
         pass
     try:
         _ensure_widget_skin()
@@ -433,8 +442,52 @@ def _toggle_png(track, pos, disabled, bg, ring=None):
     return _style._get_or_create_image(key, render)
 
 
+def _build_fast_scroll():
+    """自建滚动条样式：滑块 / 滑槽从**系统主题**（vista）复制原生元素，不用贴图元素。
+
+    为什么（2026-10-08 实测，W 报"拖动窗口缩放明显卡顿"，见 `08` §10）：ttkbootstrap
+    的滚动条滑块是**九宫格贴图元素**（PIL 现画 + 按目标尺寸做一次合成），单次重绘
+    实测 4.5~13 ms；拖动窗口一次会触发 3 次以上重绘 ⇒ 主页面与设置页**每档拖拽
+    多付 40~50 ms**（拖 20 档白花约 1 秒，肉眼就是卡顿）。换成原生元素后单次重绘
+    **0.18 ms（约 25×）**，外观同样是中性灰的「细圆角滑块」（比原来的粗胶囊更清爽），
+    滑槽颜色跟着页面底色 = 视觉上只有一条细滑块。
+
+    两条实测纪律（踩过）：
+      · **元素名必须是源主题里的真名**（vista 是 `Vertical.Scrollbar.thumb/trough`、
+        clam 是 `thumb/trough`）。临时编个名字（如 `My.Thumb`）Tk 不报错，但造出来的是
+        **画不出任何东西的空元素**（`element_options() == ()`），量出来的"变快了"
+        是假象 —— 必须截图 / 数像素确认滑块真画出来了（坑 170）。
+      · 用**自己的样式名**（`Native.*`），别覆盖 ttkbootstrap 的 `Round.*`：它的构建器
+        在 Style 重建（多 root 的测试夹具）时会把自己的样式重新注册回去，覆盖我们的
+        布局就白改了（自检里换过好几轮 root）。
+    """
+    st = _style
+    if st is None:
+        return None
+    for axis in ("Vertical", "Horizontal"):
+        st.element_create("%s.Scrollbar.thumb" % axis, "from", "vista")
+        st.element_create("%s.Scrollbar.trough" % axis, "from", "vista")
+        name = "Native.%s.TScrollbar" % axis
+        stick = "ns" if axis == "Vertical" else "we"
+        st.layout(name, [("%s.Scrollbar.trough" % axis, {"sticky": stick, "children": [
+            ("%s.Scrollbar.thumb" % axis, {"expand": "1", "sticky": stick})]})])
+        st.configure(name, troughcolor=c("bg"), borderwidth=0, arrowsize=0)
+        _SCROLL_STYLES[axis.lower()] = name
+    return _SCROLL_STYLES
+
+
 def scroll(master, **kw):
-    """ttk.Scrollbar 工厂：圆角胶囊样式（2.x 内置 round 变体）。"""
+    """ttk.Scrollbar 工厂：自建「原生元素」样式（见 `_build_fast_scroll`）。
+
+    外观与原来 ttkbootstrap 的 round 变体同为中性灰圆角滑块，但重绘成本低 25×
+    —— 原来那版是拖动窗口缩放的卡顿主因（2026-10-08 实测）。
+    建不出样式时回落：有 ttkbootstrap 用它的 round 变体，否则裸原生 ttk。
+    """
+    kw.pop("bootstyle", None)          # 兼容既有调用；自建样式不吃 bootstyle
+    orient = str(kw.get("orient", "vertical")).lower()
+    key = "horizontal" if orient.startswith("h") else "vertical"
+    if _SCROLL_STYLES.get(key):
+        return _ttk().Scrollbar(master, style=_SCROLL_STYLES[key], **kw)
     if _ttb is not None and _style is not None:
         return _ttb.Scrollbar(master, bootstyle="round", **kw)
     return _ttk().Scrollbar(master, **kw)

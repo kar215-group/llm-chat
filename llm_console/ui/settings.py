@@ -73,8 +73,8 @@ NAV_SPEC = [
          "title": "引擎管理",
          "help": "这一屏解决「还没装引擎」：说清现在缺哪一个、可以选哪几档、"
                  "点一下装到程序目录的 engines 里。\n"
-                 "引擎已在自己机器上、只是换了位置：用「自动定向」扫软件所在文件夹，"
-                 "或用「手动定向」指到那个文件夹 —— 两个引擎与模型文件同处一个目录也认得出。\n"
+                 "引擎已在自己机器上、只是换了位置：进这一屏会自动扫一遍软件所在文件夹，"
+                 "也可以用「手动定向」自己指 —— 两个引擎与模型文件同处一个目录也认得出。\n"
                  "CUDA 档要连运行库一起下（几百 MB），所以下之前会先说清多大；"
                  "装完回「服务参数」把路径指过去。\n"
                  "「检查更新」联网查可用版本，查到新版本它自己变成「更新引擎」，"
@@ -634,19 +634,26 @@ class SettingsMixin:
             i = rows["i"]
             rows["i"] += 1
             bg = widgets.default_bg()
-            lab = tk.Frame(parent, background=bg)
-            lab.grid(row=i, column=0, sticky="w", padx=(0, 8), pady=5)
-            ttk.Label(lab, text=label, width=lw, anchor="w").pack(side="left")
-            if not simple:
+            # 标签格只在"真会放 ?"时才套 Frame：普通模式 help 一律空串（HelpDot
+            # 不建控件）、高级模式 desc 为空的行也一样 —— 那时标签直接进列 0，
+            # **省掉每行一个包装 Frame**（W 2026-10-08：每个行包装 Frame 约让窗口
+            # 缩放贵 2 ms/档，见 `08` §10.5；列索引 / columnspan / 折叠登记全不动）。
+            if not simple and desc:
                 # 普通用户模式全页不放 "?"（2026-10-07 W 定）；说明照旧只给高级模式
+                lab = tk.Frame(parent, background=bg)
+                lab.grid(row=i, column=0, sticky="w", padx=(0, 8), pady=5)
+                ttk.Label(lab, text=label, width=lw, anchor="w").pack(side="left")
                 widgets.HelpDot(lab, desc).pack(side="left", padx=(2, 0))
+            else:
+                lab = ttk.Label(parent, text=label, width=lw, anchor="w")
+                lab.grid(row=i, column=0, sticky="w", padx=(0, 8), pady=5)
             widget.grid(row=i, column=1, sticky="w", padx=(0, 10), pady=5)
             cell = None
             if hint:
-                cell = tk.Frame(parent, background=bg)
+                # 摘要同样不套 Frame（原来 Frame 里就一个 Label）
+                cell = ttk.Label(parent, text=hint, foreground="#5a5a5a",
+                                 font=("Microsoft YaHei UI", 9))
                 cell.grid(row=i, column=2, sticky="w", pady=5)
-                ttk.Label(cell, text=hint, foreground="#5a5a5a",
-                          font=("Microsoft YaHei UI", 9)).pack(side="left")
             if fold:
                 grp = folds.setdefault(fold, [])
                 for w in (lab, widget, cell):
@@ -1654,7 +1661,7 @@ class SettingsMixin:
                 wrap = ttk.Frame(d)
                 wrap.pack(side="top", fill="both", expand=True, padx=12)
                 cv = tk.Canvas(wrap, highlightthickness=0, borderwidth=0)
-                sb = ttk.Scrollbar(wrap, orient="vertical", command=cv.yview)
+                sb = theme.scroll(wrap, orient="vertical", command=cv.yview)
                 cv.configure(yscrollcommand=sb.set)
                 sb.pack(side="right", fill="y")
                 cv.pack(side="left", fill="both", expand=True)
@@ -3142,9 +3149,11 @@ class SettingsMixin:
             """引擎管理：说清哪个引擎就位了没有 + 可选档位 + 一键装到程序目录的 engines 下。
 
             **口径（W 2026-10-05 第二轮重构）**：
-              · 「自动定向」= 扫软件所在文件夹（扫不到再扫当前模型目录）找出本机的引擎；
-                「手动定向」= 用户自己指一个文件夹。两个引擎与模型文件同处一个目录也各认各的
-                —— 判据是 `engine_install.find_exe`：**按 exe 名**找，不看目录名。
+              · 定向：**进这一屏会自动扫一遍**（W 2026-10-08 删掉了「自动定向」按钮 ——
+                引擎没就位时进页自动按 `engine_install.auto_locate` 找一次，找到就写回指路
+                并刷新状态行；找不到保持原提示、不弹窗）。「手动定向」= 用户自己指一个文件夹。
+                两个引擎与模型文件同处一个目录也各认各的 —— 判据是 `engine_install.find_exe`：
+                **按 exe 名**找，不看目录名。
               · 「检查更新」联网查可用版本；查到比**已装版本**更新的就原地变成「更新引擎」，
                 点它开始下载安装、按钮再变成「取消安装」；已是最新则维持「检查更新」。
                 已装版本记在 `cfg["engine_installed"]`（自动安装成功时写入；手动定向 / 用户
@@ -3260,6 +3269,7 @@ class SettingsMixin:
                     return "这份引擎正在运行，请先在主页面停止服务再安装。"
                 return ""
 
+            eng_refresh = {}      # {引擎键: 该引擎状态行的刷新函数}，给"进页自动定向"用
             for key, title, cfg_of, exe_of, dir_of, what, setting, note in engines:
                 i = r10["i"]
                 r10["i"] += 1
@@ -3271,8 +3281,8 @@ class SettingsMixin:
                     widgets.HelpDot(th, "「更新引擎」会把压缩包整包解压（不要只放那一个 exe，"
                                          "同目录的运行库都要），落到程序目录下的 engines 里。\n"
                                          + note +
-                                         "\n引擎本来就装在这台机器上、只是换了位置的，"
-                                         "用「自动定向」按 exe 名找出来、或「手动定向」自己指，"
+                                         "\n引擎本来就装在这台机器上、只是换了位置的："
+                                         "进这一屏会自动按 exe 名扫一遍，也可以「手动定向」自己指，"
                                          "都不用重装。").pack(side="left", padx=(6, 0))
 
                 # 状态行：四态文案（未就位 / 已就位 / 正在查 / 查询到新版本）**都写在这一行**，
@@ -3283,8 +3293,9 @@ class SettingsMixin:
                 st.grid(row=r10["i"], column=1, columnspan=2, sticky="w", pady=(0, 2))
                 r10["i"] += 1
 
-                # 按钮分两行（W 2026-10-05 第二轮）：上一行是四个"其他按钮"（复制下载链接 /
-                # 自动定向 / 手动定向 / 打开目标目录），下一行**只放**合并按钮「检查更新」——
+                # 按钮分两行（W 2026-10-05 第二轮；2026-10-08 删「自动定向」→ 三个其他按钮）：
+                # 上一行是三个"其他按钮"（复制下载链接 / 手动定向 / 打开目标目录），
+                # 下一行**只放**合并按钮「检查更新」——
                 # 它右边挂档位下拉，**点过「检查更新」才显示**。`ScrollPage` 只竖滚不横滚
                 # （坑 106），但这四个按钮按字符宽实测仍在可视区内（自检里有一条右界断言）。
                 bf = ttk.Frame(t10)
@@ -3435,26 +3446,6 @@ class SettingsMixin:
                     except Exception as e:
                         messagebox.showwarning("复制链接", "复制失败（%s）。" % e)
 
-                def auto_dir(_e=None, k=key, sv=st_var, stl=st, b=box, rf=_render,
-                             ad=_apply_dir):
-                    """「自动定向」：扫软件所在文件夹（再退模型目录），按 **exe 名**找出本引擎。
-
-                    判据与落点都在 `engine_install.auto_locate` / `set_dir`（**首次打开的
-                    自动扫描走同一处**）。两个引擎各调一次（同处一个目录也不会张冠李戴）；
-                    找不到就把原因写进状态行，不弹窗堆噪音 —— 状态行本来就是四态文案的家。
-                    """
-                    if b["busy"]:
-                        return
-                    found = engine_install.auto_locate(k, self.cfg, app_dir=APP_DIR)
-                    if not found:
-                        _say(sv, stl, "未就位：没在软件目录（及模型目录）下找到 %s。"
-                             % engine_install.exe_name(k), "#b00020")
-                        return
-                    ad(k, os.path.dirname(found))
-                    b["mode"] = "idle"
-                    b["checked"] = False
-                    rf()
-
                 def manual_dir(_e=None, k=key, b=box, rf=_render, ad=_apply_dir):
                     """「手动定向」：用户自己指一个文件夹（该引擎所在目录）。"""
                     folder = filedialog.askdirectory(
@@ -3575,11 +3566,10 @@ class SettingsMixin:
                     else:
                         on_check()
 
-                # 顺序按 W 2026-10-05：复制下载链接 → 自动定向 → 手动定向 → 打开目标目录
+                # 顺序按 W 2026-10-05（2026-10-08 去掉「自动定向」后保持其余相对次序）：
+                # 复制下载链接 → 手动定向 → 打开目标目录
                 theme.button(bf, text="复制下载链接", width=13,
                            command=copy_link).pack(side="left", padx=(0, 6))
-                theme.button(bf, text="自动定向", width=10,
-                           command=auto_dir).pack(side="left", padx=(0, 6))
                 theme.button(bf, text="手动定向", width=10,
                            command=manual_dir).pack(side="left", padx=(0, 6))
                 theme.button(bf, text="打开目标目录", width=13,
@@ -3590,7 +3580,30 @@ class SettingsMixin:
                 flavor_cb.bind("<<ComboboxSelected>>",
                                lambda e=None, b=box, k=key, fv=flavor_var,
                                sv=st_var, stl=st: _on_pick(b, k, fv, sv, stl))
+                eng_refresh[key] = _render
                 _render()
+
+            # 进页自动定向（W 2026-10-08：删掉「自动定向」按钮，换成进页自动做一次）：
+            # 只处理**未就位**的引擎（已就位的一个字节都不动）；判据 / 落点与「首次打开
+            # 的自动扫描」**同一处**（`engine_install.auto_locate` / `set_dir`，坑 128）。
+            # 找到才写回指路 + 刷新那一行状态行（写回顺带 `_maybe_adopt_first_model`，
+            # 见 `_apply_dir`）；找不到保持原提示（「还没指路…」比"没找到"更可操作），
+            # 不弹窗。只读扫盘，深度 ≤3、几 ms 量级，挂在进页钩子上（主线程）付得起。
+            def _auto_locate_on_enter():
+                for k in ("llama", "sd"):
+                    try:
+                        if engine_install.configured_exe(k, self.cfg):
+                            continue
+                        found = engine_install.auto_locate(k, self.cfg, app_dir=APP_DIR)
+                        if not found:
+                            continue
+                        _apply_dir(k, os.path.dirname(found))
+                        rend = eng_refresh.get(k)
+                        if rend is not None:
+                            rend()
+                    except Exception:
+                        continue          # 单个引擎失败不拖累另一个，也不打断进页
+            enter_hooks.setdefault("files", []).append(_auto_locate_on_enter)
 
         # ---- 区块 8：模型文件管理（左栏「模型文件与引擎」那一项指到这里）----
         @section("files", "files")

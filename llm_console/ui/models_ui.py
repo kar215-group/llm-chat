@@ -178,7 +178,7 @@ class ModelsMixin:
                     "模型列表",
                     "还没就位的引擎：\n· %s（本地对话）\n· %s（本地生图 / 生视频）\n\n"
                     "去 设置 → 本地模型 → 模型文件与引擎 点「检查更新 → 更新引擎」装一份，"
-                    "或用「自动定向」指到本机已有的那一份；\n"
+                    "或用「手动定向」指到本机已有的那一份（进那一屏也会自动找一遍）；\n"
                     "只想用云端：在 设置 → 云端模型 → 服务商与密钥 填密钥，"
                     "再到「选择模型」里勾上要用那几个。"
                     % (ENGINE_LABEL["llama"], ENGINE_LABEL["sd"]))
@@ -969,7 +969,7 @@ class ModelsMixin:
         txt = tk.Text(dlg, font=("Consolas", 9), wrap="none")
         # 滚动条**先于**带 expand 的 Text pack（坑 160 同款纪律）：移动条目多时
         # （本机模型库就是 12 条），这一窗是"执行前唯一的核对面"，得能翻到底
-        _sb = ttk.Scrollbar(dlg, orient="vertical", command=txt.yview)
+        _sb = theme.scroll(dlg, orient="vertical", command=txt.yview)
         txt.configure(yscrollcommand=_sb.set)
         _sb.pack(side="right", fill="y", pady=(10, 4))
         txt.pack(side="left", fill="both", expand=True, padx=10, pady=(10, 4))

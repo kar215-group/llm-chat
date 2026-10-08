@@ -14,6 +14,8 @@
 import tkinter as tk
 from tkinter import ttk
 
+from . import theme
+
 # 提示气泡的观感：Windows 原生 tooltip 就是这个底色，不抢主窗口的视觉
 _TIP_BG = "#ffffe1"
 _TIP_BORDER = "#8a8a8a"
@@ -988,16 +990,14 @@ class PageStack(object):
 
     **为什么不用 pack_forget + pack**（2026-10-08 实测，W 报"设置页切页卡 + 整页跳一下"）：
     `pack_forget` 会让那一支的**几何缓存全部失效**，下一次 `update_idletasks()`
-    必须重算该支所有控件的几何。代价按"被标脏的控件数"线性增长，而 ttkbootstrap
-    主题又把单控件成本放大了约 6 倍（cosmo 下只改 23 个 Label 的**颜色**就要
-    4.1ms，vista 下 0.7ms）。于是那一次"整页硬切"既卡（几何全废）又跳
-    （旧页已收、新页未画，中间态被 Windows 合成器看见）。
+    必须重算该支所有控件的几何。代价按"被标脏的控件数"线性增长。于是那一次
+    "整页硬切"既卡又跳（旧页已收、新页未画，中间态被 Windows 合成器看见）。
 
       |切法 | 隔离树实测 | 真实设置窗 |
       |---|---|---|
       | `pack_forget` + `pack`（旧） | 30.9 ms（最大 67.3） | **89.3 ms** |
       | `grid` + `grid_remove` | 4.6 ms（最大 46.0） | — |
-      | **同格 `grid` 常驻 + `tkraise()`** | **0.94 ms（最大 2.0）** | **2.0 ms** |
+      | **同格 `grid` 常驻 + `tkraise()`（现行）** | **0.94 ms（最大 2.0）** | **2.0 ms** |
 
     做法：所有页 `grid` 到**同一个格子**（row=0, column=0）互相重叠，
     切页只调`tkraise()` 把目标页提到最前 —— Tk 里`tkraise` 只改叠放次序，
@@ -1013,6 +1013,11 @@ class PageStack(object):
       · **所有页始终 `ismapped`**。判断"当前是哪一页"要用
         `PageStack.current`，**不能**再用 `winfo_ismapped()`（旧实现靠后者区分，
         自检 `test_settings_layout.py` 有多处这么写，改栈后要一并改）。
+
+    ⚠ **2026-10-08 第二轮复核（W 报"设置页拖动缩放卡顿"）**：试过"只让当前页受管
+    （其余 `grid_remove`）"的变体，**同进程 A/B 实测零收益**（123.8 vs 125.5 ms/档）
+    —— 隐藏页的控件本来就不参与缩放重排（隔离实测：+4 个隐藏页 / 180 控件 = 0 成本），
+    故**维持叠放常驻**。真正的残因与数据见 `08` §10.4 / 坑 171。
 
     只做几何与可见性，不碰滚动、不碰内容 —— 那些仍归 `ScrollPage`。
     """
@@ -1046,6 +1051,9 @@ class PageStack(object):
         """显示某一页（提到最前）。这一页没被add 过就先add。
 
         **不触发几何重算** —— 这是本类存在的全部意义。
+        （2026-10-08 复核过"只让当前页受管（其余 `grid_remove`）"的替代方案：
+        同进程 A/B 实测**无收益** —— 隐藏页的控件本来就不参与缩放重排，
+        见类注释与 `08` §10.4。）
         """
         if frame not in self._frames:
             self.add(frame)
@@ -1063,10 +1071,11 @@ class PageStack(object):
         return list(self._frames)
 
     def is_current(self, widget):
-        """`widget` 是否属于当前页 —— **取代 `winfo_ismapped()` 判当前页**。
+        """`widget` 是否属于当前页 —— **判"当前页"的唯一判据**。
 
-        叠放后所有页都 mapped，`winfo_ismapped` 不再能区分"当前页"。
-        调用方（自检、页内逻辑）判断页归属一律走这里。
+        页面共格叠放（且非当前页 `grid_remove`），`winfo_ismapped` 分不清
+        "属于哪一页"（它只说明"现在有没有显示"）。调用方（自检、页内逻辑）
+        判断页归属一律走这里。
         """
         cur = self._current
         if cur is None or widget is None:
@@ -1097,7 +1106,9 @@ class ScrollPage(object):
         wrap.pack(fill="both", expand=True)
         self.canvas = tk.Canvas(wrap, highlightthickness=0, borderwidth=0,
                                 background=bg)
-        self.bar = ttk.Scrollbar(wrap, orient="vertical", command=self.canvas.yview)
+        # 滚动条走 theme 工厂：自建「原生元素」样式，重绘成本 ~25× 低 ——
+        # 这是设置页 / 管理本地模型窗口拖动缩放卡顿的修复（2026-10-08，`08` §10）
+        self.bar = theme.scroll(wrap, orient="vertical", command=self.canvas.yview)
         self.inner = tk.Frame(self.canvas, background=bg)
         self._win = self.canvas.create_window((0, 0), window=self.inner, anchor="nw")
         self.canvas.configure(yscrollcommand=self.bar.set)
@@ -1133,11 +1144,11 @@ class ScrollPage(object):
         return self._stack.current
 
     def is_current(self, widget):
-        """`widget` 是否在当前页里。
+        """`widget` 是否在当前页里 —— 判"当前页"的唯一判据。
 
-        ⚠ 叠放后**所有页都 `ismapped`**，"当前页"只能这么判 —— 判 `winfo_ismapped()`
-        会把所有页都算进去（自检 `test_settings_layout.py` 原先就是这么筛的，
-        已随本次改造改成走这里）。
+        ⚠ 别改用 `winfo_ismapped()`：页面共格叠放，非当前页只是 unmapped，
+        而"属于哪一页"要按 `PageStack._current` 的归属走（自检
+        `test_settings_layout.py` 全量走这里）。
         """
         return self._stack.is_current(widget)
 
