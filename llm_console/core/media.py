@@ -17,6 +17,7 @@ docs/flux.md、docs/wan.md 与 `sd-cli --help` 的原文（开发机没实测过
 """
 
 import os
+import re
 import shlex
 
 from . import config, sdprofile
@@ -37,24 +38,50 @@ DEFAULT_VIDEO_NEG_PROMPT = ("worst quality, low quality, blurry, distorted, defo
                             "watermark, text, static, jittery")
 
 
+# 分辨率写法判读（W 2026-10-09）：设置页的写法归一与本地 / 云端发送侧共用这一份。
+# 认半角 x/X 与 * ＊ × ，, （全角变体一并归一），全角数字也认，分隔符两侧空白忽略。
+_SIZE_FIX = str.maketrans({
+    "０": "0", "１": "1", "２": "2", "３": "3", "４": "4",
+    "５": "5", "６": "6", "７": "7", "８": "8", "９": "9",
+    "Ｘ": "x", "ｘ": "x", "×": "x", "＊": "*", "，": ",",
+})
+_SIZE_RE = re.compile(r"(\d+)\s*[x*,]\s*(\d+)")
+
+
+def parse_size(text):
+    """分辨率写法判读 → `(宽, 高)`，不合格返回 None。
+
+    「832x480 / 832X480 / 832 x 480 / 832*480 / 1024×1024 / 1024＊1024 /
+    ８３２ｘ４８０ / 832，480」都认；「768」这类缺分隔的、解析不出两个正整数的
+    （含 0 / 负数 / 多段）都是 None。以前只认半角 x，其余写法在发送侧被静默回退
+    默认档（坑 183）——现在四个分辨率输入框（本地生图 / 生视频、云端出图尺寸 /
+    视频分辨率）的守卫与发送侧都走这里，判据只有这一份。
+    """
+    s = str(text or "").strip().lower().translate(_SIZE_FIX)
+    m = _SIZE_RE.fullmatch(s)
+    if not m:
+        return None
+    w, h = int(m.group(1)), int(m.group(2))
+    return (w, h) if w > 0 and h > 0 else None
+
+
 def _wh(size, fallback, multiple=1):
-    """解析 "宽x高"；非法值回退默认档（用户手填坏值时别让发送链路崩掉丢输入）。
+    """解析 "宽x高"（写法见 `parse_size`，* ，× 全角都认）；非法值回退默认档
+    （用户手填坏值时别让发送链路崩掉丢输入；界面侧会在框后亮红字提示，见
+    settings._size_entry —— 这里只兜底，不报错）。
 
     `multiple` 是这一族要求的尺寸对齐（SD 系 8、Flux/SD3/Wan 16、LTX 32）：
     不对齐时**向上**补到最近的倍数——引擎多半直接报错，替用户改一下比失败一次好，
     而 1024x1024 / 512x512 这些常用档本来就是 8/16 的倍数，不会被改动。
     """
-    try:
-        w, h = str(size).lower().split("x", 1)
-        w, h = int(w.strip()), int(h.strip())
-        if w > 0 and h > 0:
-            m = max(1, int(multiple or 1))
-            if m > 1:
-                w = w + (-w % m)
-                h = h + (-h % m)
-            return str(w), str(h)
-    except Exception:
-        pass
+    p = parse_size(size)
+    if p:
+        w, h = p
+        m = max(1, int(multiple or 1))
+        if m > 1:
+            w = w + (-w % m)
+            h = h + (-h % m)
+        return str(w), str(h)
     fw, fh = fallback.split("x")
     return fw, fh
 

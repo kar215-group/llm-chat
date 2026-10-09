@@ -79,6 +79,7 @@ class SubWindowMixin:
         win = tk.Toplevel(host)
         win.withdraw()          # 先藏起来，摆正了再显示（否则左上角闪一下）
         win.title("成本估算 · 云端%s" % _kind_name)
+        theme.style_toplevel(win)   # 经典背景 + 标题栏两件套（坑 186）
         win.geometry("620x470")
         win.minsize(560, 420)
         win.transient(host)
@@ -248,6 +249,7 @@ class SubWindowMixin:
         win = tk.Toplevel(host)
         win.withdraw()          # 先藏起来，摆正了再显示（否则左上角闪一下）
         win.title("诊断")
+        theme.style_toplevel(win)   # 经典背景 + 标题栏两件套（坑 186）
         # 6 行路径 + 16 行结果框 + 一排四个按钮：实测 660 高会把按钮那排裁掉半截
         # （截图量出来的，不是估的），给到 740 才全露出来
         win.geometry("760x740")
@@ -401,6 +403,7 @@ class SubWindowMixin:
         win = tk.Toplevel(host)
         win.withdraw()          # 先藏起来，摆正了再显示（否则左上角闪一下）
         win.title("发现新版本")
+        theme.style_toplevel(win)   # 经典背景 + 标题栏两件套（坑 186）
         W, H = 620, 520         # 一版正式公告约 18 行，560x430 装不下（滚动条是兜底不是常态）
         win.geometry("%dx%d" % (W, H))
         win.minsize(560, 440)

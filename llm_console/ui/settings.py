@@ -21,6 +21,31 @@ from ..connection import cloud
 from . import theme
 from . import widgets
 
+# 分辨率写法警示（坑 183，W 2026-10-09 定）：不合格值**不拦发送**（发送侧照旧回退
+# 默认档 / 不送该参数），红字只负责把「静默回退」变成看得见。文案是 W 原话
+# 「写法不合格，请填入"X*Y"格式」按 hint 位宽度精简的版本：
+#   · 宽高语义的框（本地生图 / 生视频、云端生图）用带格式提示的长文案；
+#   · 云端「生图 / 生视频」那屏是左右两列（坑 113），红字比常态 hint 宽会**把右列
+#     整体右推** —— 实测量过（2026-10-09）：左列长文案 +117px、那屏列尾只剩 74px
+#     预算，两处同时亮长文案会出界 22px。所以那屏两个框都收短成「写法不合格」；
+#   · 云端视频分辨率的框（两处）也用短文案：档位标签（720P）是合法写法，
+#     "填 X*Y" 的提示对它本就半对半错，示例留在该行 "?" 气泡里。
+SIZE_WARN = "写法不合格，填 X*Y"
+SIZE_WARN_RES = "写法不合格"
+
+
+def _vidres_allow(t):
+    """云端视频分辨率的档位写法放行：720P / 1080P / 2K 这类标签与自由文本照旧交
+    发送侧（认不出就不送，见 cloud_media.video_body）；留空合法；纯数字（含全角，
+    多半是漏了分隔）与「带了宽高分隔符却解析不出」才算写法不合格。"""
+    t = str(t).strip()
+    if not t:
+        return True
+    if t.isdigit():                     # isdigit 认全角数字：768 / ７６８ 都算没写完整
+        return False
+    return not any(ch in "xXｘＸ*＊×，," for ch in t)
+
+
 # ---------------------------------------------------------------------------
 # 左栏导航（v39）：组 → 子组 → 叶子，叶子指向"哪个页面的哪个区块"。
 #
@@ -547,16 +572,27 @@ class SettingsMixin:
         win = tk.Toplevel(self.root)
         self._settings_win = win
         win.title("设置")
+        # 经典背景 + DWM 标题栏 / 框线两件套收在 theme.style_toplevel（坑 184/186）
+        theme.style_toplevel(win)
         # 实测（DPI-aware，scaling≈2.0）滚动内容最宽一行需要 789px，左栏 232 + 边距
         # → 最小宽取 1080：横向不能滚，缩一点就是"右边那半截永远看不见"
         # 默认宽 1160（W 2026-10-03 要求"适当调大"）：1080 下实测内容最右到 1070、
         # 只剩 10px 余量；「模型族」那类"下拉 + 右侧状态回显"同排的版式最怕这个余量
         # （见 13坑 76）。**只加宽、不加高**：1366x768 扣任务栏约 728 可用，
         # 740 的高度已经贴边，加高会把按钮那排挤出屏幕。
-        win.geometry("1160x740")
+        #
+        # 位置（W 2026-10-09 定两条）：① 首次打开"与主页面位置保持一致"= 主窗当前
+        # 左上角（原来不给位置 → Windows 把 Toplevel 丢在屏幕左上角）；② 重建路径
+        # （切主题 / 切用户模式）在 destroy 前把当前几何存进 `_settings_geom`，这里
+        # 消费它**原地恢复**（尺寸也一起，用户拖动 / 缩放过的位置不丢）。
+        _g = str(getattr(self, "_settings_geom", "") or "")
+        if _g:
+            self._settings_geom = ""
+            win.geometry(_g)
+        else:
+            win.geometry("1160x740+%d+%d" % (self.root.winfo_x(), self.root.winfo_y()))
         win.minsize(1080, 600)
         win.transient(self.root)
-        theme.set_window_frame(win)     # 深色时标题栏 / 窗框一起翻深（W 2026-10-09）
 
         # ---- 固定外框 ----
         # 底部按钮条**先**按 side="bottom" 入列：pack 按入列顺序分配空间，先入列的保住自己，
@@ -617,6 +653,14 @@ class SettingsMixin:
         # （叠放实现里所有页都ismapped，`winfo_ismapped()` 不再能区分 —— 见
         # widgets.PageStack 类注释）。自检也按这个判据筛当前页。
         self._settings_sp = sp
+        # 拖动缩放"渲染跟在后面"（W 2026-10-10 批的方案 A，08 §10.7）：拖动期把
+        # 整个滚动区摘出布局（只剩左栏 + 底部按钮条外壳，实测 326.6 → 23.1 ms/档），
+        # 停手 300ms 装回一次。摘/装的 pack 参数照 ScrollPage.__init__ 那两行。
+        self._settings_gate = widgets.ResizeDeferGate(
+            win,
+            lambda: (sp.canvas.pack_forget(), sp.bar.pack_forget()),
+            lambda: (sp.bar.pack(side="right", fill="y"),
+                     sp.canvas.pack(side="left", fill="both", expand=True)))
 
         # ---- 「高级参数」折叠区（设置页分层）----
         # 口径：把"族相关 / 高级"参数默认收起来，页面只剩常用的那几项；控件**照旧建**
@@ -710,7 +754,8 @@ class SettingsMixin:
                 return build
             return deco
 
-        def _row(parent, rows, label, widget, desc, hint="", lw=14, fold=None):
+        def _row(parent, rows, label, widget, desc, hint="", lw=14, fold=None,
+                 hint_var=None):
             """一行：标签（旁边挂 "?"）/ 控件 / 短摘要。
 
             v39 起灰色长说明**不再内联**（它把窗口撑到 1020 宽、还把版面切成三段），
@@ -725,6 +770,9 @@ class SettingsMixin:
 
             `fold` 给一个折叠组名时，这一行的三格（标签 / 控件 / 摘要）会一起登记进那一组，
             并按当前状态收起 —— 只是 `grid_remove()` 挪格子，控件与它的值都还在。
+
+            `hint_var`（坑 183）：给一个 StringVar 时摘要格挂 textvariable，行外可以
+            换文案与样式（分辨率框的红字警示走这条路）；返回摘要格的句柄，没有则 None。
             """
             i = rows["i"]
             rows["i"] += 1
@@ -744,10 +792,15 @@ class SettingsMixin:
                 lab.grid(row=i, column=0, sticky="w", padx=(0, 8), pady=5)
             widget.grid(row=i, column=1, sticky="w", padx=(0, 10), pady=5)
             cell = None
-            if hint:
+            if hint or hint_var is not None:
                 # 摘要同样不套 Frame（原来 Frame 里就一个 Label）
-                cell = ttk.Label(parent, text=hint, style="Dim.TLabel",
-                                 font=("Microsoft YaHei UI", 9))
+                if hint_var is not None:
+                    cell = ttk.Label(parent, textvariable=hint_var,
+                                     style="Dim.TLabel",
+                                     font=("Microsoft YaHei UI", 9))
+                else:
+                    cell = ttk.Label(parent, text=hint, style="Dim.TLabel",
+                                     font=("Microsoft YaHei UI", 9))
                 cell.grid(row=i, column=2, sticky="w", pady=5)
             if fold:
                 grp = folds.setdefault(fold, [])
@@ -757,24 +810,67 @@ class SettingsMixin:
                 # 登记后立刻按当前状态摆 / 收 —— 不能无条件 grid_remove：
                 # 会话里展开过的组，重开设置窗时本来就该是展开的
                 _render_fold(fold)
+            return cell
 
-        def row(parent, rows, label, widget, desc, hint="", lw=14, fold=None):
-            return _row(parent, rows, label, widget, desc, hint, lw, fold)
+        def row(parent, rows, label, widget, desc, hint="", lw=14, fold=None,
+                hint_var=None):
+            return _row(parent, rows, label, widget, desc, hint, lw, fold, hint_var)
 
         def ent(parent, rows, key, label, desc, width=8, var=None, trace=None, hint="",
-                lw=14, fold=None):
+                lw=14, fold=None, hint_var=None):
             """一行"标签 + 输入框"，说明在标签旁的 "?" 里。
 
             key 非空时变量登记进 v（由 _apply_settings 统一写回 cfg）；
             传 var 则用外部变量（云端服务商那几项是结构化数据，自己管保存，
             不走 _apply_settings）。trace 用于即时联动（如回显请求地址）。
+            返回 (输入框, 摘要格) —— 摘要格可能为 None；旧调用方都不接返回值。
             """
             if var is None:
                 var = v.setdefault(key, tk.StringVar(value=str(self.cfg.get(key, ""))))
             e = theme.entry(parent, textvariable=var, width=width)
             if trace is not None:
                 var.trace_add("write", lambda *a: trace())
-            _row(parent, rows, label, e, desc, hint, lw, fold)
+            cell = _row(parent, rows, label, e, desc, hint, lw, fold, hint_var)
+            return e, cell
+
+        def _size_entry(parent, rows, key, label, desc, width=12, hint="", lw=14,
+                        fold=None, allow=None, warn_text=None):
+            """分辨率类输入框（坑 183，W 2026-10-09）：写法守卫挂在**失焦**上。
+
+            · 能解析成 宽x高 的写法（x/X/*/＊/×/，/,/全角数字，判据只有
+              core.media.parse_size 这一份）失焦时归一成半角 x 显示 ——
+              832*480 填进去，走开就变成 832x480；
+            · 解析不出又不在 `allow` 例外的（云端出图尺寸的 16:9 比例、
+              云端视频分辨率的 720P 档位）就在框后那格（hint 位）挂红字警示。
+              **只提示不拦发送**：发送侧不合格值照旧回退默认档 / 不送该参数
+              （W 2026-10-09 定），红字把「静默回退」变成看得见。
+            开窗时对存量值也做一次同样的事（老配置里可能存着 1024*1024 这类）。
+            """
+            var = v.setdefault(key, tk.StringVar(value=str(self.cfg.get(key, ""))))
+            hvar = tk.StringVar(value=hint)
+            e, cell = ent(parent, rows, key, label, desc, width=width, var=var,
+                          hint=hint, hint_var=hvar, lw=lw, fold=fold)
+            bad_text = warn_text or SIZE_WARN
+
+            def _bad(t):
+                return media.parse_size(t) is None and not (allow(t) if allow else False)
+
+            def _refresh():
+                if _bad(var.get()):
+                    cell.configure(style="ErrLit.TLabel")
+                    hvar.set(bad_text)
+                else:
+                    cell.configure(style="Dim.TLabel")
+                    hvar.set(hint)
+
+            def _leave(_e=None):
+                p = media.parse_size(var.get())
+                if p is not None and "%dx%d" % p != var.get():
+                    var.set("%dx%d" % p)
+                _refresh()
+
+            e.bind("<FocusOut>", _leave)
+            _leave()
 
         # ---- 区块 1：本地文本模型 / 生成参数 ----
         @section("local_text", "gen")
@@ -931,8 +1027,9 @@ class SettingsMixin:
                 # 普通用户模式（2026-10-07 W 定）：分辨率 + 输出目录 + 打开输出目录 三件；
                 # 引擎目录 / 模型文件夹 / 模型族 / 步数 / CFG 与全部配套件都在高级模式
                 # （程序按扫描与模型族表自动安排，普通用户不需要碰）。
-                ent(t3, r3, "img_size", "分辨率",
-                    "宽x高，如 1024x1024。分辨率越高越慢。会自动补到本族要求的倍数"
+                _size_entry(t3, r3, "img_size", "分辨率",
+                    "宽x高，如 1024x1024；填 832*480、832，480 也认，会自动归一成 x。"
+                    "分辨率越高越慢。会自动补到本族要求的倍数"
                     "（SD 系 8 的倍数、Flux/SD3/Wan 16 的倍数），不合适的尺寸会被抬上去。",
                     width=12, hint="宽x高")
                 ent(t3, r3, "img_output_dir", "输出目录",
@@ -1007,8 +1104,9 @@ class SettingsMixin:
                 "默认采样步数（4~50）：少 = 快、多 = 细节更多，耗时大致与步数成正比"
                 "（8 步与 20 步差两倍多）。具体到某个模型族的推荐值，看它自己页面的说明。",
                 hint="8 步最快")
-            ent(t3, r3, "img_size", "默认分辨率",
-                "宽x高，如 1024x1024。分辨率越高越慢。会自动补到本族要求的倍数"
+            _size_entry(t3, r3, "img_size", "默认分辨率",
+                "宽x高，如 1024x1024；填 832*480、832，480 也认，会自动归一成 x。"
+                "分辨率越高越慢。会自动补到本族要求的倍数"
                 "（SD 系 8 的倍数、Flux/SD3/Wan 16 的倍数），不合适的尺寸会被抬上去。",
                 width=12, hint="宽x高")
             ent(t3, r3, "img_cfg", "默认 CFG",
@@ -1096,8 +1194,9 @@ class SettingsMixin:
             if simple:
                 # 普通用户模式（2026-10-07 W 定）：分辨率 / 帧率 / 帧数 / 输出目录 /
                 # 打开输出目录 五件；主体文件 / 模型族 / 步数 / CFG 与全部配套件在高级模式。
-                ent(t3b, r3b, "vid_size", "分辨率",
-                    "宽x高，如 512x512。视频分辨率对显存和耗时都很敏感，先小后大。", width=12)
+                _size_entry(t3b, r3b, "vid_size", "分辨率",
+                    "宽x高，如 512x512；填 832*480、832，480 也认，会自动归一成 x。"
+                    "视频分辨率对显存和耗时都很敏感，先小后大。", width=12)
                 ent(t3b, r3b, "vid_fps", "帧率",
                     "每秒帧数。MiniMax-H3 的参考视频按 24fps 组织。")
                 ent(t3b, r3b, "vid_frames", "帧数",
@@ -1172,8 +1271,9 @@ class SettingsMixin:
                 vid_note.set("识别为：%s" % sdprofile.label_of(fid).split("（")[0])
 
             v["vid_family"].trace_add("write", refresh_vid_note)
-            ent(t3b, r3b, "vid_size", "分辨率",
-                "宽x高，如 512x512。视频分辨率对显存和耗时都很敏感，先小后大。", width=12)
+            _size_entry(t3b, r3b, "vid_size", "分辨率",
+                "宽x高，如 512x512；填 832*480、832，480 也认，会自动归一成 x。"
+                "视频分辨率对显存和耗时都很敏感，先小后大。", width=12)
             ent(t3b, r3b, "vid_frames", "帧数",
                 "视频长度 = 帧数 ÷ 帧率。**不需要自己凑 4n+1**：引擎会自行对齐到合法帧数"
                 "（例如填 17 会按 22 帧出片），估算时长也按对齐之后的算。",
@@ -1650,7 +1750,7 @@ class SettingsMixin:
             # ---------------- 密钥 ----------------
             def do_key_dialog():
                 d = tk.Toplevel(win)
-                d.configure(background=theme.c("panel"))   # 面板色与文字/容器同源（深色模式跟随）
+                theme.style_toplevel(d, "panel")   # 经典背景 + 标题栏两件套（坑 186）
                 d.withdraw()          # 先藏起来，摆正了再显示（否则左上角闪一下）
                 d.title("API Key")
                 d.transient(win)
@@ -1723,6 +1823,7 @@ class SettingsMixin:
                 d.withdraw()          # 先藏起来，摆正了再显示（否则左上角闪一下）
                 d.title("选择模型 · %s"
                         % (providers.get_provider(self.cfg, pid) or {}).get("name", pid))
+                theme.style_toplevel(d)
                 d.geometry("560x520")
                 d.minsize(500, 380)
                 d.transient(win)
@@ -1758,7 +1859,11 @@ class SettingsMixin:
 
                 wrap = ttk.Frame(d)
                 wrap.pack(side="top", fill="both", expand=True, padx=12)
-                cv = tk.Canvas(wrap, highlightthickness=0, borderwidth=0)
+                # 经典 Canvas 默认背景是**纯白**（不跟主题）：浅色主题下窗底是系统灰，
+                # 这块白就是"文字底下大量和底色不同的纯白"（W 2026-10-10 报）；深色下
+                # 更是一整块白。与 ScrollPage 同款，显式染主题 frame 底色。
+                cv = tk.Canvas(wrap, highlightthickness=0, borderwidth=0,
+                               background=widgets.default_bg())
                 sb = theme.scroll(wrap, orient="vertical", command=cv.yview)
                 cv.configure(yscrollcommand=sb.set)
                 sb.pack(side="right", fill="y")
@@ -2274,6 +2379,12 @@ class SettingsMixin:
                     status.set("验证结果：" + "；".join(lines)
                                + "。改完点「确定」才写入。")
 
+                # 拖动门控（W 2026-10-10）：云端模型清单长了拖动同样卡，做法与设置窗一致
+                widgets.ResizeDeferGate(
+                    d,
+                    lambda: (cv.pack_forget(), sb.pack_forget()),
+                    lambda: (sb.pack(side="right", fill="y"),
+                             cv.pack(side="left", fill="both", expand=True)))
                 widgets.center_on(d, win)   # 摆到设置页正中（控件都建完了，尺寸才量得准）
                 if fetch:
                     pull()
@@ -2424,8 +2535,14 @@ class SettingsMixin:
             mf.grid(row=r4b["i"], column=1 if not simple else 0,
                     columnspan=2 if not simple else 3, sticky="w", pady=(2, 4))
             r4b["i"] += 1
-            lb = tk.Listbox(mf, height=5, width=34, exportselection=False,
-                            font=("Microsoft YaHei UI", 9))
+            lb = theme.tint(tk.Listbox(mf, height=5, width=34, exportselection=False,
+                                       font=("Microsoft YaHei UI", 9),
+                                       background=theme.c("bg"),
+                                       foreground=theme.c("body")),
+                            fg="body", bg="bg")
+            # 经典 Listbox 默认**白底**（不跟主题）：浅色主题下窗底是系统灰，清单区
+            # 一片纯白就是 W 报的"文字底下大量和底色不同的纯白色"（深色下更刺眼）。
+            # tint 盖章的写法与整理预览的 Text 同款：切主题时 retint 重涂。
             if not simple:
                 lb.pack(side="left")
             # lb 在普通模式下不摆出来但**照建**：refresh_menu_list / do_remove_selected
@@ -2596,13 +2713,15 @@ class SettingsMixin:
                     row=0, column=0, columnspan=3, sticky="w", pady=(0, 4))
             rl, rr = {"i": 1}, {"i": 1}
 
-            ent(col_l, rl, "cloud_img_size", "出图尺寸",
-                "填「宽x高」或「宽*高」都行，发出去前会按这一家的写法换算："
+            _size_entry(col_l, rl, "cloud_img_size", "出图尺寸",
+                "填「宽x高」（832*480、832，480 这类分隔符也认，会自动归一成 x），"
+                "发出去前会按这一家的写法换算："
                 "阿里云 1024*1024、智谱与华为 1024x1024、MiniMax 换成比例（16:9）"
                 "或宽高两个整数。超出这一家允许的区间时，服务端会点名报错。"
                 "阿里云：qwen-image-3.0-pro 面积 512×512…2560×2560、"
                 "qwen-image-max 到 1664×1664、wan2.7-image 像素 589824…16777216。",
-                width=11, hint="宽x高", lw=8)
+                width=11, hint="宽x高", lw=8, warn_text=SIZE_WARN_RES,
+                allow=lambda t: ":" in str(t).replace("：", ":"))
             ent(col_l, rl, "cloud_img_negative", "生图负向词",
                 "选填。留空 = 不传该参数。", lw=8)
             ent(col_l, rl, "cloud_img_dir", "图片存放",
@@ -2627,12 +2746,13 @@ class SettingsMixin:
                 "生图按**张**计费：单价按模型填（元/张）。填了就在提交前报金额；"
                 "没填就明说「以账单为准」，不编数字。", lw=8)
 
-            ent(col_r, rr, "cloud_video_resolution", "视频分辨率",
+            _size_entry(col_r, rr, "cloud_video_resolution", "视频分辨率",
                 "各家档位不一样（阿里云/MiniMax 用 720P、1080P、768P、2K 这类标签，"
-                "智谱与华为用 1280x720 这种宽高）。"
+                "智谱与华为用 1280x720 这种宽高，*、，这类分隔符也认，会自动归一成 x）。"
                 "留空 = 不传这个参数，用服务端默认（阿里云 Token Plan 的 happyhorse "
                 "不传时按 1080P / 16:9 出）。不知道这一家允许什么时，留空最安全。",
-                hint="留空=默认", lw=8)
+                hint="留空=默认", lw=8, width=8, warn_text=SIZE_WARN_RES,
+                allow=_vidres_allow)
             ent(col_r, rr, "cloud_video_duration", "视频时长",
                 "秒。各家允许区间不同（超范围会被服务端点名报错，原话会显示在对话里）："
                 "happyhorse-1.1-t2v 是 **3~15 秒**；MiniMax Hailuo 官方页是 6/10 秒、"
@@ -2691,10 +2811,12 @@ class SettingsMixin:
         # SIMPLE_NAV_SPEC 里（tools/check_structure.py 的 [2] 段按两份规格一起判死区块）。
         @section("cloud_m", "cimg")
         def _t4e(t4e, r4e):
-            ent(t4e, r4e, "cloud_img_size", "分辨率",
-                "填「宽x高」或「宽*高」都行，发出去前会按这一家的写法换算；"
+            _size_entry(t4e, r4e, "cloud_img_size", "分辨率",
+                "填「宽x高」（832*480、832，480 这类分隔符也认，会自动归一成 x），"
+                "发出去前会按这一家的写法换算；"
                 "超出这一家允许的区间时，服务端会点名报错。",
-                width=11, hint="宽x高")
+                width=11, hint="宽x高",
+                allow=lambda t: ":" in str(t).replace("：", ":"))
             ent(t4e, r4e, "cloud_img_dir", "输出目录",
                 "云端生图的落地目录；留空 = 产物文件夹（程序目录下的「产物」）里的 云端\\image。",
                 width=30, hint="留空=产物文件夹")
@@ -2716,10 +2838,11 @@ class SettingsMixin:
 
         @section("cloud_m", "cvid")
         def _t4f(t4f, r4f):
-            ent(t4f, r4f, "cloud_video_resolution", "分辨率",
-                "各家档位不一样（720P、1080P 这类标签，或 1280x720 这种宽高）。"
+            _size_entry(t4f, r4f, "cloud_video_resolution", "分辨率",
+                "各家档位不一样（720P、1080P 这类标签，或 1280x720 这种宽高，"
+                "*、，这类分隔符也认，会自动归一成 x）。"
                 "留空 = 用服务端默认；不知道这一家允许什么时，留空最安全。",
-                hint="留空=默认")
+                hint="留空=默认", width=8, warn_text=SIZE_WARN_RES, allow=_vidres_allow)
             ent(t4f, r4f, "cloud_video_duration", "时长",
                 "秒。各家允许区间不同，超范围会被服务端点名报错（原话会显示在对话里）。"
                 "提交前一律弹一次确认，单价填过就报金额、没填就说明以账单为准。",
@@ -3279,7 +3402,7 @@ class SettingsMixin:
 
             def fill_token():
                 d = tk.Toplevel(win)
-                d.configure(background=theme.c("panel"))   # 面板色与文字/容器同源（深色模式跟随）
+                theme.style_toplevel(d, "panel")   # 经典背景 + 标题栏两件套（坑 186）
                 d.withdraw()                # 先藏起来，摆正了再显示（否则左上角闪一下）
                 d.title("GitHub 令牌")
                 widgets.panel_label(d, text="GitHub 令牌",
@@ -4180,6 +4303,11 @@ class SettingsMixin:
             cur = state.get("leaf") or ""
             keys = {it.get("key") for it in
                     _nav_leaves(_nav_items(self._dev_mode, new_simple))}
+            try:
+                # 原地重建（W 2026-10-09）：位置 / 尺寸都记下，open_settings 恢复
+                self._settings_geom = win.winfo_geometry()
+            except Exception:
+                self._settings_geom = ""
             win.destroy()
             self._settings_win = None
             self._settings_sp = None
@@ -4242,6 +4370,14 @@ class SettingsMixin:
         for k in STR_KEYS:
             if k in v:
                 c[k] = str(v[k].get()).strip()
+        # 分辨率类（坑 183）：x/X/*/＊/×/，/全角数字都认，存进配置前统一归一成半角 x
+        # ——「填入后改为 x 号显示」在保存这一刻也成立（失焦那一刻已归一过一次）。
+        # 不合格的写法照原样存（发送侧回落默认档，框后已有红字警示），保存不拦。
+        for k in ("img_size", "vid_size", "cloud_img_size", "cloud_video_resolution"):
+            if k in v:
+                _p = media.parse_size(c.get(k, ""))
+                if _p:
+                    c[k] = "%dx%d" % _p
         # 「model」不在 STR_KEYS 里，这里单独处理：留空 = 不动当前选择（否则选着云端模型时
         # 会被抹成切回本地）；非空 = 明确切到该本地模型，连带复位 model_provider（坑 146）。
         if "model" in v:

@@ -11,6 +11,7 @@
 只在 ui 层用（core / connection 不得依赖本模块），零第三方依赖。
 """
 
+import time as _time
 import tkinter as tk
 from tkinter import ttk
 
@@ -1310,6 +1311,98 @@ class ScrollPage(object):
             return self.canvas.winfo_width() > 1
         except Exception:
             return False
+
+
+# ---------------------------------------------------------------------------
+# 拖动缩放「渲染跟在后面」（W 2026-10-10 批的方案 A，评估数据见 08 §10.7）
+#
+# 动机：拖动窗口时 Tk 每来一次尺寸变化就把在场控件全部重排重绘一遍（重页
+# 实测 326 ms/档 ≈ 3fps，拖动就是幻灯片；cProfile 证明耗时全在 Tk/主题层，
+# 不在我们的回调）。而"从布局里摘掉的控件在拖动时零成本"早被实测证明
+# （§10.4 隔离实验：4 个隐藏页 180 个控件 +0ms）。方案 A 把这条用到当前内容上：
+# 拖动期把它摘出布局（拖动只带动外壳），停手 300ms 后装回、一次补齐渲染。
+# 实测（同进程 A/B）：设置窗 files 重页 326.6 → 23.1 ms/档；松手恢复 406ms 一次。
+#
+# 三个必须守住的边界（都有反例，别删）：
+#   · 首档必付：Tk 先重排、后通知绑定，所以拖动第一帧的 300ms 无法避免，
+#     摘的动作从第二档起才有意义（探针量到首档前后一致）；
+#   · 孤立大跳变不摘：最大化 / 程序化改尺寸是"单次大位移 + 长时间无事件"，
+#     摘了反而多付一次恢复（305+406 > 305）——判据见 RESIZE_JUMP_*；
+#   · after 挂在解释器上（坑 135）：窗口销毁不会取消它，回调必须自己
+#     查 winfo_exists 再动作。
+#
+# 回滚开关：`RESIZE_DEFER_ENABLED = False` 一处关掉（行为退回逐档实时渲染，
+# 探针 `_probe_deferred_render.py` 用 GATE=0 环境变量走的就是它）。
+# ---------------------------------------------------------------------------
+
+RESIZE_DEFER_ENABLED = True
+RESIZE_DEFER_MS = 300          # 尺寸静止多久算"停手"→ 装回内容
+RESIZE_JUMP_PX = 250           # 单次尺寸变化 ≥ 此值、且距上次尺寸事件 ≥ RESIZE_JUMP_GAP
+RESIZE_JUMP_GAP = 0.6          #   秒 → 视为"孤立大跳变"，不摘（见上面第二条边界）
+
+
+class ResizeDeferGate(object):
+    """给顶层窗口挂"拖动期摘内容、停手装回"。
+
+    `forget` / `restore` 由挂载点提供（各自知道摘哪几个控件、pack 参数是什么）；
+    本类只管事件判据与计时。挂载点越少越好——目前只有主窗聊天区与设置窗滚动区。
+    """
+
+    def __init__(self, win, forget, restore, after_ms=None):
+        self.win = win
+        self._forget = forget
+        self._restore = restore
+        self._after_ms = int(after_ms or RESIZE_DEFER_MS)
+        self._pending = False      # 已摘出、等装回
+        self._last_wh = None
+        self._last_ts = 0.0
+        self._job = None
+        win.bind("<Configure>", self._on_conf, add="+")
+
+    def _on_conf(self, event):
+        if not RESIZE_DEFER_ENABLED:
+            return
+        if event.widget is not self.win:
+            return                              # 子控件的 Configure 是另一回事
+        wh = (int(event.width), int(event.height))
+        if self._last_wh is None:
+            self._last_wh, self._last_ts = wh, _time.monotonic()
+            return                              # 首帧：只记基线
+        if wh == self._last_wh:
+            # 尺寸没变 = 移动窗口（x/y 变化）——不参与门控，也不刷新"停手"计时器
+            return
+        dw = abs(wh[0] - self._last_wh[0])
+        dh = abs(wh[1] - self._last_wh[1])
+        now = _time.monotonic()
+        jump = ((dw + dh) >= RESIZE_JUMP_PX
+                and (now - self._last_ts) >= RESIZE_JUMP_GAP)
+        self._last_wh, self._last_ts = wh, now
+        if jump and not self._pending:
+            return                              # 孤立大跳变：照旧一次性重排，不摘
+        if not self._pending:
+            self._pending = True
+            try:
+                self._forget()
+            except Exception:
+                self._pending = False
+                return
+        if self._job is not None:
+            try:
+                self.win.after_cancel(self._job)
+            except Exception:
+                pass
+        self._job = self.win.after(self._after_ms, self._restore_now)
+
+    def _restore_now(self):
+        self._job = None
+        if not self._pending:
+            return
+        self._pending = False
+        try:
+            if self.win.winfo_exists():
+                self._restore()
+        except Exception:
+            pass
 
 
 def center_on(win, host=None, size=None):

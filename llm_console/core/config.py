@@ -30,7 +30,7 @@ CONFIG_PATH = os.path.join(APP_DIR, "gui_config.json")
 
 # 版本号：发版时改这一处（--selfcheck / --version 会打印它）。
 # GitHub Release 的 tag 要与它一致（tag 去掉开头的 v），Actions 工作流会做一致性校验。
-APP_VERSION = "1.1.1"
+APP_VERSION = "1.2.0"
 
 CFG_VERSION = 3
 
@@ -190,7 +190,8 @@ DEFAULT_CONFIG = {
     # 一次、输出栏说一次；文件删掉后由扫描侧剪枝。手改服务参数里的显存/内存后想重新评估，
     # 用「模型文件与引擎 → 全部重新计算」清空它。
     "perf_reported": {},
-    "cloud_img_size": "1024*1024",     # 界面按「宽x高」填，发出去前按各家写法换算
+    "cloud_img_size": "1024x1024",     # 界面按「宽x高」填（* ，× 等分隔符也认，自动归一成
+                                       # x，见 core.media.parse_size），发出去前按各家写法换算
     "cloud_img_negative": "",
     "cloud_video_resolution": "",      # 空 = 不传该参数，用服务端默认（各家档位不一样）
     "cloud_video_duration": 5,         # 秒；各家允许区间不同，超范围会被服务端点名报错

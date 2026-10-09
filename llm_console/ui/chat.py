@@ -326,13 +326,24 @@ class ChatMixin:
         return self._file_icon("DOC", px), False
 
     def _file_icon(self, which, px):
+        """内嵌样图 → PhotoImage（按主题选色：深色下用 `*_DARK` 浅线版，坑 185）。
+
+        IMG 占位图没有 DARK 版（它对深色底的观感留待有反馈再说），取不到就回
+        浅色版。`tk.PhotoImage(data=)` 加载失败（TclError）时瓷砖空着 —— 这份 Tk
+        没编进 PNG 支持，别为它崩掉整条。
+        """
         from . import file_icons
-        b64 = getattr(file_icons,
-                      "%s_PNG_B64%s" % (which, "_BIG" if px >= 96 else ""))
+        big = "_BIG" if px >= 96 else ""
+        dark = "_DARK" if theme.mode() == "dark" else ""
+        b64 = getattr(file_icons, "%s_PNG_B64%s%s" % (which, big, dark), None)
+        if b64 is None:
+            b64 = getattr(file_icons, "%s_PNG_B64%s" % (which, big), None)
+        if b64 is None:
+            return None
         try:
             return tk.PhotoImage(data=b64)
         except tk.TclError:
-            return None     # 这份 Tk 没编进 PNG 支持：瓷砖空着，别为它崩掉整条
+            return None
 
     def _tile_tip(self, kind, path, fallback):
         """悬停内容：完整文件名 + 体量/行数 —— 条上的名字是缩短过的，全名在这里。"""

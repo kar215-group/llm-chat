@@ -152,6 +152,7 @@ class PromptOptMixin:
         """「已有优化结果，是否再次优化？」→ "reuse" / "again" / None（取消）。"""
         win = tk.Toplevel(self.root)
         win.title("提示词优化")
+        theme.style_toplevel(win)   # 经典背景 + 标题栏两件套（坑 186）
         win.resizable(False, False)
         win.withdraw()
         win.transient(self.root)
@@ -436,7 +437,11 @@ class PromptOptMixin:
         if not out:
             return
         row = self._opt_rows.get(strategy)
-        if row is None:
+        if row is None or row.get("ok"):
+            # 成功行没有重试入口（按钮只在失败行 pack）——这里的 ok 守卫是防「成功的
+            # 行被任何非用户路径再点一次重试」：重试成功后再补发一次会把一次会话多
+            # 花一路的钱。2026-10-10 实测到一条"迟到命令落到重试按钮"的合成事件
+            # 场景（坑 182 同族），产品语义上该忽略就忽略。
             return
         text = self._opt_original
         scen = self._opt_scenario or out.get("scenario") or "text"

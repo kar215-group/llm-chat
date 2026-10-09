@@ -34,11 +34,11 @@ apply() 空操作、取色返回引入前的原值、控件工厂退回原生 tt
 THEME_NAME = "cosmo"             # 浅色主题（默认）
 DARK_THEME_NAME = "nord-dark"     # 深色主题（2026-10-08 W 拍板打样；候选见文件头）
 
-# ---- 发版临时屏蔽（v1.1.1；W 2026-10-09 定：深色模式下一步再开发）--------------
+# ---- 发版临时屏蔽（v1.1.1 已发布时置 True；W 2026-10-09 定：深色模式下一步再开发）----
 # True = 屏蔽深色模式：resolve_mode 一律返回 light（跟随系统也只是浅色）、设置页
 # 不建「界面主题」下拉、外观页的 help 文案同步换短版。机制本体（set_mode / 深色
 # 贴图 / DWM 等）全部保留，改回 False 一处即完整恢复（settings 与自检都按它分岔）。
-RELEASE_LIGHT_ONLY = True
+RELEASE_LIGHT_ONLY = False
 
 # ---- 圆角按钮贴图几何（物理像素）----
 BTN_H = 34        # 贴图高 = 按钮高（对齐 vista 主题按钮的 34px，2.x 默认 44px）
@@ -375,6 +375,26 @@ def set_window_frame(win):
         win.bind("<Map>", lambda _e, w=win: _dwm_frame_now(w), add="+")
     except Exception:
         pass
+
+
+def style_toplevel(win, bg_key="bg"):
+    """**每个 Toplevel 建完必调**：经典背景染主题色 + 标题栏 / 框线翻深。
+
+    两件事收在一处（坑 184 是前一件、深色标题栏是后一件）：
+      · 经典 Toplevel 的背景是 SystemButtonFace（#f0f0f0）**不跟主题** —— 深色下
+        内容件与窗缘之间那圈 pack 边距把它露出来，就是"最外层一圈白边"；
+      · OS 画的标题栏 / 1px 框线要 DWM 属性才翻深（set_window_frame 的活）。
+    为什么必须有这个入口：2026-10-10 W 报"次级窗大量深色 bug"—— 上一轮只在
+    设置窗修了这两件事，**九个次级窗全部漏接**（坑 186 的教训：修复要收口 + 拉
+    全清单）。新窗一律走这里，别再手写两行。
+    `bg_key`：窗内主体是 ttk 面板（Frame/Label，底色=主题 bg）用默认 "bg"；
+    填写类小对话（内容走 panel_label 面板色）传 "panel"。
+    """
+    try:
+        win.configure(background=c(bg_key))
+    except Exception:
+        pass
+    set_window_frame(win)
 
 
 def default_accent():

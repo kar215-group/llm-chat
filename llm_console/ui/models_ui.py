@@ -427,6 +427,7 @@ class ModelsMixin:
         win = tk.Toplevel(host)
         win.withdraw()          # 先藏起来，摆正了再显示（否则左上角闪一下）
         win.title("管理本地模型")
+        theme.style_toplevel(win)   # 经典背景 + 标题栏两件套（坑 186）
         # 780 宽（W 2026-10-06）：640 时"勾选框 + 文件名 + 右侧说明"这种长行被压得
         # 只剩截断；窗口行有 fit_text 兜底（<Configure> 按新宽度重裁），加宽即恢复全文
         win.geometry("780x560")
@@ -477,6 +478,13 @@ class ModelsMixin:
                    command=hide_companions).pack(side="right")
 
         page = widgets.ScrollPage(win)
+        # 拖动门控（W 2026-10-10）：与设置窗同款，拖动期把滚动区摘出布局。
+        # 这个窗实测 ~114ms/档（08 §10.6 残留），是门控推广的第一对象。
+        widgets.ResizeDeferGate(
+            win,
+            lambda: (page.canvas.pack_forget(), page.bar.pack_forget()),
+            lambda: (page.bar.pack(side="right", fill="y"),
+                     page.canvas.pack(side="left", fill="both", expand=True)))
         body = ttk.Frame(page.inner)
         page.set_page(body)
 
@@ -883,6 +891,7 @@ class ModelsMixin:
         d = tk.Toplevel(host)
         d.withdraw()                    # 先藏起来，摆正了再显示（否则左上角闪一下）
         d.title("手动定向模型")
+        theme.style_toplevel(d)   # 经典背景 + 标题栏两件套（坑 186）
         ttk.Label(d, text="加入一个模型来源（只登记路径，不移动文件）",
                   font=("Microsoft YaHei UI", 10, "bold")).pack(
             anchor="w", padx=14, pady=(12, 2))
@@ -972,6 +981,7 @@ class ModelsMixin:
         dlg = tk.Toplevel(self.root)
         dlg.withdraw()          # 同上
         dlg.title("整理模型文件夹 - 预览")
+        theme.style_toplevel(dlg)   # 经典背景 + 标题栏两件套（坑 186）
         dlg.geometry("780x520")
         dlg.transient(self.root)
         txt = theme.tint(tk.Text(dlg, font=("Consolas", 9), wrap="none",

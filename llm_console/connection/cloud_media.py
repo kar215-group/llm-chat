@@ -43,7 +43,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-from ..core import capability, config, providers
+from ..core import capability, config, media, providers
 from . import cloud
 
 PROTOCOL_ALIYUN = "aliyun"
@@ -549,10 +549,17 @@ def _dest_paths(dest, urls):
 def _size_for(protocol, size):
     """尺寸写法各家不同，界面统一填 "宽x高"（或留空），这里翻成各家要的形态：
       阿里云 1024*1024 · MiniMax 收 aspect_ratio（16:9）或 width/height 两个整数 ·
-      智谱/华为 1024x1024。返回要塞进 body 的 (键, 值) 列表，可能是 0 项或 2 项。"""
-    s = str(size or "").strip().lower().replace("*", "x")
-    if not s:
+      智谱/华为 1024x1024。返回要塞进 body 的 (键, 值) 列表，可能是 0 项或 2 项。
+    分隔符写法与本地链路同一份判据（media.parse_size，坑 183：* ，× 全角都认，
+    先归一成 x 再按家换算），比例写法（16:9，含全角冒号）原样交各家判定。"""
+    raw = str(size or "").strip()
+    if not raw:
         return []
+    parsed = media.parse_size(raw)
+    if parsed:
+        s = "%dx%d" % parsed
+    else:
+        s = raw.lower().replace("：", ":")
     if protocol == PROTOCOL_ALIYUN:
         return [("size", s.replace("x", "*"))]
     if protocol in (PROTOCOL_ZHIPU, PROTOCOL_HUAWEI):
@@ -887,9 +894,14 @@ def video_body(model, prompt, resolution="", duration=0, ratio="", seed=-1,
     阿里云 parameters.{resolution,ratio,duration}、MiniMax v1 只有 resolution/duration、
     MiniMax v2 是 content[] + resolution/duration/ratio、智谱用 size、华为嵌套 parameters.size。
     界面填的"分辨率"可能是 720P 也可能是 1280x720 —— 认不出来的形式就**不送**，
-    让服务端用它自己的默认档，别把猜的值发上去（发了也只换来一个看不懂的 400）。"""
+    让服务端用它自己的默认档，别把猜的值发上去（发了也只换来一个看不懂的 400）。
+    宽高写法与本地链路同一份判据（media.parse_size，坑 183）：智谱 / 华为送 size 前
+    先把 * ，× 全角等分隔符归一成 x；档位标签（720P）各家原样送。"""
     res = str(resolution or "").strip()
-    sized = "x" in res.lower()
+    wh = media.parse_size(res)
+    sized = wh is not None or "x" in res.lower()
+    # 认得出宽高的（含 * ，× 全角写法）一律送归一后的 1280x720；档位标签（720P）原样送。
+    res_out = ("%dx%d" % wh) if wh else res
     try:
         dur = int(duration or 0)
     except Exception:
@@ -897,7 +909,7 @@ def video_body(model, prompt, resolution="", duration=0, ratio="", seed=-1,
     if protocol == PROTOCOL_MINIMAX and _mm_v2(model):
         body = {"model": model, "content": [{"type": "text", "text": prompt}]}
         if res:
-            body["resolution"] = res
+            body["resolution"] = res_out
         if dur:
             body["duration"] = dur
         if ratio:
@@ -907,7 +919,7 @@ def video_body(model, prompt, resolution="", duration=0, ratio="", seed=-1,
     if protocol == PROTOCOL_MINIMAX:
         body = {"model": model, "prompt": prompt}
         if res:
-            body["resolution"] = res
+            body["resolution"] = res_out
         if dur:
             body["duration"] = dur
         body.update(extra or {})
@@ -915,7 +927,7 @@ def video_body(model, prompt, resolution="", duration=0, ratio="", seed=-1,
     if protocol == PROTOCOL_ZHIPU:
         body = {"model": model, "prompt": prompt}
         if sized:
-            body["size"] = res.lower()
+            body["size"] = ("%dx%d" % wh) if wh else res.lower()
         if dur:
             body["duration"] = dur
         body.update(extra or {})
@@ -923,7 +935,7 @@ def video_body(model, prompt, resolution="", duration=0, ratio="", seed=-1,
     if protocol == PROTOCOL_HUAWEI:
         p = {}
         if sized:
-            p["size"] = res.lower()
+            p["size"] = ("%dx%d" % wh) if wh else res.lower()
         if dur:
             p["duration"] = dur
         try:
@@ -942,7 +954,7 @@ def video_body(model, prompt, resolution="", duration=0, ratio="", seed=-1,
         body["input"]["negative_prompt"] = neg
     p = {}
     if res:
-        p["resolution"] = res
+        p["resolution"] = res_out
     if ratio:
         p["ratio"] = ratio
     if dur:

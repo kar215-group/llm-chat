@@ -18,6 +18,7 @@ class ExitDialog(tk.Toplevel):
     def __init__(self, parent):
         super().__init__(parent)
         self.title("关闭 LLM 对话台")
+        theme.style_toplevel(self)   # 经典背景 + 标题栏两件套（坑 186）
         self.resizable(False, False)
         self.result = None
 

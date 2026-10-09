@@ -68,6 +68,16 @@ class App(ChatMixin, ImageGenMixin, VideoGenMixin, ServiceMixin, ModelsMixin, Se
         self._settings_win = None
         self._settings_nav = None       # 设置窗口的左栏（输出栏的按钮要 jump 到某个叶子）
         self._settings_sp = None        # 设置窗口的滚动内容区（页面栈；"当前页"判据走它）
+        # 设置窗"原地重建"的几何串（W 2026-10-09）：切主题 / 切用户模式会 destroy +
+        # 重开设置窗，destroy 前把当前 `winfo_geometry()` 存这里，open_settings 消费
+        # 它原地恢复（不消费就会跳回默认位置）。消费后清空 —— 用户手动关掉再开
+        # 仍是"与主窗口位置一致"那条默认。
+        self._settings_geom = ""
+        # 拖动缩放"渲染跟在后面"的门控（W 2026-10-10，08 §10.7）：主窗的在
+        # `_build_chat` 里挂上；设置窗每次打开在 `open_settings` 里挂新的
+        # （旧窗销毁即失效）。存着引用只为调试 / 自检能看状态，产品逻辑不读它们。
+        self.resize_gate = None
+        self._settings_gate = None
         # 设置页的会话内界面状态：{"fold": {区块名: 展开}}
         # 挂在 App 上（不是窗口上）→ 关掉设置窗再开，展开状态还在；程序一退就没了。
         # （原来的 "show_all" 随底部「显示全部参数」一起移除，2026-10-07 W 定：
@@ -503,18 +513,23 @@ class App(ChatMixin, ImageGenMixin, VideoGenMixin, ServiceMixin, ModelsMixin, Se
         self._render_status(False, False)
 
     def _gear_photo(self):
-        """「设置」齿轮图标：ui/gear_icon 内嵌 b64 → tk.PhotoImage（22px 档）。
+        """「设置」齿轮图标：ui/gear_icon 内嵌 b64 → tk.PhotoImage（按当前主题选色）。
 
-        master 显式给 self.root（多 root 的自检夹具里，默认 root 可能不是本窗）；
-        图引用挂 root 防 GC；b64 解码一次仅 ~1KB，加载零感知。
+        黑线在深色按钮底（#2e3440）上对比只剩 ~19%（真机像素实测，坑 185），
+        生成脚本另烧了一份 #d8dee9 浅线版（`*_DARK`）；这里按 theme.mode() 选，
+        两版各缓存在 root 上（master 显式给 self.root：多 root 的自检夹具里，
+        默认 root 可能不是本窗；图引用挂 root 防 GC，同旧注释）。
+        切主题时 `retint` 会回来重取 —— 深浅各缓一份，来回切不重建。
         """
         import base64
         from . import gear_icon
-        photo = tk.PhotoImage(
-            master=self.root, data=base64.b64decode(gear_icon.GEAR_PNG_B64))
-        if not hasattr(self.root, "_gear_icon"):
-            self.root._gear_icon = photo
-        return self.root._gear_icon
+        dark = theme.mode() == "dark"
+        attr = "_gear_icon_dark" if dark else "_gear_icon_light"
+        if not hasattr(self.root, attr):
+            b64 = (gear_icon.GEAR_PNG_B64_DARK if dark else gear_icon.GEAR_PNG_B64)
+            setattr(self.root, attr,
+                    tk.PhotoImage(master=self.root, data=base64.b64decode(b64)))
+        return getattr(self.root, attr)
 
     def _build_chat(self):
         mid = ttk.Frame(self.root)
@@ -536,6 +551,14 @@ class App(ChatMixin, ImageGenMixin, VideoGenMixin, ServiceMixin, ModelsMixin, Se
         self.chat.configure(yscrollcommand=self.chat_scroll.set)
         self.chat_scroll.pack(side="right", fill="y")
         self.chat.pack(side="left", fill="both", expand=True)
+        # 拖动缩放"渲染跟在后面"（W 2026-10-10 批的方案 A，评估与数字见 08 §10.7）：
+        # 拖动期把聊天区摘出布局（只剩顶栏 / 输入区外壳随手指走，~25ms/档），
+        # 停手 300ms 装回一次。摘/装的 pack 参数就照上面这两行，改版式时一起改。
+        self.resize_gate = widgets.ResizeDeferGate(
+            self.root,
+            lambda: (self.chat_scroll.pack_forget(), self.chat.pack_forget()),
+            lambda: (self.chat_scroll.pack(side="right", fill="y"),
+                     self.chat.pack(side="left", fill="both", expand=True)))
         self.chat.tag_configure("user", foreground=theme.c("accent"),
                                 font=("Microsoft YaHei UI", 10, "bold"))
         self.chat.tag_configure("assistant", foreground=theme.c("body"))
@@ -1233,6 +1256,11 @@ class App(ChatMixin, ImageGenMixin, VideoGenMixin, ServiceMixin, ModelsMixin, Se
                                      activeforeground=theme.c("accent"))
         except Exception:
             pass
+        # 顶栏设置按钮的齿轮图标按主题换色（黑线在深色按钮底上不可读，坑 185）
+        try:
+            self.btn_settings.configure(image=self._gear_photo())
+        except Exception:
+            pass
         theme.retint_widgets(self.root)
         if self._last_status:
             try:
@@ -1246,6 +1274,12 @@ class App(ChatMixin, ImageGenMixin, VideoGenMixin, ServiceMixin, ModelsMixin, Se
                 cur = self._settings_nav.selected or ""
             except Exception:
                 pass
+            try:
+                # 原地重建（W 2026-10-09）：记住当前位置与尺寸，open_settings 恢复 ——
+                # 不记的话新窗跳回默认位置（切主题时肉眼就是"窗口重新定位/跳动"）。
+                self._settings_geom = win.winfo_geometry()
+            except Exception:
+                self._settings_geom = ""
             win.destroy()
             self._settings_win = None
             self._settings_sp = None
