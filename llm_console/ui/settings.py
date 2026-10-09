@@ -10,11 +10,11 @@ import tkinter as tk
 from tkinter import ttk, messagebox, filedialog, font as tkfont
 
 from ..core import (capability, codesign, cloudjobs, engine_install, hardware,
-                    media, providers, sdprofile, secrets, textfile, updater)
+                    localmodels, media, providers, sdprofile, secrets, textfile, updater)
 from ..core.config import (APP_DIR, APP_VERSION, CFG_VERSION, DEFAULT_CONFIG,
                            FLOAT_KEYS, INT_KEYS, STR_KEYS, cloud_media_dir,
                            gen_api_key, save_config)
-from ..core.models import has_local_chat, scan_models, scan_video_models
+from ..core.models import has_local_chat, scan_models, scan_video_models, usable_local
 from ..core.params import ctx_for, current_ngl
 from ..core.server import _query_serving_model, server_process_alive
 from ..connection import cloud
@@ -111,6 +111,17 @@ NAV_SPEC = [
              "（agent、脚本、外部工具）填这个地址就能直接用它。\n"
              "只转本地模型：云端对话在应用内直连服务商，生图 / 生视频也不经这里。\n"
              "要有本地文本模型才开得起 —— 没有时这一项默认关闭。"},
+    {"key": "general", "label": "通用", "page": "general", "section": "general",
+     "title": "通用",
+     "help": "提示词优化（输入框右上角的星星）用哪个文本模型三路重写。\n"
+             "加入第一个文本模型时会自动选上，之后以你的选择为准；本地模型经本机"
+             "服务转发（当前已加载的那个），云端文本模型逐个可选。"},
+    {"key": "appearance", "label": "外观", "page": "appearance", "section": "appearance",
+     "title": "外观",
+     "help": "界面主题（跟随系统 / 浅色 / 深色）与颜色的入口。\n"
+             "主题切换在后续版本生效，当前先记住选择。「全局主题色」管发送按钮、"
+             "取回、模型名、状态灯与左栏选中项；「选中文本强调色」只管聊天里拖蓝"
+             "的部分 —— 两者互相独立，改完选中文本立刻变、按钮下次启动生效。"},
     {"key": "about", "label": "关于与诊断", "page": "about", "section": "about",
      "title": "关于与诊断",
      "help": "这一页认亲：这是什么软件、什么版本、怎么重看新手引导。\n"
@@ -170,9 +181,92 @@ SIMPLE_NAV_SPEC = [
          "nav_hide": "c_img",
          "title": "云端生视频", "help": ""},
     ]},
+    {"key": "general", "label": "通用", "page": "general", "section": "general",
+     "title": "通用", "help": ""},
+    {"key": "appearance", "label": "外观", "page": "appearance", "section": "appearance",
+     "title": "外观", "help": ""},
     {"key": "about", "label": "关于与诊断", "page": "about", "section": "about",
      "title": "关于与诊断", "help": ""},
 ]
+
+
+# v1.1.1 发版临时屏蔽（W 2026-10-09）：外观页的「界面主题」下拉不建，帮助文案
+# 同步换成短版（不留着指向一个不存在的控件）；theme.RELEASE_LIGHT_ONLY 改回
+# False 即恢复原文案与下拉（改动只有上面那一处开关与这里的 if）。
+# ⚠ 只改高级 NAV_SPEC：普通模式的 help 必须保持空串 —— 它靠"空文案不建 HelpDot"
+# 保证全页无 "?"，填了非空会凭空冒出一个气泡（本套件当场抓到）。
+if theme.RELEASE_LIGHT_ONLY:
+    for _it in NAV_SPEC:
+        if _it.get("key") == "appearance":
+            _it["help"] = ("界面颜色的入口：「全局主题色」管发送按钮、取回、"
+                           "模型名、状态灯与左栏选中项；「选中文本强调色」只管"
+                           "聊天里拖蓝的部分 —— 两者互相独立，改完选中文本立刻变、"
+                           "按钮下次启动生效。")
+
+
+def _ask_color(parent, title, initial, cust):
+    """Windows 标准选色对话框，**自带可持久化的「自定义颜色」色板**。
+
+    tkinter 自带的 colorchooser 把对话框左侧那 16 格「自定义颜色」藏在 Tk
+    进程内部：同一进程里一直都在，但进程一退出就丢 —— 重启软件后上次添加的
+    全没了（W 2026-10-08 报的"添加到自定义颜色不能保存"）。根因是那份数组的
+    归属：Windows 的 ChooseColor 约定 lpCustColors 由**调用方**持有，Tk 自己
+    持有就没人替它落盘。这里直接 ctypes 调 comdlg32.ChooseColorW，数组由我们
+    持有：`cust` 是 16 个 "#rrggbb" / "" 的列表，**原地更新**（确定或取消、
+    只要开过对话框，格子的最终状态都留在里面），调用方负责对比后落盘。
+
+    返回选中的 "#rrggbb"，取消 = None。hwndOwner 钉在设置窗上（模态）；
+    ctypes 走不通时回落 tkinter.colorchooser（色板不持久化，仅保底不炸）。
+    """
+    import ctypes
+    from tkinter import colorchooser
+    try:
+        from ctypes import wintypes
+
+        class CHOOSECOLORW(ctypes.Structure):
+            _fields_ = [("lStructSize", wintypes.DWORD),
+                        ("hwndOwner", wintypes.HWND),
+                        ("hInstance", wintypes.HINSTANCE),
+                        ("rgbResult", wintypes.COLORREF),
+                        ("lpCustColors", ctypes.POINTER(wintypes.COLORREF)),
+                        ("Flags", wintypes.DWORD),
+                        ("lCustData", ctypes.c_long),
+                        ("lpfnHook", ctypes.c_void_p),
+                        ("lpTemplateName", ctypes.c_wchar_p)]
+
+        def _to_ref(hexv):
+            hexv = (hexv or "").strip().lstrip("#")
+            if len(hexv) != 6:
+                return 0x00FFFFFF   # 空格 / 脏值 = Windows 默认白
+            try:
+                r, g, b = int(hexv[0:2], 16), int(hexv[2:4], 16), int(hexv[4:6], 16)
+            except ValueError:
+                return 0x00FFFFFF
+            return r | (g << 8) | (b << 16)      # COLORREF = 0x00BBGGRR
+
+        def _to_hex(ref):
+            return "#%02x%02x%02x" % (ref & 0xFF, (ref >> 8) & 0xFF, (ref >> 16) & 0xFF)
+
+        arr = (wintypes.COLORREF * 16)(
+            _to_ref(c) for c in (list(cust) + [""] * 16)[:16])
+        hwnd = 0
+        try:
+            hwnd = ctypes.windll.user32.GetParent(parent.winfo_id()) \
+                or parent.winfo_id()
+        except Exception:
+            pass
+        cc = CHOOSECOLORW()
+        cc.lStructSize = ctypes.sizeof(CHOOSECOLORW)
+        cc.hwndOwner = hwnd
+        cc.rgbResult = _to_ref(initial)
+        cc.lpCustColors = ctypes.cast(arr, ctypes.POINTER(wintypes.COLORREF))
+        cc.Flags = 0x1 | 0x2          # CC_RGBINIT（从当前色起跳）| CC_FULLOPEN
+        ok = ctypes.windll.comdlg32.ChooseColorW(ctypes.byref(cc))
+        cust[:] = [_to_hex(ref) for ref in arr]   # 确定或取消都把格子最终态带回来
+        return _to_hex(cc.rgbResult) if ok else None
+    except Exception:
+        got = colorchooser.askcolor(color=initial or None, parent=parent, title=title)
+        return got[1] if got and got[1] else None
 
 
 def _simple_mode(cfg):
@@ -462,6 +556,7 @@ class SettingsMixin:
         win.geometry("1160x740")
         win.minsize(1080, 600)
         win.transient(self.root)
+        theme.set_window_frame(win)     # 深色时标题栏 / 窗框一起翻深（W 2026-10-09）
 
         # ---- 固定外框 ----
         # 底部按钮条**先**按 side="bottom" 入列：pack 按入列顺序分配空间，先入列的保住自己，
@@ -593,7 +688,7 @@ class SettingsMixin:
             """
             i = rows["i"]
             rows["i"] += 1
-            lab = ttk.Label(parent, textvariable=var, foreground="#5a6a7a",
+            lab = ttk.Label(parent, textvariable=var, style="Note.TLabel",
                             font=("Microsoft YaHei UI", 9))
             lab.grid(row=i, column=0, columnspan=3, sticky="w", pady=(0, 6))
             # 变量必须挂在控件上保活：`StringVar` 一旦被 GC，Tcl 侧的名字就没了，
@@ -651,7 +746,7 @@ class SettingsMixin:
             cell = None
             if hint:
                 # 摘要同样不套 Frame（原来 Frame 里就一个 Label）
-                cell = ttk.Label(parent, text=hint, foreground="#5a5a5a",
+                cell = ttk.Label(parent, text=hint, style="Dim.TLabel",
                                  font=("Microsoft YaHei UI", 9))
                 cell.grid(row=i, column=2, sticky="w", pady=5)
             if fold:
@@ -709,7 +804,8 @@ class SettingsMixin:
                                              font=("Microsoft YaHei UI", 9),
                                              bd=0, highlightthickness=1,
                                              highlightbackground=theme.c("border"),
-                                             highlightcolor=theme.c("accent"))
+                                             highlightcolor=theme.c("accent"),
+                                             **theme.text_kw())
                 v["system_prompt"].grid(row=i, column=1, columnspan=2, sticky="nsew", pady=5)
                 v["system_prompt"].insert("1.0", str(self.cfg.get("system_prompt", "")))
                 return
@@ -734,7 +830,8 @@ class SettingsMixin:
                                          font=("Microsoft YaHei UI", 9),
                                          bd=0, highlightthickness=1,
                                          highlightbackground=theme.c("border"),
-                                         highlightcolor=theme.c("accent"))
+                                         highlightcolor=theme.c("accent"),
+                                         **theme.text_kw())
             v["system_prompt"].grid(row=i, column=1, columnspan=2, sticky="nsew", pady=5)
             v["system_prompt"].insert("1.0", str(self.cfg.get("system_prompt", "")))
 
@@ -888,7 +985,7 @@ class SettingsMixin:
                 "按权重文件里的张量名与文件名自动认这一族；认错了在这里手动指定。")
             # 「识别为…」与下拉同排、贴它右侧（W 2026-10-03）：状态回显归控件那一侧，
             # 不另起一行占版心
-            ttk.Label(t3, textvariable=img_note, foreground="#5a6a7a",
+            ttk.Label(t3, textvariable=img_note, style="Note.TLabel",
                       font=("Microsoft YaHei UI", 9)).grid(
                 row=_fam_row, column=2, sticky="w", padx=(0, 10), pady=5)
 
@@ -1054,7 +1151,7 @@ class SettingsMixin:
             _vfam_row = r3b["i"]
             row(t3b, r3b, "模型族", vfile_cb,
                 "同一套 sd-cli 可以跑多个视频家族；认错了在这里手动指定。")
-            ttk.Label(t3b, textvariable=vid_note, foreground="#5a6a7a",
+            ttk.Label(t3b, textvariable=vid_note, style="Note.TLabel",
                       font=("Microsoft YaHei UI", 9)).grid(
                 row=_vfam_row, column=2, sticky="w", padx=(0, 10), pady=5)
 
@@ -1173,13 +1270,13 @@ class SettingsMixin:
             running = self.proxy.running()
             ttk.Label(t4, text=("已启用 · 端口 %s" % self.cfg.get("proxy_port", 8081))
                       if running else "未启用（在本页开启后，agent 才能连上）",
-                      foreground="#1a7f37" if running else "#999999",
+                      style="OkLit.TLabel" if running else "Muted.TLabel",
                       font=("Microsoft YaHei UI", 10, "bold")).grid(
                 row=0, column=0, columnspan=3, sticky="w", pady=(0, 8))
             r4["i"] = 1
             if not usable:
                 ttk.Label(t4, text="这个功能要有本地文本模型才能用：先在 设置 → 本地模型 备好引擎与模型。",
-                          foreground="#c01c28", wraplength=740, justify="left",
+                          style="ErrLit.TLabel", wraplength=740, justify="left",
                           font=("Microsoft YaHei UI", 9)).grid(
                     row=r4["i"], column=0, columnspan=3, sticky="w", pady=(0, 8))
                 r4["i"] += 1
@@ -1258,7 +1355,7 @@ class SettingsMixin:
                 "只在「启用」勾着时算数；不勾就要每次在本页手动「启动 / 重启服务」。")
             v["proxy_autostart"] = v_auto
 
-            ttk.Label(t4, textvariable=self.api_hint_var, foreground="#1a7f37",
+            ttk.Label(t4, textvariable=self.api_hint_var, style="OkLit.TLabel",
                       font=("Microsoft YaHei UI", 9)).grid(
                 row=r4["i"], column=1, columnspan=2, sticky="w", pady=4)
             r4["i"] += 1
@@ -1267,14 +1364,14 @@ class SettingsMixin:
                                 # 这一页是 agent 场景，显示 agent 那一份（与上面那个输入框同源）；
                                 # 原来显示全局兜底 cfg["ctx"]，与按模型记忆的实际值对不上（坑 130）
                                 % ctx_for(self.cfg, agent=True)),
-                      foreground="#b58900", wraplength=740, justify="left",
+                      style="WarnLit.TLabel", wraplength=740, justify="left",
                       font=("Microsoft YaHei UI", 9)).grid(
                 row=r4["i"], column=0, columnspan=3, sticky="w", pady=(8, 2))
             r4["i"] += 1
             ttk.Label(t4, text=("这个代理只转发本地文本模型：生图 / 生视频不经这里调用"
                                 "（云端那两条在应用内直连服务商原生接口，"
                                 "本地那两条走 sd-cli；agent 用不到图像接口）。"),
-                      foreground="#c01c28", wraplength=740, justify="left",
+                      style="ErrLit.TLabel", wraplength=740, justify="left",
                       font=("Microsoft YaHei UI", 9)).grid(
                 row=r4["i"], column=0, columnspan=3, sticky="w", pady=(8, 2))
             r4["i"] += 1
@@ -1553,23 +1650,24 @@ class SettingsMixin:
             # ---------------- 密钥 ----------------
             def do_key_dialog():
                 d = tk.Toplevel(win)
+                d.configure(background=theme.c("panel"))   # 面板色与文字/容器同源（深色模式跟随）
                 d.withdraw()          # 先藏起来，摆正了再显示（否则左上角闪一下）
                 d.title("API Key")
                 d.transient(win)
                 pname = (providers.builtin(st["pid"]).get("name")
                          or vars_["name"].get() or st["pid"] or "新的服务商")
-                ttk.Label(d, text="给「%s」填写 API Key" % pname,
-                          font=("Microsoft YaHei UI", 10, "bold")).pack(
+                widgets.panel_label(d, text="给「%s」填写 API Key" % pname,
+                                    font=("Microsoft YaHei UI", 10, "bold")).pack(
                     anchor="w", padx=14, pady=(12, 4))
-                ttk.Label(d, text="密钥只写进 secrets.json，留在你这台机器上；界面与配置文件里都只显示掩码。",
-                          foreground="#808080", wraplength=420, justify="left",
-                          font=("Microsoft YaHei UI", 9)).pack(anchor="w", padx=14)
+                widgets.panel_label(d, fg_key="hint", text="密钥只写进 secrets.json，留在你这台机器上；界面与配置文件里都只显示掩码。",
+                                    wraplength=420, justify="left",
+                                    font=("Microsoft YaHei UI", 9)).pack(anchor="w", padx=14)
                 e = theme.entry(d, width=40, show="●")
                 e.pack(padx=14, pady=10)
-                tip = ttk.Label(d, textvariable=key_lbl, foreground="#808080",
-                                font=("Microsoft YaHei UI", 9))
+                tip = widgets.panel_label(d, textvariable=key_lbl, fg_key="hint",
+                                          font=("Microsoft YaHei UI", 9))
                 tip.pack(anchor="w", padx=14)
-                bf = ttk.Frame(d)
+                bf = tk.Frame(d, background=widgets.panel_bg(d))
                 bf.pack(padx=14, pady=(6, 14), anchor="e")
 
                 def save():
@@ -1647,13 +1745,13 @@ class SettingsMixin:
                 head = ttk.Frame(d)
                 head.pack(side="top", fill="x", padx=12, pady=(10, 2))
                 hint_lbl = ttk.Label(head, text="勾中并点「确定」才进主页面菜单。",
-                                     foreground="#808080", wraplength=520, justify="left",
+                                     style="Hint.TLabel", wraplength=520, justify="left",
                                      font=("Microsoft YaHei UI", 9))
                 hint_lbl.pack(side="left")
                 status = tk.StringVar(value=explain or
                                       ("表里是已知的 %d 个模型；点「刷新清单」可向接口重新索取。"
                                        % len(known)))
-                st_lbl = ttk.Label(d, textvariable=status, foreground="#808080",
+                st_lbl = ttk.Label(d, textvariable=status, style="Hint.TLabel",
                                    wraplength=600, justify="left",
                                    font=("Microsoft YaHei UI", 9))
                 st_lbl.pack(side="top", anchor="w", padx=12, pady=(0, 2))
@@ -2083,7 +2181,7 @@ class SettingsMixin:
                 # 窗口再矮也是压表格，不会把按钮挤掉
                 botf = ttk.Frame(d)
                 botf.pack(side="bottom", fill="x", padx=12, pady=(4, 2), before=wrap)
-                ttk.Label(botf, text="模型名", foreground="#808080",
+                ttk.Label(botf, text="模型名", style="Hint.TLabel",
                           font=("Microsoft YaHei UI", 9)).pack(side="left", padx=(0, 4))
                 e_new = theme.entry(botf, width=16)
                 e_new.pack(side="left", fill="x", expand=True)
@@ -2269,7 +2367,7 @@ class SettingsMixin:
             # 本地端口在左栏「本地模型 API」那一页。
             # 密钥状态单独一行：它跟着按钮排在同一行时，掩码文本会把这行撑得比
             # 可视区宽（横向不可滚 = 后面的内容看不见）
-            ttk.Label(t4b, textvariable=key_lbl, foreground="#808080", wraplength=560,
+            ttk.Label(t4b, textvariable=key_lbl, style="Hint.TLabel", wraplength=560,
                       justify="left", font=("Microsoft YaHei UI", 9)).grid(
                 row=r4b["i"], column=0, columnspan=3, sticky="w", pady=(0, 6))
             r4b["i"] += 1
@@ -2277,7 +2375,7 @@ class SettingsMixin:
             # 初始文本只占位：open_picker/load() 一进来就会按"能不能改地址"重写它，
             # 收起来时整行 grid_remove（2026-10-03 W：不再常驻一句"名称与 base_url：内置"）
             built_note = ttk.Label(t4b, text="",
-                                   foreground="#808080", wraplength=640, justify="left",
+                                   style="Hint.TLabel", wraplength=640, justify="left",
                                    font=("Microsoft YaHei UI", 9))
             built_note.grid(row=r4b["i"], column=0, columnspan=3, sticky="w", pady=(0, 6))
             r4b["i"] += 1
@@ -2317,7 +2415,7 @@ class SettingsMixin:
 
             if not simple:
                 # 灰色小字提示只在高级模式出现（普通模式只留「已存密钥」那一条，W 定）
-                ttk.Label(t4b, textvariable=media_lbl, foreground="#808080", wraplength=680,
+                ttk.Label(t4b, textvariable=media_lbl, style="Hint.TLabel", wraplength=680,
                           justify="left", font=("Microsoft YaHei UI", 9)).grid(
                     row=r4b["i"], column=0, columnspan=3, sticky="w", pady=(2, 6))
             r4b["i"] += 1
@@ -2344,12 +2442,12 @@ class SettingsMixin:
                                             open_picker(fetch=True))).pack(anchor="w", pady=1)
 
             if not simple:
-                ttk.Label(t4b, textvariable=menu_lbl, foreground="#808080", wraplength=430,
+                ttk.Label(t4b, textvariable=menu_lbl, style="Hint.TLabel", wraplength=430,
                           justify="left", font=("Microsoft YaHei UI", 9)).grid(
                     row=r4b["i"], column=1, columnspan=2, sticky="w")
             r4b["i"] += 1
             if not simple:
-                ttk.Label(t4b, textvariable=cat_lbl, foreground="#808080", wraplength=430,
+                ttk.Label(t4b, textvariable=cat_lbl, style="Hint.TLabel", wraplength=430,
                           justify="left", font=("Microsoft YaHei UI", 9)).grid(
                     row=r4b["i"], column=1, columnspan=2, sticky="w", pady=(0, 6))
             r4b["i"] += 1
@@ -2380,7 +2478,7 @@ class SettingsMixin:
             if not simple:
                 i = r4b["i"]
                 r4b["i"] += 1
-                ttk.Label(t4b, textvariable=jobs_lbl, foreground="#808080", wraplength=680,
+                ttk.Label(t4b, textvariable=jobs_lbl, style="Hint.TLabel", wraplength=680,
                           justify="left", font=("Microsoft YaHei UI", 9)).grid(
                     row=i, column=0, columnspan=3, sticky="w", pady=(6, 2))
                 theme.button(t4b, text="刷新任务台账", width=14,
@@ -2404,10 +2502,10 @@ class SettingsMixin:
                 sf.grid(row=r4b["i"], column=0, columnspan=3, sticky="w", pady=(4, 4))
                 r4b["i"] += 1
                 theme.button(sf, text="保存本页", width=12, command=save_page).pack(side="left")
-                ttk.Label(sf, textvariable=url_lbl, foreground="#808080", wraplength=430,
+                ttk.Label(sf, textvariable=url_lbl, style="Hint.TLabel", wraplength=430,
                           justify="left", font=("Microsoft YaHei UI", 9)).pack(side="left", padx=10)
             # 蓝色状态行两种模式都留：测试连接 / 选模型的结果要有地方说话
-            ttk.Label(t4b, textvariable=msg_lbl, foreground="#0b57d0", wraplength=680,
+            ttk.Label(t4b, textvariable=msg_lbl, style="AccentLit.TLabel", wraplength=680,
                       justify="left", font=("Microsoft YaHei UI", 9)).grid(
                 row=r4b["i"], column=0, columnspan=3, sticky="w", pady=(2, 0))
             r4b["i"] += 1
@@ -2460,7 +2558,7 @@ class SettingsMixin:
                             ).grid(row=i, column=2, sticky="e", pady=(0, 6))
 
             _row(t4d, r4d, "文本预算", ttk.Label(
-                t4d, text="按服务商各自声明的上下文窗口算", foreground="#5a5a5a"),
+                t4d, text="按服务商各自声明的上下文窗口算", style="Dim.TLabel"),
                 "云端文本的附件预算 = min(该服务商声明的上下文窗口 − max_tokens − 预留, 200000)。"
                 "上限 200000 是成本护栏，不是拍脑袋：附件会留在历史里**每一轮都重发**，"
                 "声明 1M 也不代表该一次塞 1M。窗口在上一区块「服务商与密钥」里按服务商填。",
@@ -2566,7 +2664,7 @@ class SettingsMixin:
             r4c["i"] += 1
             i = r4c["i"]
             r4c["i"] += 1
-            tk.Label(t4c, text="生图与生视频共用", foreground="#5a5a5a",
+            tk.Label(t4c, text="生图与生视频共用", foreground=theme.c("dim"),
                      font=("Microsoft YaHei UI", 9, "bold"),
                      background=widgets.default_bg()).grid(
                 row=i, column=0, columnspan=3, sticky="w")
@@ -2647,6 +2745,221 @@ class SettingsMixin:
                 "生视频按**秒**或按**条**计费（同一家两种都有）：单价按模型填。"
                 "填没填都会在提交前弹一次确认；没填就明说「以账单为准」。")
 
+        @section("general", "general")
+        def _tgen(tgen, rgen):
+            """通用页（2026-10-09 W 定）：提示词优化的模型选择。
+
+            选项 = 主页面可选的**文本**模型：
+              · 「本地模型」合成一项 —— 本地链路经本机 llama-server 转发、单槽只
+                服务"当前已加载的那个"，逐列本地模型名会假装可选择；
+              · 云端文本模型逐个列出（值 = "pid::model"）。
+            （W 2026-10-09 二轮：**去掉「跟随当前模型」** —— 本功能主场景是生图 /
+            生视频时的提示词优化，就是一个明确的选择；第一个文本模型加入时由
+            `App._opt_fill_prompt_model` 自动选上，之后以用户的选择为准。）
+            值写 cfg["prompt_opt_model"]；解析与回落全在 connection/optimize。
+            """
+            items = []
+            try:
+                use = usable_local(self.cfg)["chat"]
+                hid = localmodels.hidden_set(self.cfg)
+                if [p for p in use if os.path.basename(p) not in hid]:
+                    items.append(("本地模型（当前已加载的那个）", "local"))
+            except Exception:
+                pass
+            try:
+                for pid, _pname, m in providers.cloud_models(self.cfg,
+                                                             providers.KIND_TEXT):
+                    cid = providers.make_cloud_id(pid, m)
+                    items.append((providers.display_of_cloud(self.cfg, cid), cid))
+            except Exception:
+                pass
+            by_label = {d: val for d, val in items}
+            labels = [d for d, _val in items]
+            cur = str(self.cfg.get("prompt_opt_model", "") or "")
+            if cur not in [val for _d, val in items]:
+                # 没选过 / 记的是过期值：直接显示第一个可选模型（保存即落盘）
+                cur = items[0][1] if items else ""
+            gvar = tk.StringVar(value=next((d for d, val in items if val == cur), ""))
+            tgen._var_general = gvar       # 挂控件保活：StringVar 被 GC 下拉就静默变空（坑 145 家族）
+            comb = theme.comb(tgen, textvariable=gvar, state="readonly",
+                              width=30, values=labels)
+            row(tgen, rgen, "提示词优化", comb,
+                "提示词优化（输入框右上角的星星）三路重写用的文本模型。\n"
+                "加入第一个文本模型时会自动选上；本地模型经本机服务转发"
+                "（当前已加载的那个）。",
+                hint="重写用的模型", lw=8)
+            if not items:
+                i = rgen["i"]
+                rgen["i"] += 1
+                ttk.Label(tgen, text="还没有可用的文本模型 —— 加入第一个后会自动选上。",
+                          style="Dim.TLabel").grid(
+                    row=i, column=0, columnspan=3, sticky="w", pady=(0, 4))
+
+            def _save_general():
+                # 读控件当前文本而不是 gvar：ttk.Combobox.set() 不保证回写
+                # textvariable（Tk 的历史语义），readonly 态下 comb.get() 才是真值
+                self.cfg["prompt_opt_model"] = by_label.get(str(comb.get()), "")
+                # 钩子自己落盘（本页的值不在 _apply_settings 的 v 里；外观页同款约定）
+                try:
+                    save_config(self.cfg)
+                except Exception:
+                    pass
+                return True, ""
+            save_hooks[tgen] = _save_general
+
+        @section("appearance", "appearance")
+        def _tapr(tapr, rapr):
+            """外观页（2026-10-08 W 定）：界面主题下拉 + 全局主题色 / 选中文本强调色。
+
+            「界面主题」（跟随系统 / 浅色 / 深色）**选完即切**：theme.set_mode
+            同 root 实时换主题（ttk 与注册过的经典 tk 控件自动重画）+ App.retint
+            重涂烘焙色 + 设置窗整窗重建；跟随系统由 App 的 30 秒轮询兜住后续变化。
+            「全局主题色」一个变量管发送按钮、取回、模型名、用户名、状态灯、
+            滑动开关、左栏选中项（本就同源 primary 一个色）；「选中文本强调色」
+            与它**互相独立**（W 同日二轮定"解除联动、可独立配置"，两者各自的
+            "恢复默认"都落主题原色，不是彼此）。改色即时**预览**选中文本
+            （Text.configure 便宜），按钮等样式色下次启动生效（样式是启动时
+            构建的）。选色走 `_ask_color`（Windows 原生对话框 + 可持久化的
+            自定义色板，随改随落盘）。
+            """
+            _THEME_DISPLAY = (("跟随系统", "auto"), ("浅色模式", "light"),
+                              ("深色模式", "dark"))
+            _BY_VALUE = {v: d for d, v in _THEME_DISPLAY}
+            theme_var = tk.StringVar(
+                value=_BY_VALUE.get(str(self.cfg.get("ui_theme", "auto") or "auto"),
+                                    "跟随系统"))
+            accent_var = tk.StringVar(value=str(self.cfg.get("ui_accent", "") or ""))
+            sel_var = tk.StringVar(value=str(self.cfg.get("ui_accent_sel", "") or ""))
+            swatches = {}              # 配置键 → 色块 Label（变量一变就染新色）
+            # 自定义色格（Windows 选色器左侧那 16 格）：本进程持有一份、随改随落盘，
+            # 重开面板 / 重启软件都还在（tkinter 自带的 colorchooser 把它藏进 Tk
+            # 进程内部，重启就丢 —— W 报的"添加到自定义颜色不能保存"）
+            cust = list(self.cfg.get("ui_custom_colors") or [])[:16]
+            cust += [""] * (16 - len(cust))
+
+            def _sel_colors():
+                """当前生效的选区 (背景, 文字)：**只看选中文本强调色**，与全局
+                主题色互相独立（W 2026-10-08 定"解除联动"）；留空 = 主题默认。"""
+                hexv = str(sel_var.get() or "").strip()
+                if hexv:
+                    try:
+                        return hexv, ("#ffffff" if theme._luma(hexv) < 0.62
+                                      else "#1a1a1a")
+                    except Exception:      # 手改配置写出非法色值：宁灰勿炸
+                        return hexv, "#ffffff"
+                bg = theme.default_accent()
+                return bg, ("#ffffff" if theme._luma(bg) < 0.62 else "#1a1a1a")
+
+            def _preview_selection():
+                """改色即时预览到聊天区 / 输入框的选中文本（其余样式重启生效）。"""
+                bgc, fgc = _sel_colors()
+                for t in (getattr(self, "chat", None), getattr(self, "input", None)):
+                    try:
+                        if t is not None and t.winfo_exists():
+                            t.configure(selectbackground=bgc, selectforeground=fgc)
+                    except Exception:
+                        pass
+
+            def _refresh_swatch(key):
+                sw = swatches.get(key)
+                if sw is None:
+                    return
+                if key == "ui_accent_sel":
+                    hexv = _sel_colors()[0]
+                else:
+                    # "默认"必须是主题原色 —— c("accent") 在配置非空时已被注入成
+                    # 用户配置的色，拿它当默认会让"恢复默认"恢复回旧配置（W 报）
+                    hexv = str(accent_var.get() or "").strip() or theme.default_accent()
+                try:
+                    sw.configure(background=hexv)
+                except Exception:
+                    pass
+
+            def _pick(key):
+                before = list(cust)
+                cur = str((accent_var if key == "ui_accent" else sel_var).get()
+                          or "").strip() or None
+                got = _ask_color(win,
+                                 "选择全局主题色" if key == "ui_accent"
+                                 else "选择选中文本强调色",
+                                 cur, cust)
+                if list(cust) != before:
+                    # 自定义色格在**任何关闭时机**（含取消）都持久化 —— 这是色板
+                    # 草稿纸，不是一项设置，走保存按钮反而丢
+                    self.cfg["ui_custom_colors"] = list(cust)
+                    save_config(self.cfg)
+                if not got:
+                    return                  # 取消：选择不动
+                (accent_var if key == "ui_accent" else sel_var).set(got)
+                _preview_selection()
+
+            def _reset(key):
+                (accent_var if key == "ui_accent" else sel_var).set("")
+                _preview_selection()
+
+            def _color_cell(key):
+                """取色件一行：色块 + 「选颜色…」 + 「恢复默认」。"""
+                cell = ttk.Frame(tapr)
+                sw = tk.Label(cell, width=4, background=theme.default_accent(),
+                              relief="groove", bd=1)
+                sw.pack(side="left", pady=2)
+                swatches[key] = sw
+                theme.button(cell, text="选颜色…", width=10,
+                             command=lambda: _pick(key)).pack(side="left", padx=(8, 0))
+                theme.button(cell, text="恢复默认", width=10,
+                             command=lambda: _reset(key)).pack(side="left", padx=(6, 0))
+                _refresh_swatch(key)
+                return cell
+
+            # 「界面主题」下拉 = 深色模式的唯一开关：v1.1.1 发版临时屏蔽（W 2026-10-09，
+            # 下一步再开发）。theme.RELEASE_LIGHT_ONLY 一处开关控制，机制本体都在。
+            theme_comb = None
+            if not theme.RELEASE_LIGHT_ONLY:
+                theme_comb = theme.comb(tapr, textvariable=theme_var, state="readonly",
+                                        width=14,
+                                        values=[d for d, _v in _THEME_DISPLAY])
+
+                def _on_theme_pick(_e=None):
+                    """选完即切：写 cfg → 落盘 → 实时切换（浅/深）。
+
+                    跟随系统 = 每次按当前系统偏好解析（30 秒轮询在 App 侧兜住后续
+                    变化）。设置窗由 retint 整窗重建，停回"外观"这一页。
+                    """
+                    value = dict((d, v) for d, v in _THEME_DISPLAY).get(
+                        theme_var.get(), "auto")
+                    self.cfg["ui_theme"] = value
+                    try:
+                        save_config(self.cfg)
+                    except Exception:
+                        pass
+                    want = theme.resolve_mode(value)
+                    if want != theme.mode():
+                        self._switch_theme(want)
+
+                theme_comb.bind("<<ComboboxSelected>>", _on_theme_pick)
+                row(tapr, rapr, "界面主题", theme_comb,
+                    "界面配色跟随系统 / 固定浅色 / 固定深色。\n"
+                    "切换实时应用到主窗口与已打开的次级窗口。")
+            row(tapr, rapr, "全局主题色", _color_cell("ui_accent"),
+                "发送按钮、取回、模型名、用户名、状态灯、滑动开关与左栏选中项共用的颜色。\n"
+                "改完下次启动生效；留空 = 用主题默认。选中文本不跟随它，单独在下一行配。")
+            row(tapr, rapr, "选中文本强调色", _color_cell("ui_accent_sel"),
+                "只改聊天里拖蓝选中的那一块，与全局主题色互相独立；\n"
+                "留空 = 用主题默认。")
+
+            accent_var.trace_add("write", lambda *_: _refresh_swatch("ui_accent"))
+            sel_var.trace_add("write", lambda *_: _refresh_swatch("ui_accent_sel"))
+
+            def _save_appearance():
+                self.cfg["ui_theme"] = dict((d, v) for d, v in _THEME_DISPLAY).get(
+                    theme_var.get(), "auto")
+                self.cfg["ui_accent"] = accent_var.get().strip()
+                self.cfg["ui_accent_sel"] = sel_var.get().strip()
+                save_config(self.cfg)   # 钩子在 _apply_settings 落盘**之后**跑（同 provider commit）
+                return True, ""
+
+            save_hooks[tapr] = _save_appearance
+
         @section("about", "about")
         def _t9(t9, r9):
             """关于页：标志 + 名字 + 版本，加两个入口（新手引导 / 诊断）。
@@ -2692,9 +3005,9 @@ class SettingsMixin:
             # （W 2026-10-04 要的"无法察觉"）。比在它下面另摆一个透明按钮更稳：那个无论怎么
             # 调都会多占一点纵向版面，还容易和 `place` 的层次、`grid` 的格子打架。
             for txt_, font, fg, pady in (
-                    ("LLM Chat", ("Microsoft YaHei UI", 16, "bold"), "#111111", (0, 2)),
+                    ("LLM Chat", ("Microsoft YaHei UI", 16, "bold"), theme.c("hdr"), (0, 2)),
                     ("本地模型工作台 · 版本 %s" % APP_VERSION,
-                     ("Microsoft YaHei UI", 9), "#5a5a5a", (0, 2)),
+                     ("Microsoft YaHei UI", 9), theme.c("dim"), (0, 2)),
                     ("llama.cpp 对话 · sd.cpp 生图生视频 · 云端服务商",
                      ("Microsoft YaHei UI", 9), "#808080", (0, 0))):
                 lab = ttk.Label(names, text=txt_, foreground=fg, font=font,
@@ -2725,7 +3038,7 @@ class SettingsMixin:
             ch_var = tk.StringVar(value=updater.CHANNEL_LABEL[updater.CHANNEL_STABLE])
             ustate = tk.StringVar(value="还没检查过。")
 
-            ust_lab = ttk.Label(t9, textvariable=ustate, foreground="#5a6a7a",
+            ust_lab = ttk.Label(t9, textvariable=ustate, style="Note.TLabel",
                                 wraplength=560, justify="left",
                                 font=("Microsoft YaHei UI", 9))
 
@@ -2917,7 +3230,7 @@ class SettingsMixin:
             theme.check(df, text="高分屏清晰度", variable=dpi_var,
                             command=set_dpi).pack(side="left")
             ttk.Label(df, text="现在：%s" % ("已开" if now else "没开"),
-                      foreground="#808080", font=("Microsoft YaHei UI", 9)).pack(
+                      style="Hint.TLabel", font=("Microsoft YaHei UI", 9)).pack(
                 side="left", padx=(10, 0))
             if not simple:      # 普通用户模式不放 "?"（2026-10-07 W 定）
                 widgets.HelpDot(df, "屏幕缩放不是 100% 时开的：开着 = 界面按显示器的真实像素画，"
@@ -2925,7 +3238,7 @@ class SettingsMixin:
                                      "关着 = 交给 Windows 拉伸，看着大但发虚。\n"
                                      "改完要**重开程序**才生效（这一项只能冷切换）。"
                                      "远程桌面里建议关着。").pack(side="left", padx=(6, 0))
-            ttk.Label(t9, textvariable=dpi_status, foreground="#808080", wraplength=360,
+            ttk.Label(t9, textvariable=dpi_status, style="Hint.TLabel", wraplength=360,
                       justify="left", font=("Microsoft YaHei UI", 9)).grid(
                 row=r9["i"], column=0, columnspan=3, sticky="w")
 
@@ -2966,21 +3279,22 @@ class SettingsMixin:
 
             def fill_token():
                 d = tk.Toplevel(win)
+                d.configure(background=theme.c("panel"))   # 面板色与文字/容器同源（深色模式跟随）
                 d.withdraw()                # 先藏起来，摆正了再显示（否则左上角闪一下）
                 d.title("GitHub 令牌")
-                ttk.Label(d, text="GitHub 令牌",
-                          font=("Microsoft YaHei UI", 10, "bold")).pack(
+                widgets.panel_label(d, text="GitHub 令牌",
+                                    font=("Microsoft YaHei UI", 10, "bold")).pack(
                     anchor="w", padx=14, pady=(12, 4))
-                ttk.Label(d, text="限额 60 → 5000 次/小时，更新冷却 10 分钟 → 5 秒，"
+                widgets.panel_label(d, text="限额 60 → 5000 次/小时，更新冷却 10 分钟 → 5 秒，"
                                   "并开启后台定时检查。\n"
                                   "只写进本机 secrets.json，界面与配置文件仅显示掩码。",
-                          foreground="#808080", wraplength=430, justify="left",
+                          fg_key="hint", wraplength=430, justify="left",
                           font=("Microsoft YaHei UI", 9)).pack(anchor="w", padx=14)
                 e = theme.entry(d, width=48, show="●")
                 e.pack(padx=14, pady=10)
-                ttk.Label(d, textvariable=tok_lab, foreground="#808080",
-                          font=("Microsoft YaHei UI", 9)).pack(anchor="w", padx=14)
-                bf = ttk.Frame(d)
+                widgets.panel_label(d, textvariable=tok_lab, fg_key="hint",
+                                    font=("Microsoft YaHei UI", 9)).pack(anchor="w", padx=14)
+                bf = tk.Frame(d, background=widgets.panel_bg(d))
                 bf.pack(padx=14, pady=(6, 14), anchor="e")
 
                 def save():
@@ -3109,7 +3423,7 @@ class SettingsMixin:
             r_dev["i"] += 1
             ttk.Label(t_dev, text="开发者模式已开启 · 仅本次运行有效 · "
                                   "重新进入：关于页版本号连点 5 次",
-                      foreground="#5a6a7a", wraplength=720, justify="left",
+                      style="Note.TLabel", wraplength=720, justify="left",
                       font=("Microsoft YaHei UI", 9)).grid(
                 row=i, column=0, columnspan=3, sticky="w", pady=(0, 6))
 
@@ -3289,7 +3603,7 @@ class SettingsMixin:
                 # 不另设提示行（W 2026-10-05）。变量挂控件保活（坑 145 ①）。
                 st_var = tk.StringVar(value="")
                 st = ttk.Label(t10, textvariable=st_var, wraplength=600, justify="left",
-                               foreground="#5a5a5a", font=("Microsoft YaHei UI", 9))
+                               style="Dim.TLabel", font=("Microsoft YaHei UI", 9))
                 st.grid(row=r10["i"], column=1, columnspan=2, sticky="w", pady=(0, 2))
                 r10["i"] += 1
 
@@ -3310,7 +3624,7 @@ class SettingsMixin:
                 btn_act.pack(side="left")
                 # 档位下拉先建不 pack：**点过「检查更新」才 pack 出来**（W 2026-10-05）。
                 # 构造时就绑 textvariable（坑 112：只 set 变量而没绑，界面是空的而数据是对的）。
-                flavor_lbl = ttk.Label(vf, text="档位", foreground="#5a5a5a",
+                flavor_lbl = ttk.Label(vf, text="档位", style="Dim.TLabel",
                                        font=("Microsoft YaHei UI", 9))
                 flavor_cb = theme.comb(vf, textvariable=flavor_var, state="readonly",
                                          width=16, values=[])
@@ -3630,7 +3944,7 @@ class SettingsMixin:
                 return "当前：模型 %d 个（含可看图）" % n_models
 
             head_lbl = ttk.Label(t5, text="当前：正在读取模型目录…",
-                                 foreground="#555555", wraplength=760, justify="left",
+                                 style="Dim.TLabel", wraplength=760, justify="left",
                                  font=("Microsoft YaHei UI", 9))
             head_lbl.grid(row=0, column=0, columnspan=3, sticky="w", pady=(0, 8))
             r5["i"] = 1
@@ -3691,7 +4005,7 @@ class SettingsMixin:
             for idx, it in enumerate(items):
                 head = tk.Frame(f, background=bg)
                 head.pack(fill="x", padx=2, pady=(6 if idx == 0 else 20, 2))
-                tk.Label(head, text=it["title"], background=bg, foreground="#111111",
+                tk.Label(head, text=it["title"], background=bg, foreground=theme.c("hdr"),
                          font=("Microsoft YaHei UI", 11, "bold"), anchor="w").pack(side="left")
                 widgets.HelpDot(head, it.get("help") or "").pack(side="left", padx=(8, 0))
                 body = tk.Frame(f, background=bg)
@@ -3714,7 +4028,7 @@ class SettingsMixin:
             build = registry.get(key)
             if build is None:
                 ttk.Label(body, text="（这个区块还没接上构建函数）",
-                          foreground="#c01c28").grid(row=0, column=0, sticky="w")
+                          style="ErrLit.TLabel").grid(row=0, column=0, sticky="w")
                 return body
             build(body, {"i": 0})
             return body
@@ -3766,7 +4080,7 @@ class SettingsMixin:
             if not lbl:
                 return
             try:
-                lbl[0].configure(background="#fff3c4")
+                lbl[0].configure(background=theme.c("flash"))
             except Exception:
                 return
             flashed["lbl"] = lbl[0]

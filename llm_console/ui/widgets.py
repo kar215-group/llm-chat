@@ -33,6 +33,41 @@ def _destroy_quietly(w):
 _BG_CACHE = None          # default_bg 的成功解析结果（主题在运行期不变，查一次就够）
 
 
+def panel_bg(win=None):
+    """填写类次级窗的面板底色（语义键 panel：浅 = 系统灰，深 = 主题深面板）。
+
+    次级窗的 Toplevel 默认底是系统浅灰，而主题给 ttk.Label / ttk.Frame 的底色
+    是主界面的白（cosmo = #ffffff）—— 直接把 ttk.Label 放上去，每条文字背后
+    就是一块白板（2026-10-08 W 报的"提示文字所在的白底"）。填写类弹窗把
+    Toplevel 自己也 configure 成这个色，文字 / 容器 / 窗体三方同色。
+    """
+    return theme.c("panel")
+
+
+def panel_label(master, text=None, fg_key="body", **kw):
+    """次级窗面板灰底上的文字标签（见 panel_bg）。
+
+    底 / 字色都走主题语义并盖 `_tint` 戳（主题切换后 retint_widgets 重涂）；
+    textvariable / font / wraplength / justify 等原样透传。tk.Label 直染，
+    不吃 ttk 样式 —— 别给它传 style=。
+    """
+    kw.setdefault("text", text)
+    kw["background"] = theme.c("panel")
+    kw["foreground"] = theme.c(fg_key)
+    lbl = tk.Label(master, **kw)
+    try:
+        lbl._tint = (fg_key, "panel")
+    except (AttributeError, TypeError):
+        pass
+    return lbl
+
+
+def reset_bg_cache():
+    """清 default_bg 的缓存（主题切换后必须调，否则拿到旧模式的面板色）。"""
+    global _BG_CACHE
+    _BG_CACHE = None
+
+
 def default_bg(widget=None):
     """当前主题的框架底色。
 
@@ -779,13 +814,18 @@ class SideNav(object):
 
     BG = "#f6f6f6"
     FG = "#333333"
-    SEL_BG = "#d7e6f7"
+    SEL_BG = "#d7e6f7"        # 降级默认；有主题时 __init__ 按强调色现算（见下）
     SEL_FG = "#0b57d0"
     HDR_FG = "#111111"
 
     def __init__(self, parent, spec, on_select, width=228):
         self.spec = spec                      # [{key,label,children:[{key,label,...}]} 或 {...,page=...}]
         self.on_select = on_select
+        # 选中行配色跟随主题强调色（2026-10-08 W 定"导航栏配色跟随全局主题色"）：
+        # 背景 = 强调色向底色浅化一档（默认蓝主题下 #d7e6f7，与原硬编码逐位几乎
+        # 一致），文字 = 强调色本身。样式在 App 构建前注入（theme.apply），导航
+        # 建在其后，所以这里读到的就是配置后的色。
+        self._apply_palette()
         self.collapsed = set()
         self.selected = None
         self._rows_of = {}                    # 叶子 key → 它的 Label（只重画高亮时用）
@@ -820,6 +860,32 @@ class SideNav(object):
                 out.append(("leaf", item, None, depth))
         return out
 
+    def _apply_palette(self):
+        """按当前主题重算本栏的全部配色（__init__ 与 retint 共用）。
+
+        面板/文字/组标题走应用调色板（navbg/navfg/navhdr，浅深两套现值）；
+        选中行 = 强调色向底色浅化一档 + 强调色本身（W 定"导航栏配色跟随全局
+        主题色"；默认蓝主题下 SEL_BG ≈ 原 #d7e6f7）。类常量只作无主题兜底。
+        """
+        accent = theme.c("accent")
+        self.SEL_FG = accent
+        try:
+            self.SEL_BG = theme._blend(accent, theme.c("bg"), 0.84)
+        except Exception:
+            self.SEL_BG = type(self).SEL_BG
+        self.BG = theme.c("navbg")
+        self.FG = theme.c("navfg")
+        self.HDR_FG = theme.c("navhdr")
+
+    def retint(self):
+        """主题切换后重算配色并整栏重画（app.App.retint 调）。"""
+        self._apply_palette()
+        try:
+            self.frame.configure(background=self.BG)
+        except Exception:
+            pass
+        self.render()
+
     def render(self):
         for c in self.body.winfo_children():
             c.destroy()
@@ -836,7 +902,10 @@ class SideNav(object):
                            font=(_FONT[0], _FONT[1], "bold") if depth == 0 else _FONT,
                            background=self.BG, foreground=self.HDR_FG, anchor="w",
                            padx=pad, pady=5, cursor="hand2")
-            lbl.bind("<Button-1>", lambda e, k=item["key"]: self.toggle(k))
+
+            def _grp_click(e=None, k=item["key"]):
+                self.toggle(k)         # e=None 兜底：同 _leaf_click（合成事件零参调用）
+            lbl.bind("<Button-1>", _grp_click)
         else:
             sel = self.selected == item["key"]
             # 顶层叶子（"本地模型 API""关于与诊断"）本身就是第一级标题，没选中也要加粗：
@@ -847,7 +916,13 @@ class SideNav(object):
                            background=self.SEL_BG if sel else self.BG,
                            foreground=self.SEL_FG if sel else self.FG,
                            anchor="w", padx=pad + 12, pady=4, cursor="hand2")
-            lbl.bind("<Button-1>", lambda e, it=item: self.select(it["key"]))
+
+            def _leaf_click(e=None, k=item["key"]):
+                # e 默认 None 是兜底：合成事件（自检的 event_generate）偶发被 Tcl 侧
+                # 以**零参**调用绑定函数（~15% 概率，整窗重建前后复现），lambda e
+                # 会直接 TypeError、那次点击被吞掉；真实鼠标点击始终带完整事件。
+                self.select(k)
+            lbl.bind("<Button-1>", _leaf_click)
             self._rows_of[item["key"]] = lbl      # 只重画高亮时要能直接找到它
         lbl.pack(fill="x")
 

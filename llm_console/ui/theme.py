@@ -31,7 +31,14 @@ apply() 空操作、取色返回引入前的原值、控件工厂退回原生 tt
 # 深色候选：nord-dark / tokyo-night-dark / one-dark / dracula-dark /
 #           catppuccin-dark / everforest-dark / solarized-dark / bootstrap-dark
 # （c() / button() 的语义键不变，切主题全组件自动跟随）
-THEME_NAME = "cosmo"
+THEME_NAME = "cosmo"             # 浅色主题（默认）
+DARK_THEME_NAME = "nord-dark"     # 深色主题（2026-10-08 W 拍板打样；候选见文件头）
+
+# ---- 发版临时屏蔽（v1.1.1；W 2026-10-09 定：深色模式下一步再开发）--------------
+# True = 屏蔽深色模式：resolve_mode 一律返回 light（跟随系统也只是浅色）、设置页
+# 不建「界面主题」下拉、外观页的 help 文案同步换短版。机制本体（set_mode / 深色
+# 贴图 / DWM 等）全部保留，改回 False 一处即完整恢复（settings 与自检都按它分岔）。
+RELEASE_LIGHT_ONLY = True
 
 # ---- 圆角按钮贴图几何（物理像素）----
 BTN_H = 34        # 贴图高 = 按钮高（对齐 vista 主题按钮的 34px，2.x 默认 44px）
@@ -75,6 +82,27 @@ _SEMANTIC = {
     "border": ("border", "#c9c9c9"),
 }
 
+# ---- 应用级调色板（键 → (浅色, 深色)）----
+# 这些色在 ttkbootstrap 的色表里没有对应键（或现有键的浅色值 ≠ W 调过的现状），
+# 所以按**模式**直接给值：浅色值 = 现状字面色（逐位保持今天的视觉），深色值 =
+# nord-dark 适配（打样后 W 过目再调）。经 c() 取，切换模式自动跟随。
+_APP_PALETTE = {
+    "hint":  ("#808080", "#9aa4b5"),   # 弹窗/说明灰
+    "note":  ("#5a6a7a", "#8a96a8"),   # 注脚/次级说明蓝灰
+    "dim":   ("#5a5a5a", "#7d8899"),   # 行内摘要灰
+    "oklit": ("#1a7f37", "#a3be8c"),   # 页面内嵌"运行中/成功"（顶栏状态灯走 c("ok") 语义键）
+    "warnlit": ("#b58900", "#ebcb8b"), # 页面内嵌"注意/加载中"
+    "errlit": ("#c01c28", "#bf616a"),  # 页面内嵌错误（聊天 error 标签走 c("error") 语义键）
+    "navbg": ("#f6f6f6", "#2b303c"),   # 左栏面板
+    "navfg": ("#333333", "#d8dee9"),   # 左栏文字
+    "navhdr": ("#111111", "#e5e9f0"),  # 左栏组标题
+    "flash": ("#fff3c4", "#4a4326"),   # 高级模式跳转黄底
+    "panel": ("SystemButtonFace", "#3b4252"),  # 填写类弹窗面板（浅=系统灰）
+    "warndim": ("#b06000", "#d08770"), # 源码运行提示的暗琥珀
+    "accentlit": ("#0b57d0", "#88c0d0"),  # 页面内嵌强调文字（浅=原字面）
+    "hdr": ("#111111", "#e5e9f0"),     # 窗内大标题/区块头
+}
+
 # bootstyle 语义键 → 自建圆角样式名（apply() 构建；见 _build_round_buttons）。
 # 键 "" = 无 bootstyle 的默认按钮（设置页大量按钮走它）→ 中性描边圆角。
 _ROUND_STYLE = {
@@ -87,6 +115,10 @@ _ROUND_STYLE = {
 }
 
 _style = None                 # ttkbootstrap Style 单例（apply 后非 None）
+_ACCENT = ""                  # 全局主题色配置（apply 时传入；空 = 跟主题）
+_ACCENT_SEL = ""              # 选中文本强调色覆盖（空 = 跟主题默认，**不跟**全局主题色）
+_THEME_ACCENT = ""            # 主题自己的强调色（apply 时在注入**前**抓下来当"默认"）
+_MODE = "light"               # 当前模式：light / dark（apply / set_mode 维护）
 _ROUND_OK = False             # 圆角样式族构建成功（工厂据此决定套样式还是裸原生控件）
 # 滚动条样式名 {vertical/horizontal}（apply() 里 _build_fast_scroll 自建）；
 # 建不出来就是空 dict，scroll() 回落旧路径
@@ -99,15 +131,31 @@ except Exception:             # 未安装：整层降级，绝不拖垮启动
     _ttb = None
 
 
-def apply(root):
+def apply(root, accent=None, accent_sel=None, mode="light"):
     """在 main() 建 root 之后、App 构造之前调用一次：把主题应用到整个窗口。
+
+    mode：light / dark（外观页的"跟随系统"在调用方先经 resolve_mode() 解析成
+    这两档）。主题名 = theme_name_for(mode)。
 
     ttkbootstrap 2.x 的 Style 是 ttk.Style 子类，无参 super().__init__() 会绑定
     当时的默认 root —— 所以必须在 root 建好之后调。同时把根窗底色对齐主题，
     免得深色主题下控件缝隙露出系统白底。
     返回 Style（或降级时 None）；Style 挂在模块级，取色走 c()。
+
+    accent / accent_sel：外观页的「全局主题色」与「选中文本强调色（覆盖）」配置
+    （十六进制色或空串）。accent 非空时在样式构建前注入 colors.primary ——
+    发送按钮、取回、模型名、用户名、状态灯、滑动开关这些"蓝色元素"全部跟它
+    （它们本就同源于 primary 一个变量）。**两者互相独立**：accent_sel 只管
+    选中文本，空 = 跟主题默认强调色（不是 accent —— W 2026-10-08 定"解除
+    联动、可独立配置"）。主题自己的强调色在注入**前**抓进 _THEME_ACCENT，
+    作为两处"恢复默认"的落点（否则恢复默认会被注入色抢回去，实测踩过）。
+    运行期改色只影响**选中文本**（Text.configure 便宜），其余样式是启动时
+    构建的，改色后下次启动生效。
     """
-    global _style
+    global _style, _ACCENT, _ACCENT_SEL, _THEME_ACCENT, _MODE
+    _ACCENT = str(accent or "")
+    _ACCENT_SEL = str(accent_sel or "")
+    _MODE = "dark" if mode == "dark" else "light"
     if _TBStyle is None:
         return None
     # 多 root 场景（自检夹具并存多个 Tk 实例）：Style 是单例且绑定创建时的
@@ -120,10 +168,19 @@ def apply(root):
     except Exception:
         pass
     try:
-        _style = _TBStyle(theme=THEME_NAME)
+        _style = _TBStyle(theme=theme_name_for(_MODE))
     except Exception:         # 主题名写错 / 初始化失败：退回原生外观，不让启动炸掉
         _style = None
         return None
+    try:
+        _THEME_ACCENT = str(_style.colors.get("primary") or "")
+    except Exception:
+        _THEME_ACCENT = ""
+    if _ACCENT:
+        try:
+            _style.colors.set("primary", _ACCENT)   # 样式构建前注入，全套蓝色元素跟随
+        except Exception:
+            pass
     try:
         root.configure(background=c("bg"))
     except Exception:
@@ -141,6 +198,10 @@ def apply(root):
         # 只是拖着窗口缩放时会慢，不影响功能
         pass
     try:
+        _build_semantic_styles()
+    except Exception:
+        pass
+    try:
         _ensure_widget_skin()
     except Exception:
         pass
@@ -150,6 +211,10 @@ def apply(root):
         pass
     try:
         install_focus_policy()
+    except Exception:
+        pass
+    try:                       # 标题栏 / 窗框跟着当前模式（深色时翻深）
+        set_window_frame(root)
     except Exception:
         pass
     return _style
@@ -198,7 +263,14 @@ def install_focus_policy():
 
 
 def c(key):
-    """主页面取主题色的唯一出口。key 见 _SEMANTIC；无 ttkbootstrap 返回原值。"""
+    """主页面取主题色的唯一出口。
+
+    解析顺序：应用调色板（_APP_PALETTE，浅/深两套现值）→ _SEMANTIC（ttkbootstrap
+    色键）→ 原值。无 ttkbootstrap 时调色板键仍给浅色值（与无主题时代的观感一致）。
+    """
+    pal = _APP_PALETTE.get(key)
+    if pal is not None:
+        return pal[1] if _MODE == "dark" else pal[0]
     tb_key, fallback = _SEMANTIC[key]
     if _style is None:
         return fallback
@@ -208,21 +280,259 @@ def c(key):
         return fallback
 
 
+def mode():
+    """当前模式：light / dark。"""
+    return _MODE
+
+
+def theme_name_for(mode):
+    """模式 → 主题名（浅 = cosmo，深 = nord-dark）。"""
+    return DARK_THEME_NAME if mode == "dark" else THEME_NAME
+
+
+def system_prefers_dark():
+    r"""Windows 系统是否偏好深色应用（跟随系统的判据）。
+
+    读 HKCU\...\Themes\Personalize 的 AppsUseLightTheme（DWORD，0 = 深色）；
+    键不存在 / 读不了（老系统、非 Windows）一律按浅色。
+    """
+    try:
+        import winreg
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER,
+                            r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize") as k:
+            return winreg.QueryValueEx(k, "AppsUseLightTheme")[0] == 0
+    except Exception:
+        return False
+
+
+def resolve_mode(value):
+    """cfg["ui_theme"]（auto/light/dark）→ light/dark。auto = 跟随系统。"""
+    if RELEASE_LIGHT_ONLY:
+        return "light"            # v1.1.1 临时屏蔽：一律浅色（见顶部开关注释）
+    v = str(value or "auto")
+    if v == "dark":
+        return "dark"
+    if v == "light":
+        return "light"
+    return "dark" if system_prefers_dark() else "light"
+
+
+def _dwm_frame_now(win):
+    """真正去挂 DWM 属性（见 set_window_frame 的说明）。"""
+    try:
+        import ctypes
+        hwnd = ctypes.windll.user32.GetParent(win.winfo_id())
+        if not hwnd:
+            return
+        val = ctypes.c_int(1 if _MODE == "dark" else 0)
+        for attr in (20, 19):
+            try:
+                ctypes.windll.dwmapi.DwmSetWindowAttribute(
+                    hwnd, attr, ctypes.byref(val), ctypes.sizeof(val))
+            except Exception:
+                pass
+        try:
+            if _MODE == "dark":
+                bc = c("bg")                     # 页面底色，如 "#2e3440"
+                try:
+                    r, g, b = (int(bc[1:3], 16), int(bc[3:5], 16), int(bc[5:7], 16))
+                except (ValueError, IndexError):
+                    r, g, b = (0x2E, 0x34, 0x40)
+                color = ctypes.c_uint(r | (g << 8) | (b << 16))   # COLORREF 0x00BBGGRR
+            else:
+                color = ctypes.c_uint(0xFFFFFFFF)                 # DWMWA_COLOR_DEFAULT
+            ctypes.windll.dwmapi.DwmSetWindowAttribute(
+                hwnd, 34, ctypes.byref(color), ctypes.sizeof(color))
+        except Exception:
+            pass
+    except Exception:
+        pass
+
+
+def set_window_frame(win):
+    """把窗口的标题栏 / 边框切到深色（Windows DWM；非 Windows / 失败一律静默）。
+
+    2026-10-09 W 报「深色下应用边框仍然是白色的」—— Tk 的客户区换深了，
+    OS 画的标题栏还是浅色。DWMWA_USE_IMMERSIVE_DARK_MODE（属性号：新系统 20、
+    老版本 19）一挂即翻；翻深之后 DWM 还会在标题栏外画一圈 1px 描边，用
+    DWMWA_BORDER_COLOR（属性号 34）把它染成页面底色，浅色发 DWMWA_COLOR_DEFAULT
+    还系统默认。
+    ⚠ **映射前挂不上**（2026-10-09 像素级实测：apply() 在建窗之前调的那次全被
+    覆盖，标题栏保持浅色；窗口映射后再挂一次立刻变深）——所以这里挂完再排一次
+    after 延迟重挂；窗口在延迟到点前销毁就跳过。hwnd 取法：winfo_id() 是内层
+    客户窗，顶层的真 hwnd 是父窗（GetParent）。任何 Toplevel 建完都可以调。
+    """
+    _dwm_frame_now(win)
+    try:
+        win.after(250, lambda: _dwm_frame_now(win)
+                  if win.winfo_exists() else None)
+    except Exception:
+        pass
+    # 真正的兜底是映射事件：窗口**显示那一下**会把映射前挂的属性覆盖掉，而 250ms
+    # 的延迟在启动路径里可能仍早于映射（实测截图回浅）。Map 事件是"已显示"的硬
+    # 信号，挂在这里必中；重复触发（最小化还原等）重挂也无害。
+    try:
+        win.bind("<Map>", lambda _e, w=win: _dwm_frame_now(w), add="+")
+    except Exception:
+        pass
+
+
+def default_accent():
+    """主题自己的强调色（未注入任何配置时的 primary）。
+
+    外观页两处"恢复默认"与选中文本的默认都落在这里 —— **不能**用 c("accent")
+    当默认：全局主题色非空时它已被注入成用户配置的色，"恢复默认"会被抢回
+    旧配置（2026-10-08 W 报的"恢复默认恢复的是上次保存的颜色"）。
+    """
+    return _THEME_ACCENT or _SEMANTIC["accent"][1]
+
+
+# ttk 语义样式：字面色 foreground 的替代品 —— 控件挂样式名而不是写死色，
+# 样式在 apply / set_mode 时按当前模式 configure，切换主题自动跟随
+# （ttk 控件显式 foreground= 是控件级选项，theme_use 不会重设 —— 别走那条路）。
+_SEMANTIC_STYLES = {
+    "Hint.TLabel": "hint",
+    "Note.TLabel": "note",
+    "Dim.TLabel": "dim",
+    "OkLit.TLabel": "oklit",
+    "WarnLit.TLabel": "warnlit",
+    "WarnDim.TLabel": "warndim",
+    "ErrLit.TLabel": "errlit",
+    "Muted.TLabel": "muted",
+    "Label2.TLabel": "label",
+    "AccentLit.TLabel": "accentlit",
+    "Hdr.TLabel": "hdr",
+}
+
+
+def _build_semantic_styles():
+    """按当前模式 configure 语义样式（apply 与 set_mode 各调一次）。"""
+    st = _style
+    if st is None:
+        return
+    for name, key in _SEMANTIC_STYLES.items():
+        try:
+            st.configure(name, foreground=c(key))
+        except Exception:
+            pass
+
+
+def set_mode(mode, accent=None, accent_sel=None):
+    """运行期切换浅 / 深模式（同一个 root 上实时生效）。
+
+    `style.theme_use(主题名)` 重画 ttk 控件与它注册过的经典 tk 控件（实测聊天
+    Text 都会自动翻深）；自绘贴图（Round 圆角族 / 滑动开关）颜色烘焙在 PIL 图里，
+    要重跑三个构建函数（幂等，取当前主题色）；`default_bg()` 的全局缓存清掉；
+    `_THEME_ACCENT` 重新抓新主题原色（"恢复默认"的落点跟着换），强调色配置重放。
+    经典控件里烘焙的语义色由调用方的 retint（app.App.retint + retint_widgets）
+    重涂。返回是否成功（ttkbootstrap 没装 / 切换抛错 = False，界面原地不动）。
+    """
+    global _MODE, _THEME_ACCENT
+    if _style is None:
+        return False
+    try:
+        _style.theme_use(theme_name_for(mode))
+    except Exception:
+        return False
+    _MODE = "dark" if mode == "dark" else "light"
+    try:
+        _THEME_ACCENT = str(_style.colors.get("primary") or "")
+    except Exception:
+        _THEME_ACCENT = ""
+    if _ACCENT:
+        try:
+            _style.colors.set("primary", _ACCENT)
+        except Exception:
+            pass
+    for build in (_build_round_buttons, _build_fast_scroll, _build_semantic_styles):
+        try:
+            build()
+        except Exception:
+            pass
+    try:                       # 已建出的滚动条换到当前模式的样式（深色不再留白条）
+        restyle_scrollbars(_style.master)
+    except Exception:
+        pass
+    try:                       # 标题栏 / 窗框跟着翻深（W 2026-10-09 报）
+        set_window_frame(_style.master)
+    except Exception:
+        pass
+    return True
+
+
+def tint(w, fg=None, bg=None):
+    """按语义键给经典控件上色并盖 `_tint` 戳。
+
+    经典控件（tk.Label / tk.Text / 显式 foreground 的 ttk.Label）的颜色是
+    创建时烘焙的，theme_use 不会重设 —— 戳在控件上，主题切换后 retint_widgets
+    遍历重涂。fg / bg 是 c() 的键名（None = 不动该向）。
+    """
+    kw = {}
+    if fg:
+        kw["foreground"] = c(fg)
+    if bg:
+        kw["background"] = c(bg)
+    if kw:
+        try:
+            w.configure(**kw)
+        except Exception:
+            pass
+    try:
+        w._tint = (fg, bg)
+    except (AttributeError, TypeError):
+        pass
+    return w
+
+
+def retint_widgets(root_widget):
+    """遍历存活的控件树，按 `_tint` 戳重涂（主题切换后调用一次）。
+
+    从 root 走 winfo_children：Toplevel 是 root 的孩子，所以**开着的次级窗**
+    一起被走到。控件已销毁 / configure 失败都按没看见处理。
+    """
+    stack = [root_widget]
+    while stack:
+        w = stack.pop()
+        t = getattr(w, "_tint", None)
+        if t:
+            fk, bk = t
+            kw = {}
+            if fk:
+                kw["foreground"] = c(fk)
+            if bk:
+                kw["background"] = c(bk)
+            if kw:
+                try:
+                    w.configure(**kw)
+                except Exception:
+                    pass
+        try:
+            stack.extend(w.winfo_children())
+        except Exception:
+            pass
+
+
 def text_kw(fallback_bg=None):
     """tk 原生文本控件（聊天区 / 输入框）的主题配色参数。
 
     返回 dict 直接 ** 展开进构造参数：有主题时给 background / foreground /
     insertbackground（插入光标，深色主题下不配上等于看不见光标）与选区色；
     无主题时给 {}（或仅 fallback_bg，供原来就显式白底的聊天区逐位还原）。
+
+    选区色：**只跟「选中文本强调色」配置（_ACCENT_SEL），与全局主题色互相
+    独立**；留空 = 主题默认强调色（default_accent()）。选区文字色按底色亮度
+    自动配黑/白（同实心按钮的规则），用户选浅色时不会白底白字。
     """
     if _style is None:
         return {"background": fallback_bg} if fallback_bg else {}
     colors = _style.colors
+    sel_bg = _ACCENT_SEL or default_accent()
+    sel_fg = "#ffffff" if _luma(sel_bg) < 0.62 else "#1a1a1a"
     return {"background": _safe(colors, "inputbg", c("bg")),
             "foreground": _safe(colors, "inputfg", c("body")),
             "insertbackground": c("body"),
-            "selectbackground": _safe(colors, "selectbg", c("accent")),
-            "selectforeground": _safe(colors, "selectfg", "#ffffff")}
+            "selectbackground": sel_bg,
+            "selectforeground": sel_fg}
 
 
 def _safe(colors, key, fallback):
@@ -460,9 +770,12 @@ def _build_fast_scroll():
       · 用**自己的样式名**（`Native.*`），别覆盖 ttkbootstrap 的 `Round.*`：它的构建器
         在 Style 重建（多 root 的测试夹具）时会把自己的样式重新注册回去，覆盖我们的
         布局就白改了（自检里换过好几轮 root）。
+      · **深色模式不建、也不用**（2026-10-09 W 报深色下滚动条仍是白色条）：vista
+        原生滑块是浅色的，`_scroll_style_name` 在深色返回 "" → 走主题自带的
+        round 变体（nord-dark 下是深色的）；深色下付的贴图税换正确性（同中性按钮）。
     """
     st = _style
-    if st is None:
+    if st is None or _MODE != "light":
         return None
     for axis in ("Vertical", "Horizontal"):
         st.element_create("%s.Scrollbar.thumb" % axis, "from", "vista")
@@ -476,18 +789,44 @@ def _build_fast_scroll():
     return _SCROLL_STYLES
 
 
-def scroll(master, **kw):
-    """ttk.Scrollbar 工厂：自建「原生元素」样式（见 `_build_fast_scroll`）。
+def _scroll_style_name(orient):
+    """当前模式该用的滚动条样式名：浅色 = 自建 Native.*，深色 = ""（主题自带 round）。"""
+    key = "horizontal" if str(orient or "").lower().startswith("h") else "vertical"
+    if _MODE == "light" and _SCROLL_STYLES.get(key):
+        return _SCROLL_STYLES[key]
+    return ""
 
-    外观与原来 ttkbootstrap 的 round 变体同为中性灰圆角滑块，但重绘成本低 25×
-    —— 原来那版是拖动窗口缩放的卡顿主因（2026-10-08 实测）。
+
+def restyle_scrollbars(root_widget):
+    """主题切换后把**已建出**的滚动条换到当前模式的样式（新建的走 scroll() 工厂自带）。
+
+    没有这一步，切深色后聊天区 / 设置页那几条 `Native.*` 原生滚动条会保持浅色
+    （2026-10-09 W 报深色下"右边一条白条"）。
+    """
+    stack = [root_widget]
+    while stack:
+        w = stack.pop()
+        try:
+            if w.winfo_class() == "TScrollbar":
+                w.configure(style=_scroll_style_name(w.cget("orient")))
+        except Exception:
+            pass
+        try:
+            stack.extend(w.winfo_children())
+        except Exception:
+            pass
+
+
+def scroll(master, **kw):
+    """ttk.Scrollbar 工厂：浅色 = 自建「原生元素」样式（见 `_build_fast_scroll`），
+    深色 = 主题自带 round 变体（深色正确；贴图税换正确性，同中性按钮）。
+
     建不出样式时回落：有 ttkbootstrap 用它的 round 变体，否则裸原生 ttk。
     """
     kw.pop("bootstyle", None)          # 兼容既有调用；自建样式不吃 bootstyle
-    orient = str(kw.get("orient", "vertical")).lower()
-    key = "horizontal" if orient.startswith("h") else "vertical"
-    if _SCROLL_STYLES.get(key):
-        return _ttk().Scrollbar(master, style=_SCROLL_STYLES[key], **kw)
+    name = _scroll_style_name(kw.get("orient"))
+    if name:
+        return _ttk().Scrollbar(master, style=name, **kw)
     if _ttb is not None and _style is not None:
         return _ttb.Scrollbar(master, bootstyle="round", **kw)
     return _ttk().Scrollbar(master, **kw)
@@ -557,19 +896,26 @@ def _build_native_flat(ttk_style, colors, bg):
     它们换原生；彩色 / 实心按钮数量少、税小，保留圆角贴图（发送的蓝色
     主操作、取回的描边强调不丢）。输入框 / 下拉 / 开关与图标按钮照旧
     （开关与图标是固定尺寸贴图，从不缩放，本就无税）。
-    外观：方角系统按钮 + 系统悬停态，文字边距沿用 BTN_PAD_X（几何与
-    圆角版对齐，预览与实测见 `08` §10.6）。复制不到 vista 元素时抛错，
-    调用方落回圆角贴图路径。
+    外观：方角系统按钮 + 系统悬停态。padding = (BTN_PAD_X-4, 2, BTN_PAD_X-4, 2)
+    —— vista 的 Button.button 自带 ~11px/侧内边距，实测 4 字按钮 78×30（圆角版
+    ~86×34）；叠 10px/侧样式 padding 后 ~98×34，比圆角版略宽、同高（2026-10-08
+    W："清空对话等按钮过于窄小，保持与其他按钮风格一致"；顶栏三个按钮共 +60px，
+    1080 默认宽的顶栏余量还剩 ~96px）。padding 必须由布局里的 Button.padding
+    元素消费（见下）。复制不到 vista 元素时抛错，调用方落回圆角贴图路径。
     """
     from ttkbootstrap.constants import NSEW
     from ttkbootstrap.style.layout import El, layout
     _style.element_create("Native.Flat.button", "from", "vista", "Button.button")
     _style.element_create("Native.Flat.label", "from", "vista", "Button.label")
+    # padding 必须由 padding 元素消费：vista 的 -padding 归 Button.padding 管，
+    # 布局直接 button→label 会把样式 padding 整个跳过（实测按钮纹丝不动）
+    _style.element_create("Native.Flat.padding", "from", "vista", "Button.padding")
     layout(_style, ttk_style,
            El("Native.Flat.button", sticky=NSEW, children=[
-               El("Native.Flat.label", sticky=NSEW)]))
+               El("Native.Flat.padding", sticky=NSEW, children=[
+                   El("Native.Flat.label", sticky=NSEW)])]))
     _style.configure(ttk_style, anchor="center",
-                     padding=(BTN_PAD_X, 0, BTN_PAD_X, 0),
+                     padding=(BTN_PAD_X - 4, 2, BTN_PAD_X - 4, 2),
                      foreground=colors.get("fg"), background=bg,
                      borderwidth=0, relief="flat",
                      focusthickness=0, focuscolor="")
@@ -607,11 +953,16 @@ def _build_round_buttons():
             # 免掉贴图税（W 2026-10-08 定「只换中性按钮」；机制与实测见
             # `_build_native_flat` 与 `08` §10.6）。复制不到 vista 元素就
             # 落回下面的圆角贴图路径，绝不拖垮启动。
-            try:
-                _build_native_flat(ttk_style, colors, bg)
-                continue
-            except Exception:
-                pass
+            # ⚠ 深色模式**不许**走原生元素（2026-10-09 W 报「按钮白底白字」）：
+            # vista 原生按钮跟随 OS 浅色渲染，而样式 foreground 取的是深色主题的
+            # 浅色文字 → 浅底浅字。深色一律走下面那支深色贴图（文字色、四态全部
+            # 按当前主题画；代价是深色付回贴图税 —— 正确性优先）。
+            if _MODE == "light":
+                try:
+                    _build_native_flat(ttk_style, colors, bg)
+                    continue
+                except Exception:
+                    pass
         if solid:
             accent = colors.get(colorkey)
             hov = _blend(accent, "#ffffff", 0.12)

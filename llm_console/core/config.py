@@ -30,7 +30,7 @@ CONFIG_PATH = os.path.join(APP_DIR, "gui_config.json")
 
 # 版本号：发版时改这一处（--selfcheck / --version 会打印它）。
 # GitHub Release 的 tag 要与它一致（tag 去掉开头的 v），Actions 工作流会做一致性校验。
-APP_VERSION = "1.1.0"
+APP_VERSION = "1.1.1"
 
 CFG_VERSION = 3
 
@@ -77,6 +77,11 @@ DEFAULT_CONFIG = {
     # 用户模式（2026-10-07 W 定）：simple = 普通用户模式（默认，精简导航、无 "?" 气泡）；
     # advanced = 高级用户模式（原有的完整设置页）。设置窗底部按钮互切，写进配置重启仍算数。
     "user_mode": "simple",
+    # ---- 外观页（2026-10-08 W 定；主题下拉本阶段只存值，切换逻辑后续实现）----
+    "ui_theme": "auto",              # 跟随系统 auto / 浅色 light / 深色 dark（占位）
+    "ui_accent": "",                 # 全局主题色（#RRGGBB）：发送/取回/模型名/用户名/状态灯/开关/左栏选中；空 = 跟主题
+    "ui_accent_sel": "",             # 选中文本强调色（#RRGGBB）；空 = 跟主题默认，与全局主题色互相独立
+    "ui_custom_colors": [],          # 选色器「自定义颜色」16 格（#RRGGBB / ""），随改随落盘
     "show_reasoning": True,
     # 云端文本对话的「展示思考过程」独立开关（2026-10-07 W 定：与本地 show_reasoning
     # 完全独立存储）。老配置里没有这个键时，load_config 按当时 show_reasoning 的值
@@ -161,6 +166,10 @@ DEFAULT_CONFIG = {
     "model_provider": "local",     # 当前选中模型属于谁：local = 本地；否则是 provider id
     # 文本附件超预算时，是否让云端模型自己决定读哪一段（多花一次规划请求，默认关）
     "cloud_file_model_decides": False,
+    # ---- 提示词优化（W 2026-10-08 需求；core/promptopt + connection/optimize 已落地，UI 下一轮）----
+    # 优化用的文本模型：留空 = 跟随当前选中的文本模型（选中生图/生视频时回退第一个
+    # 可用文本模型：本地优先、其次填过密钥的云端）；显式 = "local" 或 "pid::model"。
+    "prompt_opt_model": "",
     # ---- 云端生图 / 生视频（二三期：走服务商原生接口，不走本地 sd-cli）----
     # 产物 URL 只活 24 小时，所以成功判定是"文件已在本地"；
     # 目录留空 = <产物文件夹>/云端/{image,video}（产物文件夹见 output_dir）
@@ -262,7 +271,7 @@ STR_KEYS = ("models_dir", "host", "api_key", "reasoning_mode",
             "output_dir", "img_output_dir", "vid_output_dir",
             "cloud_img_dir", "cloud_vid_dir", "cloud_img_size",
             "cloud_img_negative", "cloud_video_resolution", "cloud_video_ratio",
-            "cloud_video_negative", "chat_log_dir")
+            "cloud_video_negative", "chat_log_dir", "prompt_opt_model")
 
 _CFG_LOCK = threading.RLock()   # 可重入：save_config 自带锁，调用方若已持锁不会自我死锁
 

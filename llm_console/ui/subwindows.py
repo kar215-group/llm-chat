@@ -121,8 +121,10 @@ class SubWindowMixin:
         combo_u = theme.comb(body, state="readonly", width=8, textvariable=unit_var,
                                values=list(providers.UNITS_BY_KIND[kind]))
         # 已填清单用 Text 而不是"拼全部模型名"的 Label（坑 92：状态类 Label 必须定长）
-        lst = tk.Text(body, height=8, width=46, font=("Microsoft YaHei UI", 9),
-                      state="disabled", wrap="none")
+        lst = theme.tint(tk.Text(body, height=8, width=46, font=("Microsoft YaHei UI", 9),
+                                 state="disabled", wrap="none",
+                                 background=theme.c("bg"), foreground=theme.c("body")),
+                         fg="body", bg="bg")   # 展示区随主题底色（浅色=白，深色=深）
 
         def refresh_list():
             got = providers.price_table(providers.get_provider(cfg, pid_var.get()), kind)
@@ -212,7 +214,7 @@ class SubWindowMixin:
                    command=lambda: write_price(False)).pack(side="left")
         theme.button(btns, text="清除该模型单价", width=14,
                    command=lambda: write_price(True)).pack(side="left", padx=(8, 0))
-        ttk.Label(btns, textvariable=status_var, foreground="#808080", wraplength=230,
+        ttk.Label(btns, textvariable=status_var, style="Hint.TLabel", wraplength=230,
                   justify="left", font=("Microsoft YaHei UI", 9)).pack(side="left", padx=(10, 0))
 
         if _pl:
@@ -264,7 +266,7 @@ class SubWindowMixin:
             ttk.Label(body, text=label, width=8, anchor="w").grid(
                 row=i, column=0, sticky="nw", padx=(0, 8), pady=3)
             ttk.Label(body, text=str(value), wraplength=560, justify="left",
-                      foreground="#5a5a5a").grid(row=i, column=1, columnspan=2,
+                      style="Dim.TLabel").grid(row=i, column=1, columnspan=2,
                                                  sticky="w", pady=3)
 
         frozen = bool(getattr(sys, "frozen", False))
@@ -279,8 +281,10 @@ class SubWindowMixin:
                 else "还没有异常记录")
 
         status = tk.StringVar(value="")
-        box = tk.Text(body, height=16, width=52, font=("Microsoft YaHei UI", 9),
-                      state="normal", wrap="word")
+        box = theme.tint(tk.Text(body, height=16, width=52, font=("Microsoft YaHei UI", 9),
+                                 state="normal", wrap="word",
+                                 background=theme.c("bg"), foreground=theme.c("body")),
+                         fg="body", bg="bg")
         box.insert("1.0", "点「一键诊断」检查这台机器：引擎在不在、模型放对没有、"
                           "目录能不能写、端口有没有被占。\n"
                           "这一步只读本地信息 —— 不联网、不启动推理引擎、不碰显卡。")
@@ -362,7 +366,7 @@ class SubWindowMixin:
                          ("保存诊断报告", save_report),
                          ("打开错误日志", lambda: open_file(crashlog.log_path(), "错误日志"))):
             theme.button(bf, text=text, command=fn).pack(side="left", padx=(0, 6))
-        ttk.Label(body, textvariable=status, foreground="#808080", wraplength=520,
+        ttk.Label(body, textvariable=status, style="Hint.TLabel", wraplength=520,
                   justify="left", font=("Microsoft YaHei UI", 9)).grid(
             row=rows["i"], column=1, columnspan=2, sticky="w", pady=(6, 0))
         widgets.center_on(win, host)   # 摆到触发它的设置页正中，别落在屏幕左上角
@@ -422,7 +426,7 @@ class SubWindowMixin:
                updater.display_version(tag),
                info.get("published") or "日期未知",
                updater.channel_label(ch)),
-            foreground="#5a6a7a", font=("Microsoft YaHei UI", 9),
+            style="Note.TLabel", font=("Microsoft YaHei UI", 9),
             wraplength=524, justify="left")
         ver_lab.pack(side="top", anchor="w", pady=(2, 0))
 
@@ -430,7 +434,10 @@ class SubWindowMixin:
         body.pack(side="top", fill="both", expand=True, padx=14, pady=(4, 4))
         nfr = ttk.Frame(body)
         nfr.pack(side="top", fill="both", expand=True)
-        notes = tk.Text(nfr, height=7, font=("Microsoft YaHei UI", 9), wrap="char")
+        notes = theme.tint(tk.Text(nfr, height=7, font=("Microsoft YaHei UI", 9),
+                                   wrap="char", background=theme.c("bg"),
+                                   foreground=theme.c("body")),
+                           fg="body", bg="bg")
         notes_sb = theme.scroll(nfr, command=notes.yview)
         notes.configure(yscrollcommand=notes_sb.set)
         # 滚动条先 pack：Text 带 expand 会把整条 cavity 吃掉，后 pack 的滚动条只剩 1x1
@@ -462,7 +469,7 @@ class SubWindowMixin:
         bar = ttk.Progressbar(body, maximum=100.0, variable=bar_var, length=320)
         status = tk.StringVar(value="下载用的是 GitHub 发布包，先校验再替换，"
                                    "替换前会再确认一次。")
-        st_lab = ttk.Label(body, textvariable=status, foreground="#5a6a7a",
+        st_lab = ttk.Label(body, textvariable=status, style="Note.TLabel",
                            wraplength=520, justify="left",
                            font=("Microsoft YaHei UI", 9))
         st_lab.pack(side="top", anchor="w", pady=(8, 0))
@@ -471,7 +478,7 @@ class SubWindowMixin:
 
         if exe_here is None:
             ttk.Label(body, text="这是源码运行：自动更新只对下载的 exe 生效，"
-                                 "更新请 git pull。", foreground="#b06000",
+                                 "更新请 git pull。", style="WarnDim.TLabel",
                       font=("Microsoft YaHei UI", 9)).pack(
                 side="top", anchor="w", pady=(6, 0))
 
@@ -509,7 +516,7 @@ class SubWindowMixin:
                 win.clipboard_append(url)
                 status.set("已复制%s，可以在浏览器或下载工具里取回来：%s"
                            % ("安装包直链" if state.get("url") else "发布页地址", url))
-                st_lab.configure(foreground="#5a6a7a")
+                st_lab.configure(style="Note.TLabel")
             except Exception as e:
                 status.set("复制失败（%s）—— 地址：%s" % (e, url))
 
@@ -543,7 +550,7 @@ class SubWindowMixin:
                 pass
         win.protocol("WM_DELETE_WINDOW", _close)
 
-        def _restore_prompt(why, color="#b00020"):
+        def _restore_prompt(why):
             """一次尝试结束（多半是失败）：清暂存、回到提示态。窗口可能已关。"""
             _cleanup_staging()
             state["stage"] = "prompt"
@@ -552,7 +559,7 @@ class SubWindowMixin:
             bar.pack_forget()
             bar_var.set(0.0)
             status.set(why)
-            st_lab.configure(foreground=color)
+            st_lab.configure(style="Note.TLabel")
             btn_go.configure(text="立即更新",
                              state="normal" if exe_here else "disabled")
             btn_stop.configure(text="暂不", state="normal")
@@ -573,7 +580,7 @@ class SubWindowMixin:
                 return
             status.set("下载完成，校验通过。更新需要关闭当前程序"
                        "（正在运行的服务也会一并停止），然后自动打开新版本。")
-            st_lab.configure(foreground="#1a7f37")
+            st_lab.configure(style="OkLit.TLabel")
             btn_go.configure(text="确认并更新", state="normal")
             btn_stop.configure(text="取消", state="normal")
 
@@ -638,7 +645,7 @@ class SubWindowMixin:
             btn_stop.configure(text="取消下载", state="normal")
             bar.pack(side="top", anchor="w", pady=(6, 0))
             bar_var.set(0.0)
-            st_lab.configure(foreground="#5a6a7a")
+            st_lab.configure(style="Note.TLabel")
             status.set("正在向 GitHub 查询安装包…")
 
             def work():
@@ -714,7 +721,7 @@ class SubWindowMixin:
                 bar.pack_forget()
                 bar_var.set(0.0)
                 status.set("已取消，本机版本没有动。下载的文件已清掉。")
-                st_lab.configure(foreground="#5a6a7a")
+                st_lab.configure(style="Note.TLabel")
                 btn_go.configure(text="立即更新",
                                  state="normal" if exe_here else "disabled")
                 btn_stop.configure(text="暂不", state="normal")

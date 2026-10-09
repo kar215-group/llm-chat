@@ -623,6 +623,7 @@ class ChatMixin:
                 self._append("\n[云端] %s\n图片已保留，处理完再发一次就行。\n"
                              % self._no_image_hint(capability.resolve(self.cfg)), "meta")
             self.input.delete("1.0", "end")
+            self._opt_star_refresh()
             self._do_send(text, allow_image=capability.can_take_image(self.cfg))
             return
         if not self._server_ready_flag:
@@ -639,6 +640,7 @@ class ChatMixin:
                 return
             self._pending_text = text
             self.input.delete("1.0", "end")
+            self._opt_star_refresh()
             self._begin_svc()
             self.send_btn.configure(state="disabled")
             self._append("\n[服务] 正在加载新模型 %s（GPU 层数 %d），就绪后自动发送你的消息…\n"
@@ -667,6 +669,7 @@ class ChatMixin:
             threading.Thread(target=work, daemon=True).start()
             return
         self.input.delete("1.0", "end")
+        self._opt_star_refresh()
         self._do_send(text)
 
     def _do_send(self, text, allow_image=True):

@@ -23,7 +23,7 @@ class ExitDialog(tk.Toplevel):
 
         ttk.Label(self, text="后台模型服务正在运行。",
                   font=("Microsoft YaHei UI", 10, "bold")).pack(padx=28, pady=(18, 4))
-        ttk.Label(self, text="关闭程序会同时停止后台服务。", foreground="#666666").pack(
+        ttk.Label(self, text="关闭程序会同时停止后台服务。", style="Note.TLabel").pack(
             padx=28, pady=(0, 14))
         box = ttk.Frame(self)
         box.pack(padx=28, pady=(0, 14))
@@ -32,7 +32,7 @@ class ExitDialog(tk.Toplevel):
         theme.button(box, text="取消", width=10,
                    command=lambda: self._done("cancel")).pack(side="left", padx=4)
         ttk.Label(self, text="「取消」返回主窗口，程序与服务继续运行。Esc 也可取消。",
-                  foreground="#999999",
+                  style="Muted.TLabel",
                   font=("Microsoft YaHei UI", 9)).pack(padx=28, pady=(0, 14))
 
         self.bind("<Escape>", lambda e: self._done("cancel"))

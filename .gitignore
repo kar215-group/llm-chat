@@ -34,6 +34,8 @@ gui_config.json
 secrets.json
 # 云端异步任务台账（task_id + 24 小时就过期的产物地址），换机器还原毫无意义
 cloud_jobs.json
+# 提示词优化的用户选择记录（纯本机偏好数据，同 chat_logs 口径：不进仓库）
+prompt_opt_choices.json
 *.env
 
 # 模型权重与媒体产物（都可从外部重新下载/生成）

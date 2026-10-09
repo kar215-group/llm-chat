@@ -30,6 +30,7 @@ from .service import ServiceMixin
 from .models_ui import ModelsMixin, NO_MODEL_LABEL, model_missing
 from .settings import SettingsMixin
 from .subwindows import SubWindowMixin
+from .promptopt_ui import PromptOptMixin
 
 # 输出栏那条「[环境] 三条路都还没通」提示的文字标签：首个可用模型一出现，
 # `_dismiss_env_hint` 按它把整块（连嵌进来的两个按钮）删掉（W 2026-10-08）。
@@ -37,7 +38,7 @@ ENV_HINT_TAG = "env_hint"
 
 
 class App(ChatMixin, ImageGenMixin, VideoGenMixin, ServiceMixin, ModelsMixin, SettingsMixin,
-          SubWindowMixin):
+          SubWindowMixin, PromptOptMixin):
     """主窗口外壳：布局、主轮询、状态灯、退出；其余职责分散在各 Mixin。"""
 
     def __init__(self, root, cfg, first_run=False):
@@ -85,6 +86,10 @@ class App(ChatMixin, ImageGenMixin, VideoGenMixin, ServiceMixin, ModelsMixin, Se
         # 状态队列每 3 秒叫一次 `_render_status`，而"整排重放"要 6~12 ms —— 状态没变
         # 就直接跳过（W 2026-10-08，见 `_layout_topbar`）。
         self._topbar_state = None
+        # 主题实时切换：状态灯要按"最后状态"重涂（retint 用）；跟随系统模式
+        # 每 30 秒对一次系统深浅偏好（ui_theme=auto 才动手）
+        self._last_status = None
+        self.root.after(30000, self._poll_system_theme)
         # 本轮对话是不是云端链路：「展示思考过程」本地与云端是两个独立开关
         # （cfg["show_reasoning"] / cfg["cloud_show_reasoning"]），_poll 渲染时按它分流。
         # 在 _do_send 开线程前置位；忙碌守卫保证一轮中间不会换链路。
@@ -461,6 +466,10 @@ class App(ChatMixin, ImageGenMixin, VideoGenMixin, ServiceMixin, ModelsMixin, Se
             bg=theme.c("bg"), fg=theme.c("accent"),
             activebackground=theme.c("bg"), activeforeground=theme.c("accent"),
             cursor="hand2", font=("Microsoft YaHei UI", 10, "bold"))
+        # 盖 `_tint` 戳：运行期切主题时 ttkbootstrap 的 theme_use 会把这个手工
+        # tk.Button 涂成"主题色底黑字"（实测 bg→primary、fg→#000），retint 靠这枚
+        # 戳把它按语义键重涂回来（W 2026-10-09 报「模型名变主题色底」）
+        theme.tint(self.model_btn, fg="accent", bg="bg")
         # ⚠ 这里**不要**给模型名按钮加固定 width：试过 width=30，顶栏需求从 904 涨到
         # 1120，右侧「清空对话」被压到 1px 直接消失（2026-10-03 实测）。
         # 顶栏宽度是按「模型名不超过 models.TOPBAR_ALIAS_MAX 字」来保证的，
@@ -591,13 +600,14 @@ class App(ChatMixin, ImageGenMixin, VideoGenMixin, ServiceMixin, ModelsMixin, Se
                 self._tile_px = 96
         except Exception:
             pass
-        strip = tk.Frame(self.attach_frame, background=widgets.default_bg())
+        strip = theme.tint(tk.Frame(self.attach_frame, background=theme.c("bg")), bg="bg")
         strip.grid(row=0, column=0, sticky="we")
-        self.attach_canvas = tk.Canvas(strip, height=self._tile_px + 40,
-                                       highlightthickness=0, xscrollincrement=1,
-                                       background=widgets.default_bg())
+        self.attach_canvas = theme.tint(
+            tk.Canvas(strip, height=self._tile_px + 40,
+                      highlightthickness=0, xscrollincrement=1,
+                      background=theme.c("bg")), bg="bg")
         self.attach_canvas.pack(side="left", fill="both", expand=True)
-        self._tile_inner = tk.Frame(self.attach_canvas, background=widgets.default_bg())
+        self._tile_inner = theme.tint(tk.Frame(self.attach_canvas, background=theme.c("bg")), bg="bg")
         self.attach_canvas.create_window((0, 0), window=self._tile_inner, anchor="nw")
         self._tile_inner.bind("<Configure>",
                               lambda _e: self.attach_canvas.configure(
@@ -610,12 +620,13 @@ class App(ChatMixin, ImageGenMixin, VideoGenMixin, ServiceMixin, ModelsMixin, Se
             w.bind("<MouseWheel>", self._strip_wheel)
 
         # -- 右：边界区域，本次发送的两档选择（仅生图模型；不支持的档置灰不隐藏，W 2026-10-06）--
-        self.refmode_zone = tk.Frame(self.attach_frame, relief="groove", bd=1,
-                                     background=widgets.default_bg())
+        self.refmode_zone = theme.tint(tk.Frame(self.attach_frame, relief="groove", bd=1,
+                                                background=theme.c("bg")), bg="bg")
         self.refmode_zone.grid(row=0, column=1, sticky="ns", padx=(8, 0))
-        tk.Label(self.refmode_zone, text="带图方式", background=widgets.default_bg(),
-                 foreground=theme.c("label"),
-                 font=("Microsoft YaHei UI", 9)).pack(anchor="w", padx=8, pady=(4, 0))
+        theme.tint(tk.Label(self.refmode_zone, text="带图方式",
+                            background=theme.c("bg"), foreground=theme.c("label"),
+                            font=("Microsoft YaHei UI", 9)),
+                   fg="label", bg="bg").pack(anchor="w", padx=8, pady=(4, 0))
         self._ref_mode_var = tk.StringVar(value="")
         self._refmode_radios = {}
         for m in capability.MODES:
@@ -666,6 +677,9 @@ class App(ChatMixin, ImageGenMixin, VideoGenMixin, ServiceMixin, ModelsMixin, Se
         self.attach_btn = theme.button(btns, text="📎 附件", command=self.pick_image,
                                        width=10, bootstyle="secondary-outline")
         self.attach_btn.pack(fill="x", pady=(4, 0))
+
+        # 提示词优化的星星入口（字段出生点；交互形态见 ui/promptopt_ui.py 头注）
+        self._build_opt_star()
 
     # ---- 对话 ----
     def _set_busy_ui(self, busy):
@@ -1192,7 +1206,87 @@ class App(ChatMixin, ImageGenMixin, VideoGenMixin, ServiceMixin, ModelsMixin, Se
         else:
             self.status_label.pack_forget()
 
+    def retint(self):
+        """主题切换后重涂经典控件。
+
+        theme_use 已实时覆盖 ttk 控件与它注册过的经典 tk 控件（聊天 Text 实测
+        自动翻深）；这里补的是它够不到的：聊天区 tag 色（Text 属性不是控件
+        选项）、输入框高亮边、盖了 `_tint` 戳的控件（附件条/带图方式/开着的
+        次级窗——Toplevel 是 root 的孩子，walk 一起走到）、状态灯，以及设置窗
+        （内容件大量创建期烘焙色 → 整窗重建，停在当前页）。
+        """
+        for name, fg in (("user", "accent"), ("assistant", "body"),
+                         ("thinking", "muted"), ("error", "error"),
+                         ("meta", "muted")):
+            try:
+                self.chat.tag_configure(name, foreground=theme.c(fg))
+            except Exception:
+                pass
+        try:
+            self.input.configure(highlightbackground=theme.c("border"))
+        except Exception:
+            pass
+        # active* 两色不在 `_tint` 戳的重涂范围（tint 只管 fg/bg 两向），
+        # 而 theme_use 会连它们一起改掉 —— 悬停时的底色/字色在这里补
+        try:
+            self.model_btn.configure(activebackground=theme.c("bg"),
+                                     activeforeground=theme.c("accent"))
+        except Exception:
+            pass
+        theme.retint_widgets(self.root)
+        if self._last_status:
+            try:
+                self._render_status(*self._last_status)
+            except Exception:
+                pass
+        win = getattr(self, "_settings_win", None)
+        if win is not None and win.winfo_exists():
+            cur = ""
+            try:
+                cur = self._settings_nav.selected or ""
+            except Exception:
+                pass
+            win.destroy()
+            self._settings_win = None
+            self._settings_sp = None
+            self.open_settings(jump=cur)
+
+    def _switch_theme(self, mode):
+        """切浅 / 深模式（实时）：theme.set_mode → 缓存清理 → 经典件重涂。
+
+        cfg["ui_theme"] 由调用方写（下拉选的是用户意图 auto/light/dark，跟随
+        系统的轮询则保持 auto 不落盘成具体模式）。
+        """
+        widgets.reset_bg_cache()
+        ok = theme.set_mode(mode)
+        if ok:
+            try:
+                self.root.configure(background=theme.c("bg"))
+            except Exception:
+                pass
+            self.retint()
+        return ok
+
+    def _poll_system_theme(self):
+        """跟随系统：`ui_theme=auto` 时每 30 秒对一次系统深浅偏好，变了就实时切。
+
+        读一个注册表值（~0.1ms），不走 WndProc 广播（那要 ctypes 挂钩，风险
+        大收益小 —— 30 秒内的延迟对"跟随系统"足够）。
+        """
+        try:
+            if str(self.cfg.get("ui_theme", "auto") or "auto") == "auto":
+                want = theme.resolve_mode("auto")
+                if want != theme.mode():
+                    self._switch_theme(want)
+        except Exception:
+            pass
+        try:
+            self.root.after(30000, self._poll_system_theme)
+        except Exception:
+            pass
+
     def _render_status(self, alive, ready):
+        self._last_status = (bool(alive), bool(ready))
         """渲染状态灯 + 状态驱动的按钮样式与显隐。
 
         显隐规则（2026-10-07 W 定）：选中**本地生图 / 生视频或云端模型**时
@@ -1222,6 +1316,10 @@ class App(ChatMixin, ImageGenMixin, VideoGenMixin, ServiceMixin, ModelsMixin, Se
             show_start=(not cloud and not media_local) or self._guide_active,
             show_stop=bool(alive) or self._guide_active,
             show_status=cloud or bool(alive) or not media_local or self._guide_active)
+
+        # 星星显隐的 3 秒兜底刷新（打字走 KeyRelease，程序化清空/回填靠这一拍；
+        # 只读 Text + 布尔比较，没变一个布局调用都不发）
+        self._opt_star_refresh()
 
         if self._svc_busy:
             self.start_btn.configure(state="disabled")
@@ -1302,6 +1400,12 @@ class App(ChatMixin, ImageGenMixin, VideoGenMixin, ServiceMixin, ModelsMixin, Se
             self._append("\n[服务] 模型别名已生成：%s\n" % alias, "meta")
 
     def on_close(self, force=False):
+        # 提示词优化在跑就先叫停（工作线程收到 stop_flag 后自行收尾，不阻塞关窗）
+        if getattr(self, "_opt_stop", None) is not None:
+            try:
+                self._opt_stop.set()
+            except Exception:
+                pass
         # 遮罩引导先关掉：它是 overrideredirect 的无边框窗，留着会在退出流程里挡住鼠标
         if getattr(self, "_guide", None) is not None:
             try:
@@ -1415,7 +1519,10 @@ def main():
     # 主页面主题层（ttkbootstrap 试验分支）：挂主题要在 root 建好之后、App 构造之前
     # —— ttkbootstrap 的 Style 无参构造绑默认 root。ttkbootstrap 没安装时 apply()
     # 是空操作，主页面回落到原生外观（ui/theme.py 的降级闸）。
-    theme.apply(root)
+    # 外观页的配置在样式构建前注入：模式（跟随系统在此解析成浅/深）+ 强调色 /
+    # 选区覆盖（apply 内部；选中文本强调色与全局主题色互相独立）。
+    theme.apply(root, mode=theme.resolve_mode(cfg.get("ui_theme")),
+                accent=cfg.get("ui_accent"), accent_sel=cfg.get("ui_accent_sel"))
     root.title("LLM 本地对话台 - llama.cpp")
     # 1080x700 是量出来的，不是拍的（DPI-aware 严格档实测，含"模型名占满 22 字"的情况）：
     # 顶栏右侧 5 个按钮各要 120px，左侧状态灯 + 模型名合计要 904px。

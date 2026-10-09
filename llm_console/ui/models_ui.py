@@ -71,6 +71,14 @@ class ModelsMixin:
             return
         if th is not None:
             th.mark()
+        # 「提示词优化」的模型：第一次有文本模型时自动选上（W 2026-10-09 定）。
+        # 挂在这里是因为它是"第一个可用模型配好"的共用事件（钩子 / 轮询兜底都到
+        # 这）；函数自身只在 cfg 为空时动、选过就永不再碰——放在 `model_auto_picked`
+        # 早退之前，主模型是否已接管过都不影响它。
+        try:
+            self._opt_fill_prompt_model()
+        except Exception:
+            pass
         if self.cfg.get("model_auto_picked"):
             # 已接管过。绝大多数轮询在这里就收工（`selected_usable` 走快路径，不扫盘）。
             if selected_usable(self.cfg):
@@ -437,7 +445,7 @@ class ModelsMixin:
         head.pack(fill="x", padx=12, pady=(10, 2))
         ttk.Label(head, text="不勾选则不显示于主页面").pack(anchor="w")
         dir_lbl = ttk.Label(head, text="模型目录：%s" % (inv["dir"] or "（未设置）"),
-                            foreground="#555555")
+                            style="Dim.TLabel")
         dir_lbl.pack(anchor="w", fill="x")
         # 路径只占一行的话，长了就被窗口右沿硬切掉（无滚动条）：跟着可用宽度换行
         head.bind("<Configure>",
@@ -447,7 +455,7 @@ class ModelsMixin:
         bot = ttk.Frame(win)
         bot.pack(side="bottom", fill="x", padx=12, pady=(4, 10))
         note = tk.StringVar(value="")
-        ttk.Label(bot, textvariable=note, foreground="#5a6a7a").pack(side="left")
+        ttk.Label(bot, textvariable=note, style="Note.TLabel").pack(side="left")
 
         def apply():
             localmodels.set_hidden(self.cfg, [b for b, v in vars_.items() if not v.get()],
@@ -537,7 +545,7 @@ class ModelsMixin:
             if info:
                 # 当前选中的模型单独标出来：它被移出菜单后顶栏仍显示它，得让人看出来
                 txt = ("* 当前  " if base == cur_base else "") + info
-                ttk.Label(f, text=txt, foreground="#7a7a7a").pack(side="right")
+                ttk.Label(f, text=txt, style="Hint.TLabel").pack(side="right")
                 reserved += _font.measure(txt) + 8
             fit(cb, label, reserved)
             return f
@@ -880,7 +888,7 @@ class ModelsMixin:
             anchor="w", padx=14, pady=(12, 2))
         ttk.Label(d, text="文件夹：把里面能聊天的 .gguf 与生图 / 生视频权重一起收进来；\n"
                           "单个文件：按它自己的类型收进对应清单。",
-                  foreground="#808080", justify="left",
+                  style="Hint.TLabel", justify="left",
                   font=("Microsoft YaHei UI", 9)).pack(anchor="w", padx=14)
 
         def _pick_dir():
@@ -966,7 +974,9 @@ class ModelsMixin:
         dlg.title("整理模型文件夹 - 预览")
         dlg.geometry("780x520")
         dlg.transient(self.root)
-        txt = tk.Text(dlg, font=("Consolas", 9), wrap="none")
+        txt = theme.tint(tk.Text(dlg, font=("Consolas", 9), wrap="none",
+                                 background=theme.c("bg"), foreground=theme.c("body")),
+                         fg="body", bg="bg")
         # 滚动条**先于**带 expand 的 Text pack（坑 160 同款纪律）：移动条目多时
         # （本机模型库就是 12 条），这一窗是"执行前唯一的核对面"，得能翻到底
         _sb = theme.scroll(dlg, orient="vertical", command=txt.yview)
