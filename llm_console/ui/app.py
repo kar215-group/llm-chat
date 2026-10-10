@@ -465,8 +465,16 @@ class App(ChatMixin, ImageGenMixin, VideoGenMixin, ServiceMixin, ModelsMixin, Se
         self.status_var = tk.StringVar(value="○ 检查中…")
         self.status_label = tk.Label(top, textvariable=self.status_var,
                                      fg=theme.c("muted"),
+                                     bg=theme.c("bg"),
                                      font=("Microsoft YaHei UI", 10, "bold"))
         self.status_label.pack(side="left")
+        # 盖 `_tint` 戳（坑 188）：经典 tk.Label 不给 bg 就是 SystemButtonFace
+        # （#f0f0f0）——浅色顶栏上几乎看不出，深色下"未运行"底下就是一块白。
+        # 且 ttkbootstrap 只在 theme_use 时经 `_theme_walk` 重涂经典件（冷启动的
+        # walk 跑在建件**之前**，之后没人再走过）⇒ 必须自己带 bg 再盖戳：冷启动
+        # 直接正确、运行期切主题由 retint 按戳重涂。fg 戳只是兜底 —— retint 之后
+        # `_render_status` 会按当前状态色（muted/ok/warn/accent）立即纠正。
+        theme.tint(self.status_label, fg="muted", bg="bg")
 
         # 模型名：可点击，右侧带下箭头（"顺时针旋转90度的>"），点开切换菜单
         self.model_var = tk.StringVar(value="")
@@ -1489,6 +1497,26 @@ def _say(msg):
         pass
 
 
+def _theme_assets_state():
+    """ttkbootstrap 图标字体的可读状态：ok / absent / broken。
+
+    建 Style 时 combobox / spinbox 家族样式会急切构建（为原生对话框兜底），箭头图标
+    走 Bootstrap Icons 字体（IconRenderer）渲染；字体读不到 → FileNotFoundError 被
+    theme.apply 的兜底 except 吞掉 → 整套主题静默降级。源码运行（库在 site-packages）
+    这项恒 ok；只有冻结产物钩子漏收 assets/icons/ 才会 broken（坑 187）。
+    ttkbootstrap 缺席 = 正常降级路径，报 absent 不算错。
+    """
+    try:
+        from ttkbootstrap.style.icons import IconRenderer
+    except Exception:
+        return "absent"
+    try:
+        IconRenderer._load_assets()
+        return "ok"
+    except Exception:
+        return "broken"
+
+
 def selfcheck():
     """打包产物自检：只回答"这份 exe 能不能跑起来"，不开窗口、不碰用户数据。
 
@@ -1517,6 +1545,13 @@ def selfcheck():
     _say("CONFIG_PATH   = %s%s" % (CONFIG_PATH,
                                    "（还不存在，首次运行时创建）" if first_run else ""))
     _say("cloud providers = %s" % "、".join(sorted(x for x in ids if x)))
+    # 主题字体的硬判据（坑 187）：钩子漏收 assets/icons/ 时，exe 的主题层会在建 Style
+    # 时静默降级（深色穿帮、浅色退回原生外观），而旧自检照样全绿 —— 宁可在这里红。
+    theme_assets = _theme_assets_state()
+    _say("ttkbootstrap theme assets = %s" % theme_assets)
+    if theme_assets == "broken":
+        bad.append("ttkbootstrap 图标字体读不出来：打包钩子漏收 assets/icons/"
+                   "（主题层会静默降级；坑 187）")
     for line in bad:
         _say("SELFCHECK FAIL " + line)
     _say("SELFCHECK OK" if not bad else "SELFCHECK FAILED")
