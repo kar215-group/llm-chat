@@ -1149,9 +1149,9 @@ class PageStack(object):
     def is_current(self, widget):
         """`widget` 是否属于当前页 —— **判"当前页"的唯一判据**。
 
-        页面共格叠放（且非当前页 `grid_remove`），`winfo_ismapped` 分不清
-        "属于哪一页"（它只说明"现在有没有显示"）。调用方（自检、页内逻辑）
-        判断页归属一律走这里。
+        页面共格叠放（`tkraise` 切当前页，非当前页**不摘、恒 mapped**——坑 164），
+        `winfo_ismapped` 分不清"属于哪一页"（它只说明"现在有没有显示"，叠放式下
+        恒为真）。调用方（自检、页内逻辑）判断页归属一律走这里。
         """
         cur = self._current
         if cur is None or widget is None:
@@ -1358,6 +1358,21 @@ class ResizeDeferGate(object):
         self._last_ts = 0.0
         self._job = None
         win.bind("<Configure>", self._on_conf, add="+")
+        win.bind("<Destroy>", self._on_destroy, add="+")
+
+    def _on_destroy(self, event):
+        # 窗口销毁时主动取消挂起的恢复回调：_restore_now 本来就有 winfo_exists
+        # 兜底（坑 135 纪律），这里只是别再留一个必然空跑的计时器（R-35 报告项；
+        # 设置窗/管理窗/选择模型窗都在切主题或切模式时整窗销毁）
+        if event.widget is not self.win:
+            return
+        if self._job is not None:
+            try:
+                self.win.after_cancel(self._job)
+            except Exception:
+                pass
+            self._job = None
+        self._pending = False
 
     def _on_conf(self, event):
         if not RESIZE_DEFER_ENABLED:

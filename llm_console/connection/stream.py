@@ -74,23 +74,43 @@ def count_tokens(cfg, text, timeout=3):
 
 
 def friendly_error(e, cfg):
-    """把常见网络错误翻译成人话。"""
+    """把常见网络错误翻译成人话。
+
+    HTTPError 是 URLError 的**子类**：必须先判子类，否则 llama-server 明确回了话的
+    错误（超上下文 / 参数非法 / 401 / 500）全被折成"无法连接本地服务"，服务端原话
+    整个丢掉，用户被指去反复重启服务（排查报告 R-15；optimize.py 的孪生实现早就是
+    对的，两处曾漂移）。
+    """
+    if isinstance(e, urllib.error.HTTPError):
+        raw = ""
+        try:
+            raw = e.read().decode("utf-8", "replace")
+        except Exception:
+            pass
+        try:
+            from . import cloud
+            said = cloud._server_says(raw) or ""
+        except Exception:
+            said = ""
+        return "本地服务返回错误（HTTP %s）。%s" % (e.code, said)
     if isinstance(e, urllib.error.URLError):
         return "无法连接本地服务（%s）——请先点「启动服务」或检查端口设置。" % base_url(cfg)
-    if isinstance(e, urllib.error.HTTPError):
-        return "服务返回错误（HTTP %s）。" % e.code
     return str(e)
 
 REASONING_KEYS = ("reasoning_content", "reasoning", "thinking")
 
 
 def iter_sse_chat(resp, out_q, stop_flag=None):
-    """读 OpenAI 兼容的 SSE 流，把增量推进 out_q；返回 (finish_reason, usage)。
+    """读 OpenAI 兼容的 SSE 流，把增量推进 out_q；返回 (finish_reason, usage, saw_end)。
 
     本地 llama-server 与云端 OpenAI 兼容端点**共用这一份解析**，避免两套实现漂移。
     思考链字段各家命名不同（reasoning_content / reasoning / thinking），按顺序取第一个非空的。
+
+    `saw_end` = 收到过**正常收尾标志**（`[DONE]` 或任一 `finish_reason`）。服务端把
+    连接干净地提前关掉时 for 循环同样"正常"结束——没有这个标志，半截回答与完整
+    回答不可分，会被当完整答案写进 history 与对话记录（排查报告 R-16）。
     """
-    finish_reason, usage = None, None
+    finish_reason, usage, saw_end = None, None, False
     for raw in resp:
         if stop_flag is not None and stop_flag.is_set():
             break
@@ -99,6 +119,7 @@ def iter_sse_chat(resp, out_q, stop_flag=None):
             continue
         body = line[5:].strip()
         if body == "[DONE]":
+            saw_end = True
             break
         try:
             obj = json.loads(body)
@@ -113,6 +134,7 @@ def iter_sse_chat(resp, out_q, stop_flag=None):
         fr = choices[0].get("finish_reason")
         if fr:
             finish_reason = fr
+            saw_end = True
         for k in REASONING_KEYS:
             v = delta.get(k)
             if v:
@@ -121,38 +143,42 @@ def iter_sse_chat(resp, out_q, stop_flag=None):
         ct = delta.get("content")
         if ct:
             out_q.put(("content", ct))
-    return finish_reason, usage
+    return finish_reason, usage, saw_end
 
 
 def stream_worker(cfg, messages, out_q, stop_flag):
-    payload = {
-        "model": "local",
-        "messages": messages,
-        "stream": True,
-        "temperature": cfg.get("temperature", 0.8),
-        "top_p": cfg.get("top_p", 0.95),
-        "top_k": cfg.get("top_k", 40),
-        "repeat_penalty": cfg.get("repeat_penalty", 1.1),
-        "max_tokens": cfg.get("max_tokens", 4096),
-        "cache_prompt": True,
-    }
-    if int(cfg.get("seed", -1)) >= 0:
-        payload["seed"] = int(cfg["seed"])
-
-    url = base_url(cfg) + "/v1/chat/completions"
-    req = urllib.request.Request(url,
-                                 data=json.dumps(payload).encode("utf-8"),
-                                 headers=api_headers(cfg), method="POST")
+    # 入参组装也在 try 里：int(cfg["seed"]) / json.dumps 抛错时线程若直接死掉，
+    # 就永无终态事件，界面卡"生成中"到重启（排查报告 R-32）
     try:
+        payload = {
+            "model": "local",
+            "messages": messages,
+            "stream": True,
+            "temperature": cfg.get("temperature", 0.8),
+            "top_p": cfg.get("top_p", 0.95),
+            "top_k": cfg.get("top_k", 40),
+            "repeat_penalty": cfg.get("repeat_penalty", 1.1),
+            "max_tokens": cfg.get("max_tokens", 4096),
+            "cache_prompt": True,
+        }
+        if int(cfg.get("seed", -1)) >= 0:
+            payload["seed"] = int(cfg["seed"])
+
+        url = base_url(cfg) + "/v1/chat/completions"
+        req = urllib.request.Request(url,
+                                     data=json.dumps(payload).encode("utf-8"),
+                                     headers=api_headers(cfg), method="POST")
         # 27B 生成 ~3.7 tok/s：长思考可达十几分钟，超时要给足
         with urllib.request.urlopen(req, timeout=1800) as resp:
-            finish_reason, usage = iter_sse_chat(resp, out_q, stop_flag)
+            finish_reason, usage, saw_end = iter_sse_chat(resp, out_q, stop_flag)
         if stop_flag.is_set():
             out_q.put(("stopped", None))
             return
         if usage:
             out_q.put(("usage", usage))
-        out_q.put(("done", finish_reason))
+        # 没收到任何收尾标志 = 流被提前掐断：内容照发（已经生成了的不作废），
+        # 但 done 带上 "incomplete"，界面如实提示"可能不完整"（R-16）
+        out_q.put(("done", finish_reason if saw_end else "incomplete"))
     except Exception as e:
         if stop_flag.is_set():
             out_q.put(("stopped", None))

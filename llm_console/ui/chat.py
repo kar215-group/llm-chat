@@ -3,6 +3,7 @@
 
 import base64
 import os
+import re
 import threading
 import time
 import tkinter as tk
@@ -25,6 +26,12 @@ from . import widgets
 # 「选择附件」文件框里的图片过滤器（默认档是「所有文件」，见 textfile.file_dialog_types；
 # 这一个只是给"就想挑张图"的人省点滚动，不再当默认档）。
 _IMG_FILTER = ("图片", "*.png *.jpg *.jpeg *.webp *.bmp")
+
+# 附件"高危名"判据（R-113）：只拦明显的密钥 / 凭据类命名，普通文件不受影响——
+# 命中先弹一句确认（弹窗文案在 `_attach_picked`）
+_SENSITIVE_NAME_RE = re.compile(
+    r"(^secrets?\.json$|\.env$|^\.env\.|id_rsa|id_ed25519|\.pem$|\.pfx$|\.p12$|"
+    r"credential|apikey|api[_-]?key|token)", re.I)
 
 
 def _shorten_name(name, keep=10):
@@ -167,7 +174,18 @@ class ChatMixin:
 
         以前生图/生视频模式把选果整个塞进图片列表：选到 .txt / .md 时瓷砖给
         "画不出"的占位样图、发送时当参考图喂给引擎/云端必然出错（坑 158）。
+
+        高危文件名先过一道确认（R-113，W 2026-10-10 批）：一次误点会把 API Key /
+        token 送进上下文（云端模型还会上传到服务商，不可撤回）。
         """
+        base = os.path.basename(str(p or ""))
+        if _SENSITIVE_NAME_RE.search(base):
+            if not messagebox.askyesno(
+                    "这个文件可能含密钥",
+                    "「%s」看起来可能包含密钥 / 凭据。\n"
+                    "继续发送会把文件内容交给模型处理（云端模型还会上传到服务商）。\n\n"
+                    "确定继续吗？" % base):
+                return
         if textfile.kind_of(p) == "image":
             self.set_attachment(p)
         else:
@@ -505,9 +523,14 @@ class ChatMixin:
             self.attach_note.grid_remove()
 
     def _remember_photo(self, path, img):
-        """持引用防 GC；只保留最近 30 张（同路径覆盖，防长会话内存无限增长）。"""
+        """持引用防 GC；只保留最近 60 张（同路径覆盖，防长会话内存无限增长）。
+
+        ⚠ 淘汰 = 丢掉 Python 引用 → Tk 侧那份图随之销毁，**还显示在对话流里的
+        旧图会变空白**。所以上限给得宽（60 张 500px 缩略图约几十 MB），且清空
+        对话时整表清掉（`clear_chat`，R-80）。
+        """
         self._img_photos[path] = img
-        while len(self._img_photos) > 30:
+        while len(self._img_photos) > 60:
             self._img_photos.pop(next(iter(self._img_photos)))
         return img
 
@@ -559,7 +582,20 @@ class ChatMixin:
             return
         text = self.input.get("1.0", "end").strip()
         if not text:
-            return
+            # 只挂附件不打字绝不能彻底静默（R-14）：_do_send 里为"纯图片/纯文件消息"
+            # 写的三处兜底（"请描述这张图片。"/"（图片）"/"见附件"）都是按这个场景
+            # 设计的，却被"空文本直接 return"挡成死代码——用户只会以为按钮坏了。
+            # 生图 / 生视频必须要提示词；普通聊天文本与附件至少要有一样。
+            if self.cfg.get("model_kind") in ("image", "video"):
+                self._append("\n[提示] 生图/生视频需要提示词：先写一句描述再发送。\n",
+                             "meta")
+                return
+            if not (self._attached_image or self._attached_images
+                    or self._attached_file):
+                self._append("\n[提示] 还没有发送任何内容：先写点什么，或用 📎 挂一张图/"
+                             "一个文本文件（只发附件也可以）。\n", "meta")
+                return
+            # 有附件：空文本照发（正文由 _do_send 的兜底接手）
         kind = self.cfg.get("model_kind")
         if providers.is_cloud(self.cfg) and kind in ("image", "video"):
             # 云端生图 / 生视频：走服务商原生接口，**完全不碰本地引擎**，也就自然
@@ -592,9 +628,9 @@ class ChatMixin:
             return
         if self.cfg.get("model_kind") == "image":
             # 方案 A：聊天输入即生图提示词，结果内嵌到聊天流，页面形态不变。
-            # 生成中再次发送 = 立即中止当前任务并开始新任务（参照 Llama 重启语义）
-            if self._img_busy:
-                self._cancel_chat_image()
+            # ⚠ "生成中再发一条 = 中止旧的再开新的"是**旧注释的死代码**：本函数开头
+            # 的忙碌守卫（_img_busy 等）已经先一步拦住并给了提示（R-89），
+            # 这里到不了。要改成"打断重发"语义得先动那个守卫，别只改注释。
             choice = self._confirm_shared_vram("生图")
             if choice == "cancel":
                 return                          # 输入内容与附图原样保留，什么都没发生
@@ -608,9 +644,8 @@ class ChatMixin:
                                  doc=self._attached_file)
             return
         if self.cfg.get("model_kind") == "video":
-            # 与生图同一套形态：输入即提示词，进度原位刷新，结果行带回调按钮
-            if self._vid_busy:
-                self._cancel_chat_video()
+            # 与生图同一套形态：输入即提示词，进度原位刷新，结果行带回调按钮。
+            # 忙碌守卫在函数开头（见上面 image 分支同款说明，R-89）
             choice = self._confirm_shared_vram("生视频")
             if choice == "cancel":
                 return
@@ -659,7 +694,7 @@ class ChatMixin:
                             current_ngl(self.cfg)), "meta")
 
             def work():
-                stop_server()
+                stop_server(self.cfg)
                 time.sleep(1)
                 if self._closing:
                     return                  # 关闭中：不再启动新服务
@@ -677,7 +712,22 @@ class ChatMixin:
                                  "[服务] 加载失败或超时——请检查模型与参数（设置 → 服务参数）。",
                                  not ok, launched=launched)
                 self._sq.put(("reload_done", ok))
-            threading.Thread(target=work, daemon=True).start()
+
+            def _guarded():
+                try:
+                    work()
+                except Exception as e:
+                    # 顶层兜底（R-30）：stop_server / _wait_ready 意外抛错原来会直接
+                    # 打死线程——reload_done 永不到达、按钮永久灰、_pending_text 悬挂。
+                    # 这里保证终态事件必达：reload_done(False) 的处理会复位 _svc_busy
+                    # 并把暂存原文放回输入框（"你的消息已放回输入框"），一个字都不丢。
+                    # （_svc_busy 属 ServiceMixin，这里不越界写它——结构检查第 [3] 段）
+                    try:
+                        self._finish_svc(False, "[服务] 换载模型中断：%s" % e, True)
+                    except Exception:
+                        pass
+                    self._sq.put(("reload_done", False))
+            threading.Thread(target=_guarded, daemon=True).start()
             return
         self.input.delete("1.0", "end")
         self._opt_star_refresh()
@@ -872,6 +922,7 @@ class ChatMixin:
         self.chat.configure(state="normal")
         self.chat.delete("1.0", "end")
         self.chat.configure(state="disabled")
+        self._img_photos.clear()      # 对话区已清：图片引用整表释放（R-80，不 clear 会一直占着）
         self._append("对话已清空。%s\n"
                      % (("原记录已存：%s" % kept) if kept else ""), "meta")
 

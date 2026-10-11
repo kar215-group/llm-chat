@@ -23,7 +23,15 @@ class ServiceMixin:
         用 askyesnocancel：No 走"停服务"，而右上角叉与 Cancel 一样返回 None——
         正好满足"点叉 = 取消本次生成"。服务没在跑时直接返回 go，不加一次点击。
         """
-        if not (self._server_alive_flag or server_process_alive()):
+        # 判活分两级：本程序记的旗标（HTTP 验证过、端口准确）优先；旗标说没在跑而
+        # 进程表里有 llama-server.exe 时，再按**本配置的端口**用 HTTP 确认一次 ——
+        # 映像名判活分不清"别人挂在别的端口上的实例"，直接弹窗会把无辜实例卷进
+        # "先停止服务"（排查报告 R-01 的上游放大器）。这次 HTTP 最多等 2 秒，
+        # 只在"外部真有 llama-server 在跑"的少见现场才付。
+        alive = self._server_alive_flag
+        if not alive and server_process_alive():
+            alive = server_alive(self.cfg)
+        if not alive:
             return "go"
         ans = messagebox.askyesnocancel(
             "显存共存确认",
@@ -46,7 +54,7 @@ class ServiceMixin:
         """
         self._append("[服务] 正在停止 llama-server 以释放显存…\n", "meta")
         try:
-            stop_server()
+            stop_server(self.cfg)
             time.sleep(1.0)
         except Exception as e:
             self._append("[服务] 停止失败：%s\n" % e, "error")
@@ -107,6 +115,21 @@ class ServiceMixin:
             time.sleep(1.5)
         return False
 
+    def _svc_guard(self, fn):
+        """服务类 worker 的顶层兜底（R-30）：body 里任何一步意外抛错（stop_server /
+        start_server / _wait_ready…），都必须走一次 _finish_svc 复位 _svc_busy 并如实
+        开口——原来三个 worker 体没有顶层 try，一抛就是「启动/停止/重启/换载」四个
+        按钮永久置灰，会话等于废掉，还要重启程序才能恢复。"""
+        def wrapped():
+            try:
+                fn()
+            except Exception as e:
+                try:
+                    self._finish_svc(False, "[服务] 服务操作中断：%s" % e, True)
+                except Exception:
+                    self._svc_busy = False      # _finish_svc 自身再出事也绝不卡死按钮
+        return wrapped
+
     def _finish_svc(self, ok, note, is_error=False, launched=None):
         """服务操作完成：带回最新真实状态并解锁按钮。
 
@@ -156,7 +179,7 @@ class ServiceMixin:
                              if ok else
                              "[服务] 启动失败或超时——请检查模型路径与参数（设置 → 服务参数）。",
                              not ok, launched=launched)
-        threading.Thread(target=work, daemon=True).start()
+        threading.Thread(target=self._svc_guard(work), daemon=True).start()
 
     def stop_server_async(self):
         if self._svc_busy or not self._server_alive_flag:
@@ -165,9 +188,15 @@ class ServiceMixin:
         self._append("\n[服务] 正在停止…\n", "meta")
 
         def work():
-            stop_server()
-            self._finish_svc(False, "[服务] 服务已停止。")
-        threading.Thread(target=work, daemon=True).start()
+            killed = stop_server(self.cfg)
+            if killed:
+                self._finish_svc(False, "[服务] 服务已停止。")
+            else:
+                # 如实说"没动手"：句柄与端口反查都没找到目标时，一个进程都没杀（R-01）
+                self._finish_svc(False,
+                                 "[服务] 没有找到监听端口 %d 的服务进程（未做任何操作）。"
+                                 % int(self.cfg.get("port") or 0))
+        threading.Thread(target=self._svc_guard(work), daemon=True).start()
 
     def restart_server(self, agent=False):
         if self._svc_busy:
@@ -179,7 +208,7 @@ class ServiceMixin:
                      % ("agent" if agent else "主页面"), "meta")
 
         def work():
-            stop_server()
+            stop_server(self.cfg)
             time.sleep(1)
             if self._closing:
                 return                      # 关闭中：不再启动新服务
@@ -194,7 +223,7 @@ class ServiceMixin:
                              if ok else
                              "[服务] 启动失败或超时——请检查模型路径与参数（设置 → 服务参数）。",
                              not ok, launched=launched)
-        threading.Thread(target=work, daemon=True).start()
+        threading.Thread(target=self._svc_guard(work), daemon=True).start()
 
     def on_start_restart_agent(self):
         """本地模型 API 页的服务按钮：以 agent 场景的 context 启动/重启。"""
@@ -220,4 +249,4 @@ class ServiceMixin:
         """关闭窗口时中止进行中的启动/重启/换载：杀掉待定进程，防残留。"""
         self._closing = True              # 让 _wait_ready 快速退出
         self._kill_proc()
-        stop_server()                     # taskkill 兜底（进程可能已在监听端口）
+        stop_server(self.cfg)             # 端口反查兜底（进程可能已在监听端口）

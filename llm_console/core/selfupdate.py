@@ -170,11 +170,11 @@ def extract_exe(zip_path, root):
     """
     try:
         with zipfile.ZipFile(zip_path) as z:
-            for n in z.namelist():
-                parts = str(n).replace("\\", "/").split("/")
-                if str(n).startswith("/") or ".." in parts or (len(parts[0]) >= 2
-                                                               and parts[0][1] == ":"):
-                    return None, "压缩包里的文件路径不对（%s），已拒收。" % n
+            # ZipSlip 判据与引擎包安装共用一处（engine_install._zip_member_unsafe，R-94）
+            bad = next((n for n in z.namelist()
+                        if engine_install._zip_member_unsafe(n)), None)
+            if bad is not None:
+                return None, "压缩包里的文件路径不对（%s），已拒收。" % bad
             z.extractall(root)
     except SelfUpdateError:
         raise

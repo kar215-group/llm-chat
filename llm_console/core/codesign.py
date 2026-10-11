@@ -19,6 +19,7 @@
 
 import json
 import os
+import re
 import subprocess
 
 from . import selfupdate
@@ -38,11 +39,31 @@ def _powershell():
 
 
 def _real_run(script):
-    """跑一段 PowerShell → `(returncode, stdout文本)`。"""
+    """跑一段 PowerShell → `(returncode, stdout文本)`。
+
+    stdout 为空时把 stderr 折进来（R-110）：执行策略 / 语法类故障只会往 stderr 写，
+    原来丢掉之后界面只剩"系统工具没有任何输出"，等于零线索。
+    """
     flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
     p = subprocess.run([_powershell(), "-NoProfile", "-NonInteractive", "-Command", script],
                        capture_output=True, timeout=_TIMEOUT, creationflags=flags)
-    return p.returncode, (p.stdout or b"").decode("utf-8", "replace")
+    out = (p.stdout or b"").decode("utf-8", "replace")
+    err = (p.stderr or b"").decode("utf-8", "replace")
+    if not out.strip() and err.strip():
+        out = err
+    return p.returncode, out
+
+
+def _humanize_tool_output(out, code):
+    """系统工具输出 → 可展示文本（R-110）：把 `C:\\Users\\<名>` 一类本机路径与用户名
+    掩掉、截断到 6 行 / 400 字——certutil / PowerShell 报错会把它们原样倒出来。"""
+    s = str(out or "").strip()
+    if not s:
+        return "系统工具返回了错误（退出码 %s）。" % code
+    s = re.sub(r"(?i)([a-z]:[\\/]users[\\/])[^\\/\s]+", r"\1…", s)
+    lines = [ln for ln in s.splitlines() if ln.strip()][:6]
+    s = "\n".join(lines)
+    return s[:400] + ("…" if len(s) > 400 else "")
 
 
 def _run(script, runner=None):
@@ -166,7 +187,7 @@ def trust(exe=None, runner=None):
         return True, ""
     if out == _UNSIGNED:
         return False, "本程序这份 exe 没有签名，没有可列入的证书。"
-    return False, (out or "系统工具返回了错误（退出码 %s）。" % code)
+    return False, _humanize_tool_output(out, code)
 
 
 def trust_machine(exe=None, runner=None):
@@ -192,4 +213,4 @@ def trust_machine(exe=None, runner=None):
         return False, "管理员授权被取消，本机信任名单没有改动。"
     if out == "NOT-INSTALLED":
         return False, "写入没有生效（可能被系统策略拒绝）。"
-    return False, (out or "系统工具返回了错误（退出码 %s）。" % code)
+    return False, _humanize_tool_output(out, code)

@@ -54,6 +54,12 @@ class ImageGenMixin:
         # 单文件就够了），所以按 sdprofile 的 require 预检；缺件就地报错，别把不存在
         # 的路径交给引擎再吃一次"退出码 1"（生图链路没有失败回显，黑盒更难查）。
         files = resolve_img_files(self.cfg, diffusion)
+        # 人工指定的配套件没找到：逐条点名（R-20——曾经静默换成自动发现的文件，
+        # 用错 VAE/编码器只会表现为出图糊/风格错，用户查不到这项配置头上）
+        for _s, _w in (files.get("manual_missing") or []):
+            self._append("\n[提示] 人工指定的%s没找到：%s——没有自动换成别的文件；"
+                         "请在设置里改正路径，或把该项清空改回自动发现。\n"
+                         % (sdprofile.slot_name(_s), _w), "error")
         missing = sdprofile.missing_slots(files["family"], files)
         if missing:
             self._append("\n[提示] 这个生图模型（识别为 %s）缺配套文件：%s\n"
@@ -99,6 +105,9 @@ class ImageGenMixin:
         # "没找到引擎 / 缺配套件"这类失败会把提示词与参考图一起吃掉（坑 133）
         self.input.delete("1.0", "end")
         self.clear_attachment()
+        # 消费掉输入框后立即重算星星显隐（R-89）：原来要靠 _render_status 的
+        # 3 秒兜底才消失，期间点它没反应，看着像坏按钮
+        self._opt_star_refresh()
         self._append("\n【你】\n" + prompt + "\n", "user")
         prompt = self._doc_merge(prompt, doc)
         for p in used:
@@ -167,6 +176,7 @@ class ImageGenMixin:
         # 预检（check + 建目录）都过了才消费输入框与附件（坑 133，同本地链路）
         self.input.delete("1.0", "end")
         self.clear_attachment()
+        self._opt_star_refresh()      # 同 _start_chat_image（R-89）
         self._append("\n【你】\n" + prompt + "\n", "user")
         prompt = self._doc_merge(prompt, doc)
         # 参考图在发送前已由 chat.send_message 过一遍 capability + ref_images_error（含档位
@@ -227,28 +237,42 @@ class ImageGenMixin:
             if not t or cur["tid"]:
                 return
             cur["tid"] = t
-            # 取消链路要找得到它：主线程「停止生成」读 self._cloud_tid 才能对 PENDING
-            # 窗口内的任务发起真取消（生视频链路同款 worker 写回，见 video_gen 的
-            # _cloud_video_worker）。不写回的话，已提交的任务点停止会被当成
-            # "还没提交出去"——文案与事实不符，还错过唯一取消得掉的窗口。
-            # 乱序兜底沿用既有纪律：新任务 begin / 收尾都会再清一次 _cloud_tid。
-            self._cloud_tid = t
             if not cloudjobs.get_job(t):
                 cloudjobs.add_job(t, "image", provider["id"],
                                   provider.get("name", ""), model, prompt, dest)
+            if gen == self._img_gen:
+                # 本轮还在等：写回共享字段，主线程「停止生成」读 self._cloud_tid 才能
+                # 对 PENDING 窗口内的任务发起真取消（生视频链路同款 worker 写回，见
+                # video_gen 的 _cloud_video_worker）。不写回的话，已提交的任务点停止
+                # 会被当成"还没提交出去"——文案与事实不符，还错过唯一取消得掉的窗口。
+                self._cloud_tid = t
+            else:
+                # 本轮已被取消/被新任务替换（取消那刻 tid 还没回来，cancel 发不出去）：
+                # 任务号到手立刻补发真取消（R-02——写回前必须比对世代，否则旧 worker
+                # 会把新任务刚清空的 _cloud_tid 覆盖掉，下一次取消打错对象）。
+                self._late_cancel("image", provider, t, model)
 
         try:
             seed = int(self.cfg.get("img_seed", -1))    # 不用 or：0 是合法种子
         except Exception:
             seed = -1
+
+        def emit(e):
+            # 事件带上世代号再入队：_poll 对过期轮的残留直接丢弃——取消后迟到的
+            # progress 会 delete(mark,"end") 抹掉"已取消"甚至后续聊天内容（R-13）。
+            try:
+                q.put((e[0], e[1], gen))
+            except Exception:
+                q.put(e)
+
         if cur["tid"]:
             # 取回旧任务：不再提交一次，只查 + 下载
             res = cloud_media.wait_task(self.cfg, provider, cur["tid"], dest, kind="image",
-                                        emit=q.put, stop_flag=stop_flag,
+                                        emit=emit, stop_flag=stop_flag,
                                         persist=persist, model=model)
         else:
             res = cloud_media.generate_image(
-                self.cfg, provider, model, prompt, dest, emit=q.put,
+                self.cfg, provider, model, prompt, dest, emit=emit,
                 stop_flag=stop_flag,
                 negative=str(self.cfg.get("cloud_img_negative", "") or ""),
                 size=str(self.cfg.get("cloud_img_size", "") or ""), seed=seed,
@@ -259,10 +283,13 @@ class ImageGenMixin:
         # 真实落地路径可能与服务端给的扩展名一致而与我们的默认值不同（.png vs .jpg），
         # 所以把主图路径回写：_handle_img_exit 是拿 os.path.isfile(_img_out) 判成功的。
         # 这里只写普通属性、不碰控件，读它的是主线程的 exit 处理（在事件入队之后）。
-        if paths:
-            self._img_out = paths[0]
-        # 多张产物：主图走原有的内嵌回显，其余的只列路径（一次塞四张进聊天区会把界面撑爆）
-        self._img_extra_paths = paths[1:]
+        # 世代守卫：已取消/被替换的旧轮**不得**再写共享字段——那会覆盖新任务刚在
+        # _cloud_begin 里清空/重置的状态（R-02）。
+        if gen == self._img_gen:
+            if paths:
+                self._img_out = paths[0]
+            # 多张产物：主图走原有的内嵌回显，其余的只列路径（一次塞四张进聊天区会把界面撑爆）
+            self._img_extra_paths = paths[1:]
         new_tid = cur["tid"] or str(res.get("task_id") or "")
         if new_tid:
             note_tid(new_tid)              # 兜底：上面没走到（同步路径直接给 url）就不补
@@ -358,6 +385,7 @@ class ImageGenMixin:
             except Exception:
                 pass
             self.chat.configure(state="disabled")
+        self._img_mark = None           # 收尾即封死 mark（同 _cancel_chat_image；R-13）
         if cancelled:
             self._append("🎨 [已取消生成]\n", "meta")
             self._append("────────────────\n", "meta")
@@ -445,6 +473,11 @@ class ImageGenMixin:
             except Exception:
                 pass
             self.chat.configure(state="disabled")
+        # mark 置 None 天然封死迟到进度行：_update_img_progress_line 开头 if not mark
+        # 就 return——原来只删内容不清引用，残留 progress 事件会把"已取消"连分隔线
+        # 一起抹掉、换上一行永不消失的假进度，mark 卡在对话流中段时后续聊天内容
+        # 会被整段删掉（R-13）
+        self._img_mark = None
         if cloud:
             return self._cloud_cancel_task(tid, "image")
         return False

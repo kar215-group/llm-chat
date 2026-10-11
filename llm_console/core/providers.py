@@ -248,6 +248,9 @@ def media_api_root(p):
     """
     p = p or {}
     src = str(p.get("media_base_url") or "").strip() or str(p.get("base_url") or "").strip()
+    # 先剥尾斜杠再认版本段：".../api/v1/" 带着尾斜杠时下面的 endswith 全落空，
+    # 拼出的端点会多一层 /api/v1 → 该服务商所有云端生图/生视频全 404（R-25 实测）
+    src = src.rstrip("/")
     if not src:
         return ""
     if "://" not in src:
@@ -754,8 +757,11 @@ def _md(mo, dd):
 
 def _date_seg(seg):
     """发布日期 → MMDD；None 表示不是日期。认四种写法：
-    `2026-03-03`、`20260303`、`250304`(YYMMDD，智谱爱用)、`0303`(已经压过的)。"""
-    if not seg.isdigit():
+    `2026-03-03`、`20260303`、`250304`(YYMMDD，智谱爱用)、`0303`(已经压过的)。
+
+    `isascii()` 限定（R-98）：`isdigit()` 对全角数字/其它 Unicode 十进制也为真，
+    半角化的判断只认 ASCII，免得全角串被当日期段滑进命名空间。"""
+    if not (seg.isascii() and seg.isdigit()):
         return None
     if len(seg) == 8:
         return _md(seg[4:6], seg[6:])

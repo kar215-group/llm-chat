@@ -464,7 +464,10 @@ def set_mode(mode, accent=None, accent_sel=None):
             _style.colors.set("primary", _ACCENT)
         except Exception:
             pass
-    for build in (_build_round_buttons, _build_fast_scroll, _build_semantic_styles):
+    for build in (_build_round_buttons, _build_fast_scroll, _build_semantic_styles,
+                  _ensure_widget_skin):
+        # _ensure_widget_skin 也在元组里（R-83）：素材型皮肤（表格复选框）是按主题对象
+        # 懒构建的，theme_use 换主题后不重触一次，深色下会回落 clam 原生小空框
         try:
             build()
         except Exception:
@@ -828,7 +831,13 @@ def restyle_scrollbars(root_widget):
         w = stack.pop()
         try:
             if w.winfo_class() == "TScrollbar":
-                w.configure(style=_scroll_style_name(w.cget("orient")))
+                name = _scroll_style_name(w.cget("orient"))
+                if not name and _ttb is not None and _style is not None:
+                    # 深色下显式给 round 变体（R-84）：原来置空串 = 回落默认样式，
+                    # 与新建滚动条（scroll() 工厂给 bootstyle=round）观感不一致
+                    horiz = str(w.cget("orient") or "").lower().startswith("h")
+                    name = "round.%s.TScrollbar" % ("Horizontal" if horiz else "Vertical")
+                w.configure(style=name)
         except Exception:
             pass
         try:

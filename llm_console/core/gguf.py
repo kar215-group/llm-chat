@@ -14,19 +14,31 @@ VIDEO_DIFFUSION_MARKERS = (b"video_patch_proj", b"adaln_t_table",
 
 VIDEO_ENCODER_MARKERS = (b"visual.blocks", b"model.embed_tokens")
 
-_GGUF_STRUCT_CACHE = {}            # path -> (mtime, size, (kv 条数, 头部原始字节))
+_GGUF_STRUCT_CACHE = {}            # path(normcase) -> (mtime, size, (kv 条数, 头部原始字节))
+
+_MAX_CACHE = 1024                  # 缓存条数上限；超了整表清空（扫描期一次性价，不引 LRU）
+
+def _cache_key(path):
+    """缓存键归一（R-64）：同一文件的大小写变体 / 相对写法不再各占一条。"""
+    try:
+        return os.path.normcase(os.path.abspath(str(path)))
+    except Exception:
+        return str(path)
 
 def gguf_structure(path, head_bytes=262144):
     """读 GGUF 固定头部，返回 (元数据条数, 其后 head_bytes 字节的原始头部)；失败返回 None。
 
     只读前 28 字节 + 其后最多 256KB，不做任何布局假设，因此对格式异常的导出也安全。
     缓存键含 mtime/size，文件被替换后自动失效（与 read_gguf_info 同一套规则）。
+    v1 的计数是 **uint32**（R-63）：按 v2 的 64 位读会错位，kv 数读出垃圾 →
+    v1 语言模型被误判成"无元数据的裸权重"踢进生图清单。
     """
+    key = _cache_key(path)
     try:
         st = os.stat(path)
     except Exception:
         return None
-    hit = _GGUF_STRUCT_CACHE.get(path)
+    hit = _GGUF_STRUCT_CACHE.get(key)
     if hit and hit[0] == st.st_mtime and hit[1] == st.st_size:
         return hit[2]
     out = None
@@ -35,17 +47,21 @@ def gguf_structure(path, head_bytes=262144):
             if f.read(4) != b"GGUF":
                 return None
             (ver,) = struct.unpack("<I", f.read(4))
-            (n_tensors,) = struct.unpack("<Q", f.read(8))
-            (kv_count,) = struct.unpack("<Q", f.read(8))
-            if ver < 2:                       # v1 没有元数据段
-                kv_count = 0
+            if ver == 1:
+                (n_tensors,) = struct.unpack("<I", f.read(4))
+                (kv_count,) = struct.unpack("<I", f.read(4))
+            else:
+                (n_tensors,) = struct.unpack("<Q", f.read(8))
+                (kv_count,) = struct.unpack("<Q", f.read(8))
             blob = b""
             if kv_count == 0:                 # 无元数据才需要看张量名；有元数据直接判为普通 GGUF
                 blob = f.read(head_bytes)
             out = (int(kv_count), blob)
     except Exception:
         out = None
-    _GGUF_STRUCT_CACHE[path] = (st.st_mtime, st.st_size, out)
+    if len(_GGUF_STRUCT_CACHE) >= _MAX_CACHE:
+        _GGUF_STRUCT_CACHE.clear()
+    _GGUF_STRUCT_CACHE[key] = (st.st_mtime, st.st_size, out)
     return out
 
 def gguf_is_chat_capable(path):
@@ -68,6 +84,10 @@ _GGUF_VT_SIZE = {0: 1, 1: 1, 2: 2, 3: 2, 4: 4, 5: 4, 6: 4, 7: 1,
 
 def _gguf_read_string(f):
     (n,) = struct.unpack("<Q", f.read(8))
+    # 固定长度读纪律（坑 26 一族）：声明长度不可信，封顶 4MB——坏文件里一个
+    # 天量长度会把内存整块吃掉（R-65）
+    if n > (4 << 20):
+        raise ValueError("gguf string length %d too large" % n)
     return f.read(n).decode("utf-8", "replace")
 
 def _gguf_skip_array(f):
@@ -99,23 +119,26 @@ def _gguf_read_value(f, vtype):
         raise ValueError("unknown gguf value type %d" % vtype)
     return struct.unpack(fmt, f.read(struct.calcsize(fmt)))[0]
 
-_GGUF_CACHE = {}          # path -> (mtime, size, info)：同一文件只解析一次
+_GGUF_CACHE = {}          # path(normcase) -> (mtime, size, info)：同一文件只解析一次
 
 def read_gguf_info(path):
     """读取 GGUF 元数据（带进程内缓存）。
 
     同一文件被多次调用（ngl 计算、ctx 匹配、KV 预估）时只解析一次；
-    缓存键含 mtime/size，文件被替换后自动失效。
+    缓存键含 mtime/size（并做 normcase 归一，R-64），文件被替换后自动失效。
     """
+    key = _cache_key(path)
     try:
         st = os.stat(path)
     except Exception:
         return None
-    hit = _GGUF_CACHE.get(path)
+    hit = _GGUF_CACHE.get(key)
     if hit and hit[0] == st.st_mtime and hit[1] == st.st_size:
         return dict(hit[2]) if hit[2] else hit[2]
     info = _read_gguf_info(path)
-    _GGUF_CACHE[path] = (st.st_mtime, st.st_size, info)
+    if len(_GGUF_CACHE) >= _MAX_CACHE:
+        _GGUF_CACHE.clear()
+    _GGUF_CACHE[key] = (st.st_mtime, st.st_size, info)
     return dict(info) if info else info
 
 def _read_gguf_info(path):
@@ -127,9 +150,13 @@ def _read_gguf_info(path):
         with open(path, "rb", buffering=1 << 20) as f:
             if f.read(4) != b"GGUF":
                 return None
-            struct.unpack("<I", f.read(4))            # version
-            struct.unpack("<Q", f.read(8))            # tensor_count
-            (kv_count,) = struct.unpack("<Q", f.read(8))
+            (ver,) = struct.unpack("<I", f.read(4))   # version
+            if ver == 1:                              # v1 计数是 uint32（R-63）
+                struct.unpack("<I", f.read(4))        # tensor_count
+                (kv_count,) = struct.unpack("<I", f.read(4))
+            else:
+                struct.unpack("<Q", f.read(8))        # tensor_count
+                (kv_count,) = struct.unpack("<Q", f.read(8))
             arch = None
             out = {}
             for _ in range(kv_count):

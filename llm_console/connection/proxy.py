@@ -34,7 +34,10 @@ class _ProxyHandler(http.server.BaseHTTPRequestHandler):
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(data)))
         self.end_headers()
-        self.wfile.write(data)
+        try:
+            self.wfile.write(data)
+        except Exception:
+            pass                  # 客户端已断开时无处可说，别让异常穿出 handler（R-46）
 
     def _auth_ok(self):
         key = self.server.cfg.get("api_key") or ""
@@ -152,16 +155,27 @@ class _ProxyHandler(http.server.BaseHTTPRequestHandler):
         else:
             try:
                 data = resp.read()
-            finally:
+            except Exception as e:
+                # 上游已回响应头但中途断了（IncompleteRead 一类）：原来这里直接抛，
+                # 请求拿不到任何响应（连接重置，--windowed 下零痕迹）——折成 502 如实说（R-46）
                 try:
-                    resp.close()      # 非流式分支原来不关响应：句柄留给 GC，显式收掉
+                    resp.close()
                 except Exception:
                     pass
+                return self._json(502, {"error": {"message":
+                    "upstream error（回包中途断开）: %s" % e}})
+            try:
+                resp.close()      # 非流式分支原来不关响应：句柄留给 GC，显式收掉
+            except Exception:
+                pass
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(data)))
             self.end_headers()
-            self.wfile.write(data)
+            try:
+                self.wfile.write(data)
+            except Exception:
+                pass              # 同上：写回客户端时断开无处可说（R-46）
 
 class ProxyServer:
     """OpenAI 兼容中转服务：agent → 本代理 → llama-server。
@@ -235,7 +249,7 @@ class ProxyServer:
                 self.note("agent 请求 %s（context %d）：停止当前服务并切换…" % (tb, want_ctx))
             else:
                 self.note("agent 请求 %s（context %d）：正在启动服务…" % (tb, want_ctx))
-            stop_server()
+            stop_server(self.cfg)
             time.sleep(1)
             self.cfg["model"] = target
             self.cfg["model_kind"] = "chat"

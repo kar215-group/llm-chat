@@ -19,7 +19,7 @@ import urllib.request
 from ..core import config, providers, secrets
 from .stream import iter_sse_chat
 
-RETRY_STATUS = (429, 500, 502, 503)       # 值得退避重试的
+RETRY_STATUS = (429, 500, 502, 503, 504)  # 值得退避重试的（504 = 网关超时，自有 _HTTP_HINT 也列了它，R-47 补齐）
 MAX_ATTEMPTS = 3
 
 _HTTP_HINT = {
@@ -46,11 +46,15 @@ def _safe_read(err, limit=900):
 
 
 def _server_says(body):
-    """从错误响应里抠出人话（OpenAI 风格 error.message，或裸文本）。"""
+    """从错误响应里抠出人话（OpenAI 风格 error.message，或裸文本）。
+
+    body 可能是 None（错误体读不出来时调用方传 None）：全程走 str(body or "")，
+    与 optimize.py 的孪生实现对齐——它自己抛就没人兜了（R-48）。
+    """
     try:
         j = json.loads(body)
     except Exception:
-        return body.strip()[:260]
+        return str(body or "").strip()[:260]
     if isinstance(j, dict):
         e = j.get("error")
         if isinstance(e, dict) and e.get("message"):
@@ -58,7 +62,7 @@ def _server_says(body):
         for k in ("message", "msg", "detail", "code_description"):
             if j.get(k):
                 return str(j[k])[:260]
-    return body.strip()[:260]
+    return str(body or "").strip()[:260]
 
 
 def humanize_http(code, body, provider):
@@ -147,6 +151,13 @@ def _ask_window(provider, key, model, preview, total, budget, question, timeout=
                           "content": _plan_prompt(preview, total, budget, question,
                                                   sum(len(x) for x in preview) /
                                                   max(len(preview), 1))}]}
+    # 规划请求也要关思考（R-50）：思考模型会把 300 额度吃光、只回思考不回 JSON，
+    # 这次请求就白花了。参数表与优化链路共用一处（厂商官方页口径，坑 52）
+    try:
+        from .optimize import _thinking_off
+        body.update(_thinking_off(provider))
+    except Exception:
+        pass
     req = urllib.request.Request(providers.chat_completions_url(provider),
                                  data=json.dumps(body).encode("utf-8"),
                                  headers=_headers(provider, key), method="POST")
@@ -368,13 +379,15 @@ def chat_stream(cfg, messages, out_q, stop_flag):
                                      headers=headers, method="POST")
         try:
             with urllib.request.urlopen(req, timeout=timeout) as resp:
-                finish, usage = iter_sse_chat(resp, out_q, stop_flag)
+                finish, usage, saw_end = iter_sse_chat(resp, out_q, stop_flag)
             if stop_flag is not None and stop_flag.is_set():
                 out_q.put(("stopped", None))
                 return
             if usage:
                 out_q.put(("usage", usage))
-            out_q.put(("done", finish))
+            # 没收到收尾标志 = 流被提前掐断：内容保留，done 带 "incomplete"
+            # 让界面如实说"可能不完整"（R-16；云端这半截是付过费的，更不能作废）
+            out_q.put(("done", finish if saw_end else "incomplete"))
             return
         except urllib.error.HTTPError as e:
             body = _safe_read(e)

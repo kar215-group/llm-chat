@@ -18,7 +18,6 @@ docs/flux.md、docs/wan.md 与 `sd-cli --help` 的原文（开发机没实测过
 
 import os
 import re
-import shlex
 
 from . import config, sdprofile
 from .models import (IMAGE_SUBDIR, _is_mmproj, find_vl_pairs, scan_models,
@@ -30,6 +29,7 @@ _SLOT_ORDER = ("vae", "llm", "clip_l", "clip_g", "t5xxl", "clip_vision",
                "tokenizer", "connectors", "audio_vae", "audio_encoder", "motion",
                "taesd", "high_noise")
 _VIDEO_SLOT_ORDER = ("llm", "vae", "audio_vae", "t5xxl", "clip_l", "clip_g",
+                     "clip_vision", "llm_vision", "motion",
                      "tokenizer", "connectors", "audio_encoder", "high_noise", "taesd")
 
 # MiniMax-H3 在 CFG>1 时必须能编码出负向提示词，空串会直接失败；
@@ -106,7 +106,12 @@ def _folders_for(cfg, main_path, extra_dirs=(), include_models_dir=True,
     if include_models_dir:
         tails.append(cfg.get("models_dir", ""))
     for d in tails:
-        np = os.path.normpath(str(d or ""))
+        raw = str(d or "").strip()
+        if not raw:
+            continue
+        # 空串先滤掉再 normpath（R-73）：normpath("") == "."，原来会把**当前工作目录**
+        # 当成搜索目录塞进去（配置留空 = 自动时不该搜 CWD）
+        np = os.path.normpath(raw)
         if np and os.path.isdir(np) and np not in [os.path.normpath(x) for x in out]:
             out.append(np)
     return out
@@ -214,10 +219,21 @@ def resolve_img_files(cfg, diffusion_path=None, family=None):
     files = sdprofile.discover(folders, fid, diffusion_path, want)
     files["family"] = fid
     files["basis"] = basis
-    files["note"] = why
+    files["note"] = _note_with_manual(why, files)
     files.setdefault("vae", "")
     files.setdefault("llm", "")
     return files
+
+
+def _note_with_manual(why, files):
+    """识别 note 追加"人工指定没找到"的点名（R-20）：设置页回显（note_of）与
+    发送侧预检都读得到——静默换件改成开口说话的那一半。"""
+    mm = files.get("manual_missing") or []
+    if not mm:
+        return why
+    add = "；".join("人工指定的%s没找到：%s" % (sdprofile.slot_name(s), w)
+                   for s, w in mm)
+    return (why + "｜" + add) if why else add
 
 
 def plan_ref_images(refs, mode):
@@ -353,7 +369,8 @@ def build_img_cmd(cfg, prompt, out_path, steps, size, diffusion_path, cfg_scale,
             if _gs > 0:
                 args += ["--img-cfg-scale", str(_gs)]
     if str(cfg.get("img_extra_args", "")).strip():
-        args += shlex.split(str(cfg["img_extra_args"]))
+        # config.split_extra_args：posix shlex 会吃掉 Windows 路径的反斜杠（R-22）
+        args += config.split_extra_args(cfg["img_extra_args"])
     return args
 
 
@@ -425,7 +442,7 @@ def resolve_video_files(cfg, diffusion_path=None):
     files.setdefault("audio_vae", "")
     files["family"] = fid
     files["basis"] = basis
-    files["note"] = why
+    files["note"] = _note_with_manual(why, files)
     files["missing"] = sdprofile.missing_slots(fid, files)
     return files
 
@@ -459,10 +476,14 @@ def build_video_cmd(cfg, prompt, out_path, files, frames, fps, size, steps,
             "-W", str(w), "-H", str(h),
             "-s", str(seed), "-p", prompt]
     neg = str(cfg.get("vid_neg_prompt", "") or "").strip()
-    if prof.get("neg_prompt_required", True):
-        args += ["-n", neg or DEFAULT_VIDEO_NEG_PROMPT]
-    elif neg:
+    # 只有**显式登记** neg_prompt_required 的家族才吃那个内置兜底（R-69）：
+    # 原默认值是 True，ltx / hunyuan / generic 这些没登记的家族被硬塞 MiniMax 的
+    # 负向词（与函数 docstring"不替用户加戏"相反）——h3 自己在 profile 里写了 True，
+    # 不受影响；wan 写了 False。
+    if neg:
         args += ["-n", neg]
+    elif prof.get("neg_prompt_required", False):
+        args += ["-n", DEFAULT_VIDEO_NEG_PROMPT]
     args += ["-o", out_path]
     for slot in _VIDEO_SLOT_ORDER:
         p = str(files.get(slot) or "")
@@ -474,8 +495,10 @@ def build_video_cmd(cfg, prompt, out_path, files, frames, fps, size, steps,
         args += ["--flow-shift", str(prof["flow_shift"])]
     if prof.get("fa"):
         args += ["--diffusion-fa"]
-    bk = str(cfg.get("vid_backend", "")).strip()
+    bk = str(cfg.get("vid_backend", "")).strip() or str(prof.get("backend", "") or "").strip()
     if bk:
+        # 清空 = 回落**该族默认后端**（与生图侧同一口径，R-70）：原来清空就是
+        # 彻底不传 --backend，引擎全落默认设备（大模型可能直接显存不够）
         args += ["--backend", bk]
     pb = str(cfg.get("vid_params_backend", "")).strip()
     if pb:
@@ -490,7 +513,8 @@ def build_video_cmd(cfg, prompt, out_path, files, frames, fps, size, steps,
         else:
             args += ["-i", ref_img]
     if str(cfg.get("vid_extra_args", "")).strip():
-        args += shlex.split(str(cfg["vid_extra_args"]))
+        # 同 img_extra_args：走 split_extra_args，反斜杠路径不被吃（R-22）
+        args += config.split_extra_args(cfg["vid_extra_args"])
     return args
 
 

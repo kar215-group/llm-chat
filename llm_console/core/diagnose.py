@@ -40,19 +40,22 @@ def _c(cid, group, level, title, fact, fix="", action=("none",)):
 
 
 def _writable(dirpath):
-    """真试写一个临时文件再删 —— 目录权限这件事，猜不出来（Program Files 会骗人）。"""
+    """真试写一个临时文件再删 —— 目录权限这件事，猜不出来（Program Files 会骗人）。
+
+    写成功即"可写"；探针删不掉只影响清理，不能反过来判"不能写"（R-105）——
+    原来 os.remove 失败会被同一 except 接住、报成"写不进去"。
+    """
     probe = os.path.join(dirpath, ".llm-chat-write.probe")
     try:
         with open(probe, "w", encoding="utf-8") as f:
             f.write("x")
-        os.remove(probe)
-        return True, ""
     except Exception as e:
-        try:
-            os.remove(probe)
-        except Exception:
-            pass
         return False, "%s: %s" % (type(e).__name__, e)
+    try:
+        os.remove(probe)          # 删不掉也留着（下次诊断会覆盖），不判失败
+    except Exception:
+        pass
+    return True, ""
 
 
 def _drive_type(path):
@@ -120,11 +123,22 @@ def _zone_marked(path):
 
 
 def _port_busy(port):
-    """能不能占住这个端口。127.0.0.1 上的 bind 是本地的，不发任何包出去。"""
+    """能不能占住这个端口。127.0.0.1 上的 bind 是本地的，不发任何包出去。
+
+    非法端口号（0 / 70000 / 非数字）**不能报"空闲"**（R-107）：那种配置下服务
+    必然起不来，当"忙"处理与它的后果同一量级（原来的 int(bind) 抛 OverflowError/
+    ValueError 落进 except 被折成"空闲"）。
+    """
     import socket
+    try:
+        p = int(port)
+        if not (1 <= p <= 65535):
+            return True
+    except Exception:
+        return True
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     try:
-        s.bind(("127.0.0.1", int(port)))
+        s.bind(("127.0.0.1", p))
         return False
     except OSError:
         return True
@@ -305,7 +319,12 @@ def _apply_paths(out, cloud_ok):
 
 def run_checks(cfg, proxy_running=False, server_running=False, probe_gpu=True):
     """跑一遍。`proxy_running` / `server_running` 由界面传进来：
-    8081 被**我们自己**占着是正常，不是故障，这条判断只能由调用方给。"""
+    8081 被**我们自己**占着是正常，不是故障，这条判断只能由调用方给。
+
+    `cfg=None` 也接（R-104）：下面全是 cfg.get，空配置按空字典处置，
+    整份报告不该因为调用方给错一次就消失。
+    """
+    cfg = cfg or {}
     from .crashlog import log_path, tail
     out = []
     frozen = bool(getattr(sys, "frozen", False))
@@ -363,6 +382,20 @@ def run_checks(cfg, proxy_running=False, server_running=False, probe_gpu=True):
                   "%.1f GB" % free,
                   "" if free >= 20 else "模型文件动辄 10GB 以上，剩余空间偏少；"
                                         "下载大模型前先腾出空间。"))
+    # 模型目录可能挂在另一块盘上（R-106）：只量程序所在盘会把"下模型的那块盘满了"
+    # 整条漏掉；同盘就不重复报了
+    try:
+        mdir_d = str(cfg.get("models_dir") or "").strip()
+        if mdir_d and os.path.isdir(mdir_d):
+            d1 = os.path.splitdrive(os.path.abspath(app_dir))[0].lower()
+            d2 = os.path.splitdrive(os.path.abspath(mdir_d))[0].lower()
+            if d2 and d2 != d1:
+                free2 = _free_gb(mdir_d)
+                out.append(_c("disk_models", GROUP_ENV, OK if free2 >= 20 else WARN,
+                              "模型目录所在磁盘剩余", "%.1f GB" % free2,
+                              "" if free2 >= 20 else "模型都下载到这块盘上，空间偏少。"))
+    except Exception:
+        pass
 
     lp = log_path()
     if os.path.isfile(lp):
@@ -431,13 +464,16 @@ def run_checks(cfg, proxy_running=False, server_running=False, probe_gpu=True):
     else:
         out.append(_c("server_exe", GROUP_ENGINE, OK, "推理引擎已就位", exe))
         try:
-            has_cudart = any(f.lower().startswith("cudart64")
-                             for f in os.listdir(os.path.dirname(exe) or "."))
+            names = [f.lower() for f in os.listdir(os.path.dirname(exe) or ".")]
         except Exception:
-            has_cudart = True
-        if not has_cudart:
+            names = []
+        has_cudart = any(n.startswith("cudart64") for n in names) or not names
+        # 只在引擎**确实带 CUDA 构建**（目录里有 ggml-cuda*.dll）却缺运行库时才报
+        # （R-103）：CPU / Vulkan / SYCL 档本来就不需要 cudart，原来对它们误报
+        # "服务会启动即退出"
+        if not has_cudart and any(n.startswith("ggml-cuda") for n in names):
             out.append(_c("cudart", GROUP_ENGINE, WARN, "引擎目录里缺 CUDA 运行库",
-                          "没找到 cudart64_*.dll",
+                          "没找到 cudart64_*.dll（但存在 ggml-cuda）",
                           "服务会启动即退出。用 llama.cpp 官方的 CUDA 12 发行包"
                           "（它自带 cudart），或把 cudart 的 dll 复制进引擎目录。"))
 
@@ -569,7 +605,11 @@ def run_checks(cfg, proxy_running=False, server_running=False, probe_gpu=True):
                   "没放生视频模型（只有想用本地生视频时才需要）", ""))
 
     # ---------------- 端口 ----------------
-    p1 = int(cfg.get("port", 8080) or 8080)
+    # 非数字端口也要能出报告（R-104）：解析失败回落默认值，不让 ValueError 带走整份
+    try:
+        p1 = int(cfg.get("port", 8080) or 8080)
+    except Exception:
+        p1 = 8080
     busy1 = _port_busy(p1)
     if not busy1:
         out.append(_c("port_server", GROUP_PORT, OK, "服务端口 %d" % p1, "空闲"))
@@ -582,7 +622,10 @@ def run_checks(cfg, proxy_running=False, server_running=False, probe_gpu=True):
                       "关掉那个程序，或在 设置 → 本地模型 → 服务参数 里换一个端口。",
                       ("settings", "本地模型 → 服务参数")))
 
-    p2 = int(cfg.get("proxy_port", 8081) or 8081)
+    try:
+        p2 = int(cfg.get("proxy_port", 8081) or 8081)
+    except Exception:
+        p2 = 8081
     busy2 = _port_busy(p2)
     if not busy2:
         out.append(_c("port_proxy", GROUP_PORT, OK, "代理端口 %d" % p2, "空闲"))
@@ -637,14 +680,15 @@ def render_text(checks, meta=None):
     if paths:
         lines.append("  %s：%s" % (paths["title"], paths["fact"]))
     f, w = summary(checks)
-    ok = len([c for c in checks if c["level"] == OK])
+    ok = len([c for c in checks
+              if c["level"] == OK and c["id"] != "paths"])
     lines.append("  结论：%s" % (
-        "两条路都还没通，先按下面补一样" if f
+        "三条路都还没通，先按下面补一样" if f
         else ("能跑通。%s" % ("%d 项提醒" % w if w else "没有提醒"))))
     lines.append("")
     show = [c for c in checks if c["level"] != OK and c["id"] != "paths"]
     if not show:
-        lines.append("  全部 %d 项检查正常。" % (ok - 1))
+        lines.append("  全部 %d 项检查正常。" % ok)
         return "\n".join(lines) + "\n"
     mark = {OK: "[正常]", WARN: "[提醒]", FAIL: "[需处理]", NA: "[不适用]"}
     group = ""
@@ -657,5 +701,5 @@ def render_text(checks, meta=None):
             lines.append("      怎么办：%s" % c["fix"])
     if ok:
         lines.append("")
-        lines.append("  其余 %d 项检查正常，未列出。" % (ok - 1))
+        lines.append("  其余 %d 项检查正常，未列出。" % ok)
     return "\n".join(lines) + "\n"

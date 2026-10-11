@@ -8,7 +8,7 @@ import tkinter as tk
 from tkinter import ttk, messagebox, filedialog, font as tkfont
 
 from ..core import capability, localmodels, modelreq, providers, secrets
-from ..core.config import save_config
+from ..core.config import cfg_lock, save_config
 from ..core.hardware import detect_gpu, detect_ram_gb
 from ..core.models import (ENGINE_LABEL, apply_tidy, display_name, engine_ready,
                           find_vl_pairs, first_usable, plan_tidy, scan_models,
@@ -270,8 +270,11 @@ class ModelsMixin:
             for p in chat:
                 b = os.path.basename(p)
                 mark = "●  " if b == cur else "○  "
-                # 逐行走统一判据：有配对投影器 / 用户声明过 / 实测过，都算"能看图"
-                v = capability.resolve_key(self.cfg, b)["verdict"]
+                # 逐行走统一判据：有配对投影器 / 用户声明过 / 实测过，都算"能看图"。
+                # 传**全路径**不传 basename：配对表 find_vl_pairs 的键是绝对路径，
+                # basename 查不到"磁盘上配得到 mmproj"的模型，会被误标成「纯文本」
+                # （比「看图未确认」更糟——那个标注会拦附图，R-26 实测）
+                v = capability.resolve_key(self.cfg, p)["verdict"]
                 menu.add_command(label=mark + display_name(self.cfg, p)
                                  + ("" if v == capability.YES else
                                     "（纯文本）" if v == capability.NO else "（看图未确认）"),
@@ -695,7 +698,9 @@ class ModelsMixin:
                 # find_vl_pairs 的配对结果：投影器名字里不带模型名时（`mmproj-BF16.gguf`）
                 # 配对判据可能认不出来，而配置里那条 model_mmproj 是认得的 —— 两处说法
                 # 打架就是这么来的（坑 128）。真机 W 的 Qwen3.8-27B 原来在这里被写成纯文本。
-                verdict = capability.resolve_key(self.cfg, e["base"], kind="chat")["verdict"]
+                # 传全路径不传 basename：配对表的键是绝对路径（与模型菜单同一处修，R-26）
+                verdict = capability.resolve_key(
+                    self.cfg, e.get("path") or e["base"], kind="chat")["verdict"]
                 bits.append({capability.YES: "看图",
                              capability.NO: "纯文本"}.get(verdict, "看图未确认"))
                 if e.get("companion_of"):
@@ -788,7 +793,11 @@ class ModelsMixin:
         for mp, proj in find_vl_pairs(self.cfg).items():
             mb = os.path.basename(mp)
             if force or mb not in (self.cfg.get("model_mmproj") or {}):
-                self.cfg.setdefault("model_mmproj", {})[mb] = proj
+                # 本函数跑在后台线程：改 cfg 嵌套 dict 必须持 cfg_lock ——主线程任何
+                # save_config 的 json.dump 正在遍历时加键，会让那次保存整份失败并被
+                # 静默吞掉（R-12；坑 107 的"读-改-写持锁"纪律补上写侧这半边）
+                with cfg_lock():
+                    self.cfg.setdefault("model_mmproj", {})[mb] = proj
                 _dirty["v"] = True
                 if not quiet:
                     self._sq.put(("note",
@@ -808,7 +817,8 @@ class ModelsMixin:
             if need_ngl:
                 res = compute_ngl(self.cfg, p, vram)
                 if res:
-                    self.cfg.setdefault("model_ngl", {})[b] = res["ngl"]
+                    with cfg_lock():            # 后台线程改 cfg：持锁（R-12，同上）
+                        self.cfg.setdefault("model_ngl", {})[b] = res["ngl"]
                     _dirty["v"] = True
                     self._sq.put(("ngl", b, res))
                 else:
@@ -818,8 +828,9 @@ class ModelsMixin:
             if need_ctx:
                 ctxs = auto_ctx_for_model(self.cfg, p)
                 if ctxs:
-                    self.cfg.setdefault("model_ctx", {})[b] = ctxs["main"]
-                    self.cfg.setdefault("model_ctx_api", {})[b] = ctxs["agent"]
+                    with cfg_lock():            # 后台线程改 cfg：持锁（R-12，同上）
+                        self.cfg.setdefault("model_ctx", {})[b] = ctxs["main"]
+                        self.cfg.setdefault("model_ctx_api", {})[b] = ctxs["agent"]
                     _dirty["v"] = True
                     if not quiet:
                         self._sq.put(("note",
@@ -847,7 +858,8 @@ class ModelsMixin:
         for gone in [p for p in new_seen if p not in paths_now]:
             new_seen.pop(gone, None)
         if new_seen != (self.cfg.get("perf_reported") or {}):
-            self.cfg["perf_reported"] = new_seen
+            with cfg_lock():                # 后台线程改 cfg：持锁（R-12，同上）
+                self.cfg["perf_reported"] = new_seen
             _dirty["v"] = True
         _flush()
 
@@ -859,10 +871,13 @@ class ModelsMixin:
                     "将清空所有模型的 层数/context/mmproj 自动记录并重新计算，\n"
                     "手动调整过的值也会被覆盖。确定继续？"):
                 return
-            for k in ("model_ngl", "model_ctx", "model_ctx_api", "model_mmproj",
-                      "perf_reported"):
-                self.cfg[k] = {}
-            save_config(self.cfg)
+            # 清空与落盘持锁：上一轮自动补全线程可能还在跑，裸改嵌套键会与它的
+            # 写/序列化竞争（R-12 同款）
+            with cfg_lock():
+                for k in ("model_ngl", "model_ctx", "model_ctx_api", "model_mmproj",
+                          "perf_reported"):
+                    self.cfg[k] = {}
+                save_config(self.cfg)
         self._append("\n[模型管理] 开始%s…\n"
                      % ("全部重新计算模型参数" if force else "补全缺失项"), "meta")
         threading.Thread(target=self._scan_and_fill, args=(force,),
@@ -1016,66 +1031,97 @@ class ModelsMixin:
             out.append("\n以下 mmproj 名称无法判断归属，将保持原位（请手动处理）：\n")
             for p in unpaired:
                 out.append("  " + os.path.basename(p))
+        _conflicts = info.get("conflicts") or []
+        if _conflicts:
+            # R-09：撞名检测已提前到计划阶段——这些文件不搬，预览必须说出来
+            out.append("\n以下文件与目标文件夹里的文件同名，不搬动（需人工处理）：\n")
+            for src, dst in _conflicts:
+                out.append("  %s  （目标：%s\\）"
+                           % (os.path.basename(src),
+                              os.path.relpath(os.path.dirname(dst), info["root"])))
+        _shared = info.get("shared_kept") or []
+        _pinned = [s for s in _shared if s[2]]
+        _unsafe = [s for s in _shared if not s[2]]
+        if _pinned:
+            out.append("\n以下配套件被生图与生视频两组共用，不搬动；"
+                       "已把对应配置槽指向它的绝对路径：\n")
+            for p, _tags, keys in _pinned:
+                out.append("  %s  （%s）" % (os.path.basename(p), "、".join(keys)))
+        if _unsafe:
+            out.append("\n以下配套件被多组共用，但同名配置槽已被其它文件占用，"
+                       "自动指向会影响其它组——请在设置里手工指定：\n")
+            for p, _tags, _keys in _unsafe:
+                out.append("  %s" % os.path.basename(p))
         txt.insert("1.0", "\n".join(out))
         txt.configure(state="disabled")
         bar = ttk.Frame(dlg)
         bar.pack(fill="x", padx=10, pady=(0, 10))
 
         def do_exec():
-            ok, fails = apply_tidy(moves)
             c = self.cfg
-            # 只按**真的搬成功**的那些文件改配置：某个文件被占用（比如服务正加载着它）
-            # 时 os.rename 会失败（Windows 上句柄锁着就是"另一个程序正在使用此文件"），
-            # 若无条件按计划表改写，配置会指向一个**不存在的新路径** —— 顶栏挂空模型、
-            # 发送侧报"文件不存在"，而文件其实还在老地方。"搬成功"的判据 = 老路径没了
-            # 且新路径在了（apply_tidy 因"目标已存在"跳过的那些两者都在，不算成功）。
-            remap = {}
-            for src, dst_dir, _kind in moves:
-                new = os.path.join(dst_dir, os.path.basename(src))
-                if os.path.exists(src) or not os.path.isfile(new):
-                    continue
-                remap[os.path.normcase(os.path.normpath(src))] = new
-                if os.path.normpath(c.get("model", "")) == os.path.normpath(src):
-                    c["model"] = new
 
-            def _remap(p):
-                return remap.get(os.path.normcase(os.path.normpath(str(p or ""))))
+            # R-10：**每搬成功一条就立即改写配置并落盘**——中途崩溃/断电（开发机每日
+            # 23:30 断电）也不会留下"文件已在新位置、配置整片指着老路径"的窗口。
+            # 原来 remap + save_config 在全部 rename 跑完后才执行一次。
+            # 改写范围与判据沿用上一轮的教训：只按**真的搬成功**的文件改（on_moved 只在
+            # os.rename 成功后回调，被占用的文件天然进不来）；model_mmproj 按"值"匹配
+            # （按 key 匹配会把模型本体写进投影器记录）。
+            def on_moved(src, new):
+                with cfg_lock():
+                    np_src = os.path.normcase(os.path.normpath(src))
 
-            # model_mmproj 的**值是投影器路径**（key 才是模型名）—— 按"被搬的是不是
-            # 这条记录里的那个文件"更新。旧写法是"被搬文件的 basename 命中 key 就写新
-            # 路径"：搬模型本体时会把模型自己的新路径写进投影器记录（之后加载会把模型
-            # 当 mmproj 喂给引擎），而搬投影器那一步又匹配不到 key、老路径留在记录里。
-            rec = c.get("model_mmproj") or {}
-            for k, v in list(rec.items()):
-                nv = _remap(v)
-                if nv:
-                    rec[k] = nv
-            c["model_mmproj"] = rec
+                    def _hit(p):
+                        return os.path.normcase(os.path.normpath(str(p or ""))) == np_src
 
-            # 其余"记了完整路径"的键跟着搬（生图 / 生视频手工指定过的文件、手动定向的
-            # 单文件、性能登记表）：不跟着改就会指向空气 —— 发送侧报"未找到模型"，
-            # 而文件明明在。
-            for key in ("img_model_file", "img_vae_file", "img_llm_file",
-                        "img_clip_l_file", "img_clip_g_file", "img_t5_file",
-                        "img_tokenizer_file", "vid_model_file", "vid_vae_file",
-                        "vid_llm_file", "vid_t5_file", "vid_tokenizer_file",
-                        "vid_high_noise_file", "vid_audio_vae_file"):
-                v = str(c.get(key) or "")
-                if os.path.isabs(v):
-                    nv = _remap(v)
-                    if nv:
-                        c[key] = nv
-            em = []
-            for p in (c.get("extra_models") or []):
-                # ⚠ 不要在这里判 os.path.isfile：调用时文件**已经搬完**了，老路径
-                # 一律不存在 —— 只看它有没有出现在本次搬动的对照表里。
-                em.append(_remap(p) or p)
-            if em != (c.get("extra_models") or []):
-                c["extra_models"] = em
-            pr = c.get("perf_reported") or {}
-            if pr:
-                c["perf_reported"] = {(_remap(k) or k): v for k, v in pr.items()}
-            save_config(c)
+                    if _hit(c.get("model", "")):
+                        c["model"] = new
+                    rec = c.get("model_mmproj") or {}
+                    hit_rec = False
+                    for k, v in list(rec.items()):
+                        if _hit(v):
+                            rec[k] = new
+                            hit_rec = True
+                    if hit_rec:
+                        c["model_mmproj"] = rec
+                    # 其余"记了路径"的键跟着搬；**纯文件名**的 img_*/vid_* 键按 basename
+                    # 命中时升级成新绝对路径——文件搬进新目录后，"老目录拼文件名"必然
+                    # 找不到（R-11：菜单里看得见、发送侧报"未找到生图模型"）
+                    base_src = os.path.normcase(os.path.basename(src))
+                    for key in ("img_model_file", "img_vae_file", "img_llm_file",
+                                "img_clip_l_file", "img_clip_g_file", "img_t5_file",
+                                "img_tokenizer_file", "vid_model_file", "vid_vae_file",
+                                "vid_llm_file", "vid_t5_file", "vid_tokenizer_file",
+                                "vid_high_noise_file", "vid_audio_vae_file"):
+                        v = str(c.get(key) or "")
+                        if not v:
+                            continue
+                        if _hit(v) or (not os.path.isabs(v) and os.path.normcase(
+                                os.path.basename(v)) == base_src):
+                            c[key] = new
+                    # ⚠ extra_models 不要判 os.path.isfile：文件**已经搬完**，老路径一律
+                    # 不存在——只看它是不是这条被搬的文件
+                    em = [new if _hit(p) else p
+                          for p in (c.get("extra_models") or [])]
+                    if em != (c.get("extra_models") or []):
+                        c["extra_models"] = em
+                    pr = c.get("perf_reported") or {}
+                    if any(_hit(k) for k in pr):
+                        c["perf_reported"] = {(new if _hit(k) else k): v
+                                              for k, v in pr.items()}
+                    save_config(c)
+
+            ok, fails = apply_tidy(moves, on_moved=on_moved)
+            # R-07：跨类（生图×生视频）共享的配套件留原位不搬，计划阶段定好的
+            # "绝对路径 → 全局配置槽"在这里落进配置；只写当前为空的槽——
+            # 用户手工填过的值不覆盖
+            pinned_any = False
+            for key, path in (info.get("pins") or []):
+                if not str(c.get(key) or "").strip() and os.path.isfile(path):
+                    c[key] = path
+                    pinned_any = True
+            if pinned_any:
+                with cfg_lock():
+                    save_config(c)
             self._reindex_after_tidy()
             dlg.destroy()
             msg = "整理完成：移动 %d 个文件。" % ok

@@ -13,23 +13,27 @@ from .gguf import gguf_is_chat_capable, gguf_structure
 def make_alias(filename):
     """从 GGUF 文件名自动生成简短别名（纯代码规则，不询问模型）。
 
-    例：Qwen3.8-27B-UD-Q3_K_XL.gguf -> qwen3.8-27b-q3
+    例：Qwen3.8-27B-UD-Q3_K_XL.gguf -> qwen3.8-27b-q3-xl
         超长的社区微调名按**连字符**截到 30 字符以内。
 
     ⚠ 这个上限管的是**模型菜单**（点开后的列表），那里一行放得下 30 字。
     **主页面顶栏**另有更严的上限（`TOPBAR_ALIAS_MAX`），走 `short_alias()` ——
     别把顶栏的限长做到这里来，那会把菜单里的名字也一起砍短（W 2026-10-03）。
+
+    量化后缀**保留到档位字母**（W 2026-10-10 批）：原来 Q3_K_XL / Q3_K_L / Q3_K_M
+    一律截成 `q3`，两个量化版本在菜单里同名、点错就静默换模型（排查报告 R-61）。
     """
     s = filename.strip()
     if s.lower().endswith(".gguf"):
         s = s[:-5]
     s = s.lower()
-    # 量化后缀压缩：q3_k_xl -> q3、iq4_xs -> iq4、q4_0 -> q4
-    s = re.sub(r"\bi?q\d+_k_(?:s|m|l|xl|xxl|xs)\b",
-               lambda m: m.group(0).split("_")[0], s)
-    s = re.sub(r"\biq\d+_(?:xxs|xs|s|m|l|xl)\b",
-               lambda m: m.group(0).split("_")[0], s)
-    s = re.sub(r"\bi?q\d+_[012]\b", lambda m: m.group(0).split("_")[0], s)
+    # 量化后缀压缩到"档位字母"为止：q3_k_xl -> q3-xl、iq4_xs -> iq4-xs、q4_0 -> q4-0
+    s = re.sub(r"\bi?q\d+_k_(s|m|l|xl|xxl|xs)\b",
+               lambda m: "%s-%s" % (m.group(0).split("_")[0], m.group(1)), s)
+    s = re.sub(r"\biq\d+_(xxs|xs|s|m|l|xl)\b",
+               lambda m: "%s-%s" % (m.group(0).split("_")[0], m.group(1)), s)
+    s = re.sub(r"\bi?q\d+_([012])\b",
+               lambda m: "%s-%s" % (m.group(0).split("_")[0], m.group(1)), s)
     # 常见噪声词移除
     for w in ("ud-", "ggml-", "instruct", "-hf", "-i1", "-imatrix"):
         s = s.replace(w, "-")
@@ -98,6 +102,15 @@ def is_diffusion_file(path):
     if not sdprofile.looks_like_companion(name) and gguf_is_chat_capable(path) \
             and str(name).lower().endswith(".gguf"):
         return False                    # kv>0 的 GGUF 是语言模型 / 文本编码器
+    if str(name).lower().endswith((".bin", ".pt", ".sft")):
+        # 这三类是历史格式，目录里更常见的恰恰是 CLIP / tokenizer 这类**非权重**文件：
+        # 给个体量下限（真扩散权重几百 MB 起），小的不当"生图模型"收进菜单、
+        # 更不该被整理搬进 model\生图模型（R-59）
+        try:
+            if os.path.getsize(path) < (50 << 20):
+                return False
+        except OSError:
+            return False
     return video_component_role(path) != "video"
 
 
@@ -144,11 +157,20 @@ def dir_has_any_gguf(path, subdirs=1):
     p = str(path or "").strip()
     if not p or not os.path.isdir(p):
         return False
-    if any(str(n).lower().endswith(".gguf") for n in _listdir(p)):
+
+    def _skip(n):
+        # 与 _expand_dirs 同一口径（R-60）：`.old` / `.new` 备份与隐藏目录里的
+        # gguf 不算"这条模型目录还有东西"，否则旧备份会挡住自动定向
+        return str(n).startswith(".") or str(n).endswith((".old", ".new"))
+
+    if any(str(n).lower().endswith(".gguf") and not _skip(n)
+           for n in _listdir(p)):
         return True
     if subdirs <= 0:
         return False
     for n in _listdir(p):
+        if _skip(n):
+            continue
         sub = os.path.join(p, n)
         if os.path.isdir(sub) and dir_has_any_gguf(sub, subdirs - 1):
             return True
@@ -330,8 +352,11 @@ def scan_models(cfg):
         生图目录（img_dir）除外 —— 它按"扩散主体 + 配对可看图组件"单独处理（下面一段）。
         """
         img_norm = os.path.normpath(img_dir)
+        root_norm = os.path.normpath(root)
         for folder in _expand_dirs(root):
-            if os.path.normpath(folder) == img_norm:
+            # img_dir 就是根目录本身时（用户把生图目录指到模型目录）**不能整树跳过**：
+            # 原来那会把聊天清单一起清空（R-58 实测 chat=[]、扩展件照收）
+            if img_norm != root_norm and os.path.normpath(folder) == img_norm:
                 continue
             for n in _ggufs(folder):
                 if _is_mmproj(n):
@@ -370,8 +395,10 @@ def scan_models(cfg):
         if video_component_role(p) == "video":
             continue
         if is_diffusion_file(p):
-            image.append(p)
-        elif p in pairs and gguf_is_chat_capable(p):
+            if p not in image:
+                image.append(p)
+        elif p in pairs and gguf_is_chat_capable(p) and p not in chat:
+            # 去重（R-58）：img_dir 指到模型目录时这一块与 _harvest 会看同一批文件
             chat.append(p)
     # 手动定向加入的来源（W 2026-10-05）：文件夹按"一棵模型树"并入（与 models_dir
     # 同一套 _harvest），单文件按它自己判。**只登记、不动文件**。
@@ -530,7 +557,10 @@ def selected_usable(cfg):
         if not (pid and model):
             return False
         try:
-            return bool(secrets.has_api_key(pid))
+            # 停用的服务商不算可用（R-62）：与 cloud_usable 的判据对齐——
+            # 原来只判"有没有密钥"，停用后被顶栏标成可用、还可能被自动选中
+            p = providers.get_provider(cfg, pid)
+            return bool(p and p.get("enabled", True) and secrets.has_api_key(pid))
         except Exception:
             return False
     if os.path.isfile(cur) and engine_ready(cfg, (cfg or {}).get("model_kind") or "chat"):
@@ -549,11 +579,26 @@ def _norm_model_name(s):
                "", s)
     return s.strip("-")
 
+def _pair_name_hit(mn, pn):
+    """配对用的"互为包含"必须带**词边界**（R-27）：裸 `mn in pn` 会让短名
+    `qwen.gguf` 抢走 `mmproj-Qwen3VL-8B.gguf`（"qwen" 是 "qwen3vl" 的前缀子串）
+    —— mmproj 配错 = 看图乱码 / 菜单标注错。两侧都是 _norm_model_name 归一过的
+    小写连字串，边界 = 紧邻字符不是字母数字。"""
+    if not mn or not pn:
+        return False
+    if pn == mn:
+        return True
+    for a, b in ((pn, mn), (mn, pn)):
+        if re.search(r"(?<![a-z0-9])" + re.escape(a) + r"(?![a-z0-9])", b):
+            return True
+    return False
+
 def find_vl_pairs(cfg):
     """扫描模型目录（顶层 + 每个一级子目录），返回 {可看图模型完整路径: mmproj 完整路径}。
 
     配对规则：同目录内 mmproj-*.gguf 与模型文件名，去掉 mmproj 前缀与量化/精度后缀
-    归一化后相等或互为包含即视为配对；名字里不带模型信息的投影器（`mmproj-BF16.gguf`）
+    归一化后相等或**带词边界**互为包含即视为配对（裸子串会让短名抢走长名投影器，
+    R-27，判据在 `_pair_name_hit`）；名字里不带模型信息的投影器（`mmproj-BF16.gguf`）
     在同目录只有一个能聊天的模型时也认给它。
     """
     d = cfg.get("models_dir") or os.path.dirname(cfg.get("model", "")) or "."
@@ -602,7 +647,7 @@ def find_vl_pairs(cfg):
             mn = _norm_model_name(m)
             for pj in projs:
                 pn = _proj_tail(pj)
-                if pn and (pn == mn or pn in mn or mn in pn):
+                if pn and _pair_name_hit(mn, pn):
                     pairs[os.path.join(folder, m)] = os.path.join(folder, pj)
                     break
         # 名字里没有模型信息的投影器（`mmproj-BF16.gguf` 这种）无法按名字归属。只有当
@@ -639,6 +684,18 @@ def is_vl_model(cfg, path):
 TIDY_DIR = "model"
 TIDY_CLASS_DIR = {"chat": "文本模型", "image": "生图模型", "video": "生视频模型"}
 
+# 配套槽位 → 全局配置键（跨类共享件"写绝对路径进配置"用，R-07；
+# 键名与 DEFAULT_CONFIG 的 img_*_file / vid_*_file 一一对应）
+_SLOT_CFG_KEY = {
+    ("image", "llm"): "img_llm_file", ("image", "vae"): "img_vae_file",
+    ("image", "clip_l"): "img_clip_l_file", ("image", "clip_g"): "img_clip_g_file",
+    ("image", "t5xxl"): "img_t5_file", ("image", "tokenizer"): "img_tokenizer_file",
+    ("video", "llm"): "vid_llm_file", ("video", "vae"): "vid_vae_file",
+    ("video", "t5xxl"): "vid_t5_file", ("video", "tokenizer"): "vid_tokenizer_file",
+    ("video", "high_noise"): "vid_high_noise_file",
+    ("video", "audio_vae"): "vid_audio_vae_file",
+}
+
 _BAD_FS_CHARS = '<>:"/\\|?*'
 
 
@@ -647,14 +704,43 @@ def _safe_name(s):
     return "".join("_" if c in _BAD_FS_CHARS else c for c in str(s or "")).strip(" .")
 
 
+def _is_link_dir(path):
+    """目录是不是链接（symlink / Windows junction / 任何 reparse point）。
+
+    `os.walk(followlinks=False)` 挡不住 Windows junction——junction 不是 symlink，
+    `os.path.islink` 对它为假，walk 会照样下钻（排查报告 R-08，mklink 实测）。
+    判据看 `st_file_attributes` 的 FILE_ATTRIBUTE_REPARSE_POINT 位（0x400）。
+    """
+    try:
+        st = os.stat(path, follow_symlinks=False)
+    except OSError:
+        return False
+    if getattr(st, "st_file_attributes", 0) & 0x400:
+        return True
+    return os.path.islink(path)
+
+
 def _tidy_files(root):
     """整理候选项：root 下（含子目录，深度口径与 `_expand_dirs` 一致）的模型类文件。
 
     廉价初筛（只看扩展名）：`.gguf` + 扩散权重那几种（safetensors / sft / ckpt / pt / bin）。
     真正的角色判定在后面（读 GGUF 头 / 认族），认不出的不动。
+
+    **链接目录一律不下钻**（R-08）：junction / symlink 指向的往往是另一份模型库，
+    `os.rename` 会解引用把**真实文件**搬走，而 `_tidy_root` 只看路径字符串、根本
+    不知道动了别人的库。扫描/菜单侧不受影响（它们照旧走 `_expand_dirs`）。
     """
     out = []
+    root_real = os.path.realpath(root)
     for folder in _expand_dirs(root):
+        if os.path.normpath(folder) != os.path.normpath(root):
+            if _is_link_dir(folder):
+                continue
+            # 双保险：realpath 逃逸出 root 的目录（父路径里有链接等）也不碰
+            real = os.path.realpath(folder)
+            if not (real == root_real
+                    or real.startswith(root_real.rstrip(os.sep) + os.sep)):
+                continue
         for n in _listdir(folder):
             fp = os.path.join(folder, n)
             if os.path.isfile(fp) and str(n).lower().endswith(sdprofile.DIFFUSION_EXTS):
@@ -766,6 +852,25 @@ def plan_tidy(cfg):
             text_models.append(fp)
 
     # ---- 2) 生图 / 生视频：认配套件（与发送链路同一处判据），按"文本编码器"分组 ----
+    def _llm_slot_ok(p):
+        """R-06 反向保护：llm 槽只认"确实像文本编码器"的文件。
+
+        名字命中 SLOTS["llm"] 家族线索 / 用户手工指定过 / 不是可聊天 GGUF（kv=0 的
+        裸权重编码器，MiniMax-H3 这类）三者其一即放行。都不满足的可聊天模型（曾由
+        _pick_llm 第三档按字母序抓来的纯聊天模型，实测 `Aaa-Chat-14B` 中招）一律
+        不认领——它留在文本组，绝不能被搬进生图/生视频组。
+        """
+        n = os.path.basename(p)
+        if sdprofile._name_hit(n, sdprofile.SLOTS["llm"][2]):
+            return True
+        for key in ("img_llm_file", "vid_llm_file"):
+            w = str(cfg.get(key) or "").strip()
+            if w and (os.path.normcase(n) == os.path.normcase(w)
+                      or os.path.normcase(os.path.abspath(w))
+                      == os.path.normcase(os.path.abspath(p))):
+                return True                     # 人工指定：尊重
+        return not gguf_is_chat_capable(p)
+
     def _comps(model, kind):
         try:
             got = (media.resolve_img_files(cfg, model) if kind == "image"
@@ -777,14 +882,24 @@ def plan_tidy(cfg):
             p = str(val or "")
             if slot in ("diffusion", "family", "basis", "note", "missing") or not p:
                 continue
-            if os.path.isfile(p) and _in_root(p):
-                out.append((os.path.normpath(p), slot))
+            if not (os.path.isfile(p) and _in_root(p)):
+                continue
+            if slot == "llm" and not _llm_slot_ok(p):
+                continue
+            out.append((os.path.normpath(p), slot))
         return out
 
     moves, claimed = [], set()
+    conflicts = []          # R-09：目标撞名，本次不搬（预览列出、交人工处理）
+    dst_taken = {}          # normcase(目标文件全路径) -> src
 
     def _claim(src, dst, label):
-        """登记一条移动（同一个文件只登记一次；已经在目标目录里就不再动）。"""
+        """登记一条移动（同一个文件只登记一次；已经在目标目录里就不再动）。
+
+        撞名检测在**计划阶段**做（R-09）：目标位置已有同名文件（磁盘上已存在、或
+        另一条计划的源文件先搬过去）就不搬、记入 conflicts——原实现到执行时才
+        "目标已存在，跳过"，预览里一个字都看不到。
+        """
         key = os.path.normcase(os.path.normpath(src))
         if key in claimed:
             return
@@ -792,9 +907,18 @@ def plan_tidy(cfg):
         if os.path.normcase(os.path.normpath(os.path.dirname(src))) \
                 == os.path.normcase(os.path.normpath(dst)):
             return                         # 已就位
+        dst_file = os.path.join(dst, os.path.basename(src))
+        dkey = os.path.normcase(os.path.normpath(dst_file))
+        if dkey in dst_taken or os.path.exists(dst_file):
+            conflicts.append((src, dst_file))
+            return
+        dst_taken[dkey] = src
         moves.append((src, dst, label))
 
-    # ---- 3) 生图 / 生视频分组：**共用同一文本编码器的模型并进同一个组** ----
+    # ---- 3) 生图 / 生视频分组：**共用同一文本编码器的模型并进同一个组**；
+    #      不同组认领了同一个配套件 → 并成同一组（R-07，W 2026-10-10 定：
+    #      共享组并入同一目录）——物理文件只有一个归宿，两组各拉进自己的
+    #      子夹时，后到的那组整理完必然"缺件不可用"。
     comps_by_model = {}
     groups = {"image": [], "video": []}        # [(成员列表, 编码器路径), …]
     for kind, models_ in (("image", img_models), ("video", vid_models)):
@@ -805,21 +929,78 @@ def plan_tidy(cfg):
             enc = next((p for p, slot in comps if slot == "llm"), "")
             key = os.path.normcase(os.path.normpath(enc or m))
             if key not in by_enc:
-                by_enc[key] = {"enc": enc, "members": []}
+                by_enc[key] = {"enc": enc, "members": [], "comps": set()}
                 order.append(key)
-            by_enc[key]["members"].append(m)
-        for key in order:
-            groups[kind].append((by_enc[key]["members"], by_enc[key]["enc"]))
+            g = by_enc[key]
+            g["members"].append(m)
+            g["comps"].update(os.path.normcase(os.path.normpath(p))
+                              for p, _s in comps)
+        # 配套件集合有交集 → 传递式合并（A 与 B 共享、B 与 C 共享 ⇒ A/B/C 同目录）
+        merged = [by_enc[k] for k in order]
+        changed = True
+        while changed:
+            changed = False
+            for i in range(len(merged)):
+                for j in range(i + 1, len(merged)):
+                    if merged[i]["comps"] & merged[j]["comps"]:
+                        merged[i]["members"].extend(merged[j]["members"])
+                        merged[i]["comps"] |= merged[j]["comps"]
+                        merged[i]["enc"] = merged[i]["enc"] or merged[j]["enc"]
+                        del merged[j]
+                        changed = True
+                        break
+                if changed:
+                    break
+        groups[kind] = [(g["members"], g["enc"]) for g in merged]
+
+    # ---- 3b) 跨类共享配套件（生图组与生视频组认领同一个文件）：不搬、留原位 ----
+    # 搬进任何一类目录后，另一类的"同目录优先"搜索就再也找不到它。文件留在原位；
+    # 同名配置槽在**该类全部组里解析结果唯一**时把绝对路径写进配置（pins，由
+    # do_exec 落进 cfg——槽是全局键，不唯一时写进去会带偏其它组，R-20 同族）；
+    # 不唯一就只在预览里列出，提示手工指定。
+    def _kind_comps(kind):
+        s = {}
+        for ms, _e in groups[kind]:
+            for m in ms:
+                for p, slot in comps_by_model.get(m, []):
+                    s.setdefault(os.path.normcase(os.path.normpath(p)),
+                                 set()).add(slot)
+        return s
+
+    img_c, vid_c = _kind_comps("image"), _kind_comps("video")
+    cross_set = set(img_c) & set(vid_c)
+    pins, shared_kept = [], []
+    if cross_set:
+        slot_files = {}               # (kind, slot) -> 该类所有组解析出的文件集合
+        for kind, cmap in (("image", img_c), ("video", vid_c)):
+            for pk, slots in cmap.items():
+                for s in slots:
+                    slot_files.setdefault((kind, s), set()).add(pk)
+        by_pk = {os.path.normcase(os.path.normpath(p)): p for p in files}
+        for pk in sorted(cross_set):
+            orig = by_pk.get(pk)
+            if not orig:
+                continue
+            tags = ([("image", s) for s in sorted(img_c[pk])]
+                    + [("video", s) for s in sorted(vid_c[pk])])
+            pinned = []
+            for kind, s in tags:
+                ckey = _SLOT_CFG_KEY.get((kind, s))
+                if ckey and slot_files.get((kind, s)) == {pk}:
+                    pins.append((ckey, os.path.abspath(orig)))
+                    pinned.append(ckey)
+            shared_kept.append((orig, tags, pinned))
 
     # 编码器（可聊天的 gguf 自己会进"文本模型"清单）不该被当成文本模型搬走 ——
-    # 它已经是生图 / 生视频那一组里的配套件了
+    # 它已经是生图 / 生视频那一组里的配套件了；跨类共享件同样留在原位（3b）
     companion_paths = {os.path.normcase(os.path.normpath(p))
                        for grps in groups.values()
                        for members, _enc in grps
                        for m in members
                        for p, _slot in comps_by_model.get(m, [])}
     text_models = [m for m in text_models
-                   if os.path.normcase(os.path.normpath(m)) not in companion_paths]
+                   if os.path.normcase(os.path.normpath(m)) not in companion_paths
+                   and os.path.normcase(os.path.normpath(m)) not in cross_set]
 
     # ---- 4) 文本模型（+ 配对 mmproj）→ model\文本模型\ ----
     t_dir = os.path.join(model_dir, TIDY_CLASS_DIR["chat"])
@@ -834,12 +1015,28 @@ def plan_tidy(cfg):
     # ---- 5) 生图 / 生视频 → 各自类目录（≥2 个成员共用编码器的组进同一个子夹）----
     for kind, grps in groups.items():
         base = os.path.join(model_dir, TIDY_CLASS_DIR[kind])
+        named_used = set()          # R-09：命名子夹去重（不同组绝不共用同一个子夹）
         for members, enc in grps:
-            target = (os.path.join(base, _tidy_group_name(members, enc))
-                      if len(members) >= 2 else base)
+            if len(members) >= 2:
+                gname = _tidy_group_name(members, enc)
+                target = os.path.join(base, gname)
+                key = os.path.normcase(os.path.normpath(target))
+                i = 2
+                while key in named_used:
+                    # 组名由 commonprefix 得来，不同组可能撞出同一个名字（R-09）：
+                    # 追加序号——否则两组的编码器/VAE 被塞进同一目录，之后 rank_pool
+                    # 在同目录里跨组抓错件（引擎不报错，出图糊/风格错）
+                    target = os.path.join(base, "%s-%d" % (gname, i))
+                    key = os.path.normcase(os.path.normpath(target))
+                    i += 1
+                named_used.add(key)
+            else:
+                target = base
             for m in members:
                 _claim(m, target, TIDY_CLASS_DIR[kind])
                 for p, slot in comps_by_model.get(m, []):
+                    if os.path.normcase(os.path.normpath(p)) in cross_set:
+                        continue    # 跨类共享件：留原位（见 3b），不进任何组
                     if slot == "llm":
                         _claim(p, target, "文本编码器")
                         # 编码器自己的 mmproj（参考图编辑 --llm_vision 要用的那个）也进这一组
@@ -853,10 +1050,20 @@ def plan_tidy(cfg):
     unpaired = [p for p in files
                 if _is_mmproj(os.path.basename(p))
                 and os.path.normcase(os.path.normpath(p)) not in claimed]
-    return moves, unpaired, {"status": "ok", "root": root, "roots": roots}
+    info = {"status": "ok", "root": root, "roots": roots,
+            "conflicts": conflicts,        # R-09：[(src, 目标同名文件路径)]
+            "shared_kept": shared_kept,    # R-07：[(路径, [(kind, slot)…], [已指向的配置键])]
+            "pins": pins}                  # R-07：[(配置键, 绝对路径)]，由 do_exec 落进 cfg
+    return moves, unpaired, info
 
-def apply_tidy(moves):
-    """执行整理计划（同盘移动，瞬时完成）；返回 (成功数, 失败清单)。"""
+def apply_tidy(moves, on_moved=None):
+    """执行整理计划（同盘移动，瞬时完成）；返回 (成功数, 失败清单)。
+
+    `on_moved(src, dst)` 在**每一条成功移动之后**立即回调（R-10）：调用方靠它把
+    配置"搬完一条就改写一条并落盘"。原来 remap + save_config 只在全部 rename 跑完
+    后执行一次——中途崩溃/断电（开发机每日 23:30 断电）时文件已在新位置、配置整片
+    指着老路径。回调抛错不中断搬运（下次启动的扫描能兜底纠偏）。
+    """
     ok, fails = 0, []
     for src, dst_dir, _ in moves:
         try:
@@ -866,9 +1073,15 @@ def apply_tidy(moves):
                 fails.append((src, "目标已存在，跳过"))
                 continue
             os.rename(src, dst)
-            ok += 1
         except Exception as e:
             fails.append((src, str(e)))
+            continue
+        ok += 1
+        if on_moved is not None:
+            try:
+                on_moved(src, dst)
+            except Exception:
+                pass
     return ok, fails
 
 def clean_alias(text):
@@ -917,9 +1130,24 @@ def resolve_model(cfg, name, chat=None):
         if _norm(display_name(cfg, p)) == n:
             return p
     # 3) 归一化子串（空格/下划线/点统一为连字符，双向，取最短候选）
+    # 规模守卫（R-28）：两侧都**显式写了参数规模**（72b / 7b / 35b…）且不一致时，
+    # 任何模糊档都绝不命中——请求 qwen2.5-72b 拿到 Qwen2.5-7B，8081 代理答非所问
+    # 还零提示（实测复现）。只带规模的一侧不受限（"qwen2.5" 请求照常模糊命中）。
+    def _sizes(s):
+        return {m.group(1) for m in
+                re.finditer(r"(?<![a-z0-9])(\d+)[b](?![a-z0-9])", str(s))}
+
+    req_sizes = _sizes(n)
+
+    def _size_ok(bl):
+        cs = _sizes(bl)
+        return not (req_sizes and cs and not (req_sizes & cs))
+
     cands = []
     for b, p in keys.items():
         bl = _norm(b.removesuffix(".gguf"))
+        if not _size_ok(bl):
+            continue
         if n in bl or bl in n:
             cands.append((len(bl), p))
     if cands:
@@ -935,7 +1163,10 @@ def resolve_model(cfg, name, chat=None):
         return best
     best, score = None, 0.0
     for b, p in keys.items():
-        r = _partial(n, _norm(b.removesuffix(".gguf")))
+        bl = _norm(b.removesuffix(".gguf"))
+        if not _size_ok(bl):
+            continue                        # 相似度兜底同样受规模守卫（R-28）
+        r = _partial(n, bl)
         if r > score:
             best, score = p, r
     return best if score >= 0.8 else None

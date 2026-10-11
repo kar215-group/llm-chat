@@ -129,19 +129,24 @@ def grade(need, vram_gb, ram_gb):
     显存维只判"慢"（不够就溢出到内存，实测不崩）；内存维判"险 / 必闪退"，
     且基数上要加**显存装不下的溢出部分**（纯核显机器全部权重都落内存）。
     两维独立比、取最严。`need` 为 None 返 0。
+
+    `ram_gb ≤ 0` = 内存**没探到**（真实机器不可能零内存），不是"零内存"：
+    原来按 0 参与比较，任何模型都判 3 级"必闪退"，而且登记进 perf_reported
+    后不再重算（排查报告 R-17，实测 ram=0/8/16 同判 3 级）。未知就不判内存维。
     """
     if not need:
         return LEVEL_OK
     vram = max(0.0, float(vram_gb or 0.0))
     ram = max(0.0, float(ram_gb or 0.0))
+    ram_known = ram > 0
     spill = max(0.0, need.get("gpu_total", 0.0) - vram)
     min_ram_eff = need["min_ram"] + spill
     lvl = LEVEL_OK
-    if vram < need["rec_vram"] * 0.85 or ram < need["rec_ram"] * 0.9:
+    if vram < need["rec_vram"] * 0.85 or (ram_known and ram < need["rec_ram"] * 0.9):
         lvl = LEVEL_SLOW
-    if ram < min_ram_eff * 0.9:
+    if ram_known and ram < min_ram_eff * 0.9:
         lvl = LEVEL_RISKY
-    if ram < min_ram_eff * 0.7:
+    if ram_known and ram < min_ram_eff * 0.7:
         lvl = LEVEL_FATAL
     return lvl
 

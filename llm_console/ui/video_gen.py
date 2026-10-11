@@ -8,7 +8,7 @@ import threading
 import time
 from tkinter import ttk, messagebox
 
-from ..core import cloudjobs, config, providers
+from ..core import cloudjobs, config, providers, sdprofile
 from . import theme
 from ..core.media import build_video_cmd, resolve_video_files, vid_out_dir
 from ..connection import cloud_media
@@ -32,6 +32,11 @@ class VideoGenMixin:
                          % (cli or "（还没填目录）"), "error")
             return
         files = resolve_video_files(self.cfg)
+        # 人工指定的配套件没找到：逐条点名（R-20，与生图预检同一口径/同一句文案）
+        for _s, _w in (files.get("manual_missing") or []):
+            self._append("\n[提示] 人工指定的%s没找到：%s——没有自动换成别的文件；"
+                         "请在设置里改正路径，或把该项清空改回自动发现。\n"
+                         % (sdprofile.slot_name(_s), _w), "error")
         if files["missing"]:
             self._append("\n[提示] 视频链路组件不全，缺：\n  · %s\n\n"
                          "把文件放进「%s」后重新发一次即可（文件名可在 设置 → 本地模型 → 生视频（sd.cpp） 里指定）。"
@@ -78,6 +83,7 @@ class VideoGenMixin:
         # 预检都过了才消费输入框与附件（坑 133，同生图链路）
         self.input.delete("1.0", "end")
         self.clear_attachment()
+        self._opt_star_refresh()      # 消费后立即重算星星显隐（R-89）
         self._append("\n【你】\n" + prompt + "\n", "user")
         prompt = self._doc_merge(prompt, doc)
         if ref_img and os.path.isfile(ref_img):
@@ -180,6 +186,7 @@ class VideoGenMixin:
         # 预检（check + 建目录 + 费用确认已在调用方）都过了才消费输入框与附件（坑 133）
         self.input.delete("1.0", "end")
         self.clear_attachment()
+        self._opt_star_refresh()      # 同 _start_chat_video（R-89）
         self._append("\n【你】\n" + prompt + "\n", "user")
         prompt = self._doc_merge(prompt, doc)
         gen, q, stop = self._cloud_begin("video")
@@ -207,6 +214,14 @@ class VideoGenMixin:
             except Exception:
                 return dft
         log_path = dest + ".log"
+
+        def emit(e):
+            # 事件带上世代号再入队（同生图 worker；R-13）：_poll 对过期轮的残留直接丢弃
+            try:
+                q.put((e[0], e[1], gen))
+            except Exception:
+                q.put(e)
+
         if not tid:
             r = cloud_media.submit_video(
                 self.cfg, provider, model, prompt,
@@ -217,7 +232,7 @@ class VideoGenMixin:
                 seed=_int("vid_seed", -1), log_path=log_path,
                 title="云端生视频提交 %s" % model)
             if not r["ok"]:
-                q.put(("line", "[ERROR] 提交失败：%s" % r["error"]))
+                emit(("line", "[ERROR] 提交失败：%s" % r["error"]))
                 q.put(("exit", 1, gen))
                 return
             tid = r["task_id"]
@@ -225,25 +240,31 @@ class VideoGenMixin:
                               model, prompt, dest,
                               resolution=str(self.cfg.get("cloud_video_resolution", "") or ""),
                               duration=_int("cloud_video_duration", 5))
-        # 取消与取回都要找得到它：这个属性由主线程的 _cancel_chat_video 读
-        self._cloud_tid = tid
+        # 取消与取回都要找得到它：这个属性由主线程的 _cancel_chat_video 读。
+        # 世代守卫（R-02）：本轮已被取消/替换时不得写回共享字段（会覆盖新任务刚清空
+        # 的状态、下一次取消打错对象），改为立刻补发真取消并把结果如实告知。
+        if gen == self._vid_gen:
+            self._cloud_tid = tid
+        else:
+            self._late_cancel("video", provider, tid, model)
 
         def persist(status, raw=None):
             cloudjobs.update_job(tid, status=status)
 
         res = cloud_media.wait_task(self.cfg, provider, tid, dest, kind="video",
-                                    emit=q.put, stop_flag=stop_flag, persist=persist,
+                                    emit=emit, stop_flag=stop_flag, persist=persist,
                                     model=model)
         paths = list(res.get("paths") or [])
         if paths:
-            self._vid_out = paths[0]    # 真实扩展名由服务端 URL 决定，_handle_vid_exit 要按它判成功
+            if gen == self._vid_gen:
+                self._vid_out = paths[0]    # 真实扩展名由服务端 URL 决定，_handle_vid_exit 要按它判成功
             cloudjobs.mark_done(tid, paths=paths, urls=res.get("urls"),
                                 seconds=res.get("seconds", 0))
         else:
             status = str(res.get("status") or "failed")
             cloudjobs.update_job(tid, status=status,
                                  error=str(res.get("error") or "")[:600])
-            q.put(("line", "[ERROR] %s" % (res.get("error") or "云端生视频失败")))
+            emit(("line", "[ERROR] %s" % (res.get("error") or "云端生视频失败")))
         q.put(("exit", 0 if paths else 1, gen))
 
     def _vid_reader(self, proc, gen, log_path, t0):
@@ -351,6 +372,7 @@ class VideoGenMixin:
             except Exception:
                 pass
             self.chat.configure(state="disabled")
+        self._vid_mark = None           # 收尾即封死 mark（同生图侧；R-13）
         if cancelled:
             self._append("🎬 [已取消生成]\n", "meta")
             self._append("────────────────\n", "meta")
@@ -419,6 +441,8 @@ class VideoGenMixin:
             except Exception:
                 pass
             self.chat.configure(state="disabled")
+        # mark 置 None 封死迟到进度行（同生图侧 _cancel_chat_image；R-13）
+        self._vid_mark = None
         if cloud:
             return self._cloud_cancel_task(tid, "video")
         return False

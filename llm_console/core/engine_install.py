@@ -482,11 +482,31 @@ def cleanup(path):
     shutil.rmtree(path, ignore_errors=True)
 
 
-def download(url, dest, emit=None, stop_flag=None, digest="", retries=RETRIES):
+def _zip_member_unsafe(name):
+    """压缩包成员名是否可能写到目标目录之外（ZipSlip 判据，R-94）：
+
+    绝对路径 / UNC / 任何一段 `..` / 首段带盘符 —— 命中一条即拒收。收口在这里，
+    `install` 解引擎包与 `selfupdate.extract_exe` 解更新包共用同一份判据。
+    """
+    s = str(name or "").replace("\\", "/")
+    if s.startswith("/"):
+        return True
+    parts = s.split("/")
+    if any(p == ".." for p in parts):
+        return True
+    if parts and len(parts[0]) >= 2 and parts[0][1] == ":":
+        return True
+    return False
+
+
+def download(url, dest, emit=None, stop_flag=None, digest="", retries=RETRIES,
+             expected_size=0):
     """把一个资产落到 `dest`；写 `.part` 再原子改名。`(ok, why)`
 
     断点续传：`.part` 已存在且服务器认 `Range` 就接着传（几百 MB 的包遇上断电 / 网断是常态）。
-    校验：`digest` 形如 `sha256:…` 时强校验，不过就删掉重下——**半个文件装上去比没装更糟**。
+    校验：`digest` 形如 `sha256:…` 时强校验，不过就删掉重下——**半个文件装上去比没装更糟**；
+    `digest` 为空但给了 `expected_size`（资产声称的字节数）时按大小核对（R-96：
+    断线残留的半个包不能被当完整包）。
     取消：`stop_flag` 置位即停并删 `.part`（不留半个目录）。
     """
     part = dest + ".part"
@@ -544,6 +564,14 @@ def download(url, dest, emit=None, stop_flag=None, digest="", retries=RETRIES):
                             emit("校验不通过，正在重下…")
                         continue
                     return False, "校验不通过（sha256 与发布页写的不一致），已丢弃"
+            elif expected_size and have != int(expected_size):
+                # 没有 digest 时按声称大小核对（R-96）
+                _discard(part)
+                if attempt + 1 < retries:
+                    if emit:
+                        emit("大小不符（%d / %d 字节），正在重下…" % (have, expected_size))
+                    continue
+                return False, "下载不完整（%d / %d 字节），已丢弃" % (have, expected_size)
             os.replace(part, dest)
             return True, ""
         except Exception as e:
@@ -612,6 +640,9 @@ def install(engine, files, dest_dir, emit=None, stop_flag=None, guard=None):
             if emit:
                 emit("正在解压 %s …" % f.get("name"))
             with zipfile.ZipFile(f["path"]) as zf:
+                bad = next((n for n in zf.namelist() if _zip_member_unsafe(n)), None)
+                if bad is not None:
+                    raise RuntimeError("压缩包里的文件路径不对（%s），已拒收" % bad)
                 zf.extractall(stage)
             if stop_flag is not None and stop_flag.is_set():
                 raise RuntimeError("已取消")

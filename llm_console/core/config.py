@@ -30,7 +30,7 @@ CONFIG_PATH = os.path.join(APP_DIR, "gui_config.json")
 
 # 版本号：发版时改这一处（--selfcheck / --version 会打印它）。
 # GitHub Release 的 tag 要与它一致（tag 去掉开头的 v），Actions 工作流会做一致性校验。
-APP_VERSION = "1.2.1"
+APP_VERSION = "1.2.2"
 
 CFG_VERSION = 3
 
@@ -276,6 +276,18 @@ STR_KEYS = ("models_dir", "host", "api_key", "reasoning_mode",
 
 _CFG_LOCK = threading.RLock()   # 可重入：save_config 自带锁，调用方若已持锁不会自我死锁
 
+
+def cfg_lock():
+    """cfg 读改写与序列化共用的锁（就是 `_CFG_LOCK`；RLock，坑 12：外面别再包一层）。
+
+    **后台线程改 cfg（含嵌套 dict）必须持这把锁**：save_config 的 json.dump 会全树
+    遍历，遍历期间别的线程给嵌套 dict 加键必抛 `RuntimeError: dictionary changed
+    size during iteration`，而 atomic_write_json 把它吞成 _LAST_WRITE 一条记录——
+    整份设置静默不落盘（排查报告 R-12：首开自动补全在跑时，60 次主线程保存失败
+    60 次）。主线程小段"改 cfg + save_config"也建议持锁，防反向竞争。
+    """
+    return _CFG_LOCK
+
 def load_config():
     """读取配置；v1 旧配置自动迁移（ctx/max_tokens 仍是旧默认值时升级）。"""
     cfg = dict(DEFAULT_CONFIG)
@@ -285,8 +297,14 @@ def load_config():
             user = json.load(f)
     except Exception:
         user = {}
-
-    ver = int(user.get("cfg_version", 1) or 1)
+    if not isinstance(user, dict):
+        # 合法 JSON 但顶层不是对象（数组 / 字符串 / null）：按"配置坏了"回退默认继续，
+        # 绝不让 AttributeError 穿出去——原来那是程序起不来、只能手动删文件（排查报告 R-42）
+        user = {}
+    try:
+        ver = int(user.get("cfg_version", 1) or 1)
+    except Exception:
+        ver = 1        # cfg_version 写成 "abc" 这类：按老版本号处理，别在验证前就抛（R-42）
     for k, val in user.items():
         if k in ("model_aliases", "model_ngl") and isinstance(val, dict):
             merged = dict(DEFAULT_CONFIG.get(k, {}))
@@ -296,6 +314,15 @@ def load_config():
             continue
         else:
             cfg[k] = val
+    # 嵌套可变默认值必须**逐键拷贝**：dict(DEFAULT_CONFIG) 是浅拷贝，缺键时
+    # cfg[k] 与 DEFAULT_CONFIG[k] 是同一个对象，就地写会污染出厂默认、同进程再
+    # load_config 带回幽灵数据（排查报告 R-41；生产里每进程只 load 一次所以用户
+    # 几乎看不见，主要是自检夹具互染——所有套件都写 base = dict(DEFAULT_CONFIG)）
+    for k, dflt in DEFAULT_CONFIG.items():
+        if isinstance(dflt, dict) and isinstance(cfg.get(k), dict):
+            cfg[k] = dict(cfg[k])
+        elif isinstance(dflt, list) and isinstance(cfg.get(k), list):
+            cfg[k] = list(cfg[k])
 
     if ver < CFG_VERSION:
         # 仅当用户仍是旧默认值时才升级，手动改过的数值原样保留
@@ -376,6 +403,29 @@ def api_headers(cfg):
 
 def gen_api_key():
     return "sk-" + secrets.token_urlsafe(24)
+
+
+def split_extra_args(s):
+    """「附加参数（原样透传）」输入 → argv 列表（三个入口共用：服务参数 extra_args、
+    生图 img_extra_args、生视频 vid_extra_args）。
+
+    不能用 `shlex.split(posix=True)`：posix 模式把反斜杠当转义符，Windows 路径
+    `D:\\a\\b.gguf` 被吃成 `D:ab.gguf`（排查报告 R-22 实测），引擎拿着错路径找不到
+    文件。改用 `posix=False`（反斜杠原样保留、引号仍起分组作用），再剥掉每个 token
+    成对的最外层引号——带空格的路径写成 `"D:\\my models\\x.gguf"` 也能整段保住。
+    """
+    import shlex
+    out = []
+    try:
+        tokens = shlex.split(str(s or ""), posix=False)
+    except ValueError:
+        # 引号不闭合一类：按空白粗拆兜底，别让整个发送路径抛错
+        return str(s or "").split()
+    for tok in tokens:
+        if len(tok) >= 2 and tok[0] == tok[-1] and tok[0] in ("\"", "'"):
+            tok = tok[1:-1]
+        out.append(tok)
+    return out
 
 
 def output_root(cfg):

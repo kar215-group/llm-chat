@@ -140,7 +140,13 @@ def auto_ctx_for_model(cfg, path):
         ngl = max(0, min(ngl, layers))
         is_moe = int(info.get("expert_count") or 0) > 0
         vram = float(cfg.get("vram_gb") or 0.0) * (1 << 30)
-        ram = float(cfg.get("ram_gb") or 32.0) * (1 << 30)
+        ram_gb = float(cfg.get("ram_gb") or 0.0)
+        if ram_gb <= 0:
+            # 内存没探到 = **未知**，绝不凭空按 32GB 算（R-23：与显存"按 0"的方向
+            # 相反——凭空按大数会给未知机器放出过大的 ctx，KV 撑爆内存）。未知就不估：
+            # 返回 None，调用方不写 ctx 记录，ctx 回落全局兜底（保守的 10240）。
+            return None
+        ram = ram_gb * (1 << 30)
         w_vram = fsize * (ngl / layers) * (0.3 if is_moe else 1.0)
         kv_vram = max(0.5 * (1 << 30), vram - w_vram - 0.6 * (1 << 30))
         kv_ram = max(1.0 * (1 << 30),
@@ -155,7 +161,11 @@ def auto_ctx_for_model(cfg, path):
 
         def snap(v):
             below = [s for s in steps if s <= v]
-            return below[-1] if below else 8192
+            if below:
+                return below[-1]
+            # 预算连最小档都不到：按 512 向下取整——**绝不反向抬高**（原来
+            # else 8192 会把 cap<8192 抬到 8192，超预算拉起 KV/内存必炸，R-24）
+            return max(512, int(v) // 512 * 512)
 
         return {"main": snap(min(cap, 98304)), "agent": snap(cap)}
     except Exception:

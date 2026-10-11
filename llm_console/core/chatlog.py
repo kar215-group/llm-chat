@@ -142,13 +142,17 @@ def save(cfg, sid, messages, model="", provider="", model_kind="chat"):
     }
     try:
         os.makedirs(os.path.dirname(p), exist_ok=True)
-        tmp = p + ".part"
+        # 临时名带线程号：关窗与轮末两条路径可能并发落盘同一份，
+        # 固定 `.part` 会被对方改写/抢先改名 —— 成功那一路写出的可能是别人的半份
+        # 内容，失败那一路还可能报错（排查报告 R-45）
+        import threading as _threading
+        tmp = "%s.part.%d" % (p, _threading.get_ident())
         with open(tmp, "w", encoding="utf-8") as f:
             json.dump(payload, f, ensure_ascii=False, indent=1)
         os.replace(tmp, p)                # 写完再改名：中途被强杀也不会留下半份记录
     except Exception as e:
         try:
-            os.remove(p + ".part")
+            os.remove(tmp)
         except Exception:
             pass
         return "", "写入失败：%s" % e

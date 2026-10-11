@@ -417,6 +417,7 @@ class App(ChatMixin, ImageGenMixin, VideoGenMixin, ServiceMixin, ModelsMixin, Se
         # 设置窗销毁后它的滚动区句柄必须一起清掉 —— 否则输出栏的「去配置引擎」
         # 之类跳转还会往一个已销毁的页面栈上select（is_current 判据会拿到野对象）
         self._settings_sp = None
+        self._settings_nav = None       # 同理：左栏句柄一起清（R-37）
         if self._guide is not None and self._guide.alive():
             self._guide.close()        # 不叠两层：重看 = 关掉旧的再开
 
@@ -724,8 +725,15 @@ class App(ChatMixin, ImageGenMixin, VideoGenMixin, ServiceMixin, ModelsMixin, Se
         """
         running = bool(busy) or self._img_busy or self._vid_busy
         blocked = running or self._svc_busy
-        self.send_btn.configure(state="disabled" if blocked else "normal",
-                                text="生成中…" if busy else "发送")
+        # 提示词优化的候选面板开着时，输入框藏在面板后面：任何第三方收尾
+        # （svc_done / 生图 exit / 换载完成…）都不得解禁「发送」——否则会把用户
+        # 看不见的原文发出去（云端 = 真扣费，排查报告 R-31）。解禁只发生在面板
+        # 收起之后：_opt_close_clicked / _opt_pick 都是先置 _opt_panel=None
+        # 再调 _set_busy_ui，天然走得到下面这行。
+        opt_open = getattr(self, "_opt_panel", None) is not None
+        self.send_btn.configure(
+            state="disabled" if (blocked or opt_open) else "normal",
+            text="生成中…" if busy else "发送")
         self.stop_gen_btn.configure(state="normal" if running else "disabled",
                                     text="停止生成")
         self.clear_btn.configure(state="disabled" if blocked else "normal")
@@ -944,7 +952,12 @@ class App(ChatMixin, ImageGenMixin, VideoGenMixin, ServiceMixin, ModelsMixin, Se
         """
         icon = "🎬" if kind == "video" else "🎨"
         if not tid:
-            self._append("%s [已停止等待] 任务还没提交出去，不会再有结果。\n" % icon, "meta")
+            # 如实文案（文档 §12.3 ⑥）：提交请求可能已在路上，说"不会再有结果"是假话——
+            # 任务照样可能建单并计费。取消意图由 worker 的世代守卫接手：任务号一回来
+            # 就发现本轮已被取消，立刻补发真取消并把结果如实告知（见 _late_cancel；R-02）。
+            self._append("%s [已停止等待] 提交请求还在路上，任务号还没回来——任务号一到会"
+                         "自动发起取消；若云端已建单，这一单可能仍会继续跑并计费"
+                         "（取消结果稍后如实告知）。\n" % icon, "meta")
             return True
         provider = providers.get_provider(self.cfg, self._cloud_pid) or \
             providers.current_provider(self.cfg)
@@ -957,10 +970,36 @@ class App(ChatMixin, ImageGenMixin, VideoGenMixin, ServiceMixin, ModelsMixin, Se
                 job = cloudjobs.get_job(tid) or {}
                 _ok, msg = cloud_media.cancel(provider, tid,
                                               str(job.get("model") or ""))
+                if _ok:
+                    # 取消成功要把台账落成 canceled（R-39）：否则重启后这条还挂在
+                    # "结果没落地"清单里给「取回」按钮，去查一个已经死掉的任务
+                    cloudjobs.update_job(tid, status="canceled")
             self._ui_q.put(lambda: self._append("%s %s\n────────────────\n" % (icon, msg),
                                                  "meta"))
         threading.Thread(target=work, daemon=True).start()
         return True
+
+    def _late_cancel(self, kind, provider, tid, model):
+        """对"迟到的任务号"补发取消（worker 子线程调用；排查报告 R-02）。
+
+        用户点「停止生成」那一刻 tid 还没回来（原路径就此放弃、还说"不会再有结果"）；
+        worker 写回 tid 前比对世代，发现本轮已被取消 → 立刻补发 cancel —— PENDING
+        是唯一真取消得掉的窗口。结果如实写台账（canceled）与聊天区；跨线程 UI 更新
+        一律走 _ui_q（坑 11/54 铁律）。
+        """
+        icon = "🎬" if kind == "video" else "🎨"
+        try:
+            ok, msg = cloud_media.cancel(provider, tid, model)
+        except Exception as e:
+            ok, msg = False, "取消请求出错：%s: %s" % (type(e).__name__, e)
+        if ok:
+            cloudjobs.update_job(tid, status="canceled")
+            text = ("%s [云端取消] 迟到的任务号（%s…）已取消成功：它还在排队，不会产生费用。"
+                    % (icon, tid[:16]))
+        else:
+            text = ("%s [云端取消] 迟到的任务号（%s…）没能取消：%s"
+                    % (icon, tid[:16], msg))
+        self._ui_q.put(lambda: self._append(text + "\n────────────────\n", "meta"))
 
     # ---- 状态线程 ----
     def _status_loop(self):
@@ -1071,6 +1110,11 @@ class App(ChatMixin, ImageGenMixin, VideoGenMixin, ServiceMixin, ModelsMixin, Se
                                          "思考较长时会挤掉回答）。\n"
                                          "解决：设置 → 生成参数 调大 max_tokens；或 服务参数 把 "
                                          "reasoning 设为 off（不思考，直接回答）。\n", "error")
+                        elif str(text) == "incomplete":
+                            # SSE 流没收到任何收尾标志就断了（R-16）：半截回答不能
+                            # 冒充完整回答——内容保留（云端那半截是付过费的），如实提示
+                            self._append("[提示] 本轮回复没有收到结束标记（流被中断），"
+                                         "以上内容可能不完整。\n", "error")
                     elif kind == "stopped":
                         self._append("\n\n[已停止生成——已生成内容已保留，"
                                      "补充新信息后可直接继续发送]", "meta")
@@ -1093,11 +1137,19 @@ class App(ChatMixin, ImageGenMixin, VideoGenMixin, ServiceMixin, ModelsMixin, Se
             except queue.Empty:
                 break
             try:
+                # 带世代号（第 3 元）的事件要与当前轮一致：不一致 = 已取消旧任务的
+                # 残留，整条丢弃 —— 迟到 progress 重画进度行会 delete(mark,"end") 抹掉
+                # 刚写的"已取消"、甚至后续聊天内容（R-13）。stop_flag 守卫挡不住
+                # "取消后立刻开新任务"：那时 self._stop_flag 已是新一轮的（未置位）。
+                stale = len(item) > 2 and item[2] != self._img_gen
                 if item[0] == "line":
-                    self._handle_img_line(item[1])
+                    if not stale:
+                        self._handle_img_line(item[1])
                 elif item[0] == "progress":
                     # 云端生图：进度来自轮询/下载，没有 stdout 可解析，直接给整行文案
-                    self._update_img_progress_line(item[1])
+                    if not stale and not (self._stop_flag is not None
+                                          and self._stop_flag.is_set()):
+                        self._update_img_progress_line(item[1])
                 elif item[0] == "exit":
                     self._handle_img_exit(item[1], item[2])   # exit 事件带 (rc, gen)
             except Exception as e:
@@ -1113,11 +1165,16 @@ class App(ChatMixin, ImageGenMixin, VideoGenMixin, ServiceMixin, ModelsMixin, Se
             except queue.Empty:
                 break
             try:
+                # 世代守卫与丢弃口径同生图分支（R-13）
+                stale = len(item) > 2 and item[2] != self._vid_gen
                 if item[0] == "line":
-                    self._handle_vid_line(item[1])
+                    if not stale:
+                        self._handle_vid_line(item[1])
                 elif item[0] == "progress":
                     # 云端生视频：同生图，轮询事件直接给整行进度文案
-                    self._update_vid_progress_line(item[1])
+                    if not stale and not (self._stop_flag is not None
+                                          and self._stop_flag.is_set()):
+                        self._update_vid_progress_line(item[1])
                 elif item[0] == "exit":
                     self._handle_vid_exit(item[1], item[2])
             except Exception as e:
@@ -1291,6 +1348,7 @@ class App(ChatMixin, ImageGenMixin, VideoGenMixin, ServiceMixin, ModelsMixin, Se
             win.destroy()
             self._settings_win = None
             self._settings_sp = None
+            self._settings_nav = None   # 三个句柄一起清：留着已销毁的 nav 是野引用（R-37）
             self.open_settings(jump=cur)
 
     def _switch_theme(self, mode):
@@ -1464,14 +1522,14 @@ class App(ChatMixin, ImageGenMixin, VideoGenMixin, ServiceMixin, ModelsMixin, Se
         # 「确认并更新」）跳过弹窗：用户刚在更新窗口里确认过"要关闭程序"，再问一遍是折磨。
         if self._server_alive_flag:
             if force:
-                stop_server()             # 直接停服务并退出
+                stop_server(self.cfg)     # 直接停服务并退出
                 self._kill_proc()
             else:
                 dlg = ExitDialog(self.root)
                 self.root.wait_window(dlg)
                 if dlg.result in (None, "cancel"):
                     return                # 取消：什么都不做，窗口继续运行
-                stop_server()             # "stop"：停止服务并退出
+                stop_server(self.cfg)     # "stop"：停止服务并退出
                 self._kill_proc()
         # 场景 2：启动/重启/换载进行中 —— 中止启动流程，不留残留进程
         elif self._svc_busy:

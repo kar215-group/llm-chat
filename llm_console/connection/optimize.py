@@ -105,7 +105,9 @@ def _headers(provider, key):
 
 def _cloud_target(cfg, pid, model):
     p = providers.get_provider(cfg, pid)
-    if p is None:
+    if p is None or not p.get("enabled", True):
+        # 停用也要拦（R-49）：get_provider 用 enabled_only=False 取全表，
+        # 原来这里只判 None → "已停用"分支不可达，停用的服务商照旧被用来发付费请求
         return None, "优化模型指定的服务商「%s」不存在或已停用。" % pid
     if providers.model_kind_of(p, model) != providers.KIND_TEXT:
         return None, "「%s」不是文本模型——提示词优化只能走文本链路（别的会发错协议）。" % model
@@ -212,6 +214,9 @@ def _parse_ok(data, attempts, t0):
     finish = str(first.get("finish_reason") or "")
     out = {"ok": True, "text": text, "thinking_seen": bool(reasoning),
            "reasoning_chars": len(reasoning), "finish": finish, "usage": usage,
+           # 被 max_tokens 截断的结果内容照旧可用（不作废），但界面要能给一句
+           # "可能被截断"的标注（R-51：原来 finish_reason 无人读，截断当成功呈现）
+           "truncated": finish == "length",
            "cache_hit": promptopt.extract_cache_hit(usage),
            "attempts": attempts, "elapsed_ms": ms, "error": "", "stopped": False}
     if not text and reasoning:
@@ -251,14 +256,6 @@ def optimize_once(target, messages, temperature, max_tokens, stop_flag=None):
         try:
             with urllib.request.urlopen(req, timeout=target["timeout"]) as r:
                 raw_ok = r.read().decode("utf-8", "replace")
-            try:
-                data = json.loads(raw_ok)
-            except ValueError:
-                # 200 但回包不是 JSON（网关插页 / 代理劫持一类）：重试也大概率还是它，
-                # 如实报原文摘录，不走网络重试
-                return _fail("服务返回了 200，但回包不是 JSON（原文：%s）"
-                             % raw_ok.strip()[:160], attempt, t0)
-            return _parse_ok(data, attempt, t0)
         except urllib.error.HTTPError as e:
             raw = _safe_read(e)
             low = raw.lower()
@@ -291,6 +288,22 @@ def optimize_once(target, messages, temperature, max_tokens, stop_flag=None):
                 msg = ("无法连接本地服务（%s）——请先点「启动服务」或检查端口设置。"
                        % target["url"])
             return _fail(msg, attempt, t0)
+        # 已拿到 200：本次调用已在服务端生成并计费，解析侧任何失败都**绝不重试**——
+        # 原来把解析包进网络异常的 try 里，一个解析 bug 就会把已计费的请求按退避
+        # 再发最多 3 次（三路并行 = 最多 9 次付费请求），最终报错还与真因无关
+        # （排查报告 R-05）。
+        try:
+            data = json.loads(raw_ok)
+        except ValueError:
+            # 200 但回包不是 JSON（网关插页 / 代理劫持一类）：重试也大概率还是它，
+            # 如实报原文摘录，不走网络重试
+            return _fail("服务返回了 200，但回包不是 JSON（原文：%s）"
+                         % raw_ok.strip()[:160], attempt, t0)
+        try:
+            return _parse_ok(data, attempt, t0)
+        except Exception as e:
+            return _fail("已收到 200 回包，但解析失败（不再重试——本次调用已生成并计费）：%s"
+                         % (e or type(e).__name__), attempt, t0)
 
 
 def _emit(on_event, strategy, state, detail=""):

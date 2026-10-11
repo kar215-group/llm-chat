@@ -352,9 +352,17 @@ class PromptOptMixin:
                 notes.append("疑似偏离原意")
             if r.get("thinking_seen"):
                 notes.append("模型未关思考")
+            if r.get("truncated"):
+                # 被 max_tokens 截断的结果**内容照旧可用**（不作废），但必须标清楚
+                # （R-51，W 2026-10-10 批）：原来 finish_reason 没人读，截断当"完成"
+                notes.append("完成 · 可能被截断")
             stat.configure(text=" · ".join(notes),
                            foreground=theme.c("warn") if notes else theme.c("muted"))
-            if r.get("suspect"):
+            if r.get("truncated") and not r.get("suspect"):
+                widgets.bind_tip(
+                    stat, lambda: "结果被 max_tokens 截断，可能不完整；"
+                                  "可在 设置 → 生成参数 里调大 max_tokens 后重试")
+            elif r.get("suspect"):
                 widgets.bind_tip(
                     stat, lambda r=r: "可能丢了原文关键信息：%s"
                     % ("、".join(r.get("missing") or []) or "（未列出）"))
@@ -457,7 +465,8 @@ class PromptOptMixin:
                 target, err = optimize.resolve_target(self.cfg)
                 if target is None:
                     r = {"ok": False, "text": "", "error": err, "stopped": False,
-                         "thinking_seen": False, "suspect": False, "missing": []}
+                         "thinking_seen": False, "suspect": False, "missing": [],
+                         "strategy": strategy}
                 else:
                     msgs = promptopt.build_messages(scen, text, strategy)
                     r = optimize.optimize_once(
@@ -470,7 +479,10 @@ class PromptOptMixin:
             except Exception as e:
                 r = {"ok": False, "text": "", "stopped": False, "thinking_seen": False,
                      "suspect": False, "missing": [],
-                     "error": "重试出错：%s: %s" % (type(e).__name__, e)}
+                     "error": "重试出错：%s: %s" % (type(e).__name__, e),
+                     # 失败字典也要带 strategy（R-88）：缺它时重开候选面板那行
+                     # 永远空白、重试按钮永久消失（_opt_reopen_cached 按它查行）
+                     "strategy": strategy}
             self._ui_q.put(lambda: self._opt_retry_done(strategy, r))
 
         threading.Thread(target=worker, daemon=True,

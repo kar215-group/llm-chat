@@ -22,7 +22,14 @@ _MAX_ADAPTERS = 64
 
 
 def detect_gpu():
-    """经 nvidia-smi 读取 GPU 型号与显存；失败返回 ("", 0)。"""
+    """经 nvidia-smi 读取 GPU 型号与显存；失败返回 ("", 0)。
+
+    ⚠ 返回 ("", 0) 同时覆盖"这台没有 N 卡"与"探测本身失败"两种情形——两者在
+    调用方那里的后果一致（按 0 处理、界面给"未探测到显存"的提示让用户手填），
+    真要区分得把返回值加宽，收益不抵改动面（排查报告 R-78 只修了下面这条）。
+    `encoding="utf-8"`：原来是 locale 代码页解码，中文 Windows 上非 ASCII 的
+    GPU 名有解出乱码的风险（R-78）。
+    """
     cmds = [r"C:\Windows\System32\nvidia-smi.exe", "nvidia-smi"]
     flags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
     for c in cmds:
@@ -30,6 +37,7 @@ def detect_gpu():
             out = subprocess.run([c, "--query-gpu=name,memory.total",
                                   "--format=csv,noheader,nounits"],
                                  capture_output=True, text=True,
+                                 encoding="utf-8", errors="replace",
                                  timeout=10, creationflags=flags)
             for line in out.stdout.splitlines():
                 parts = [x.strip() for x in line.split(",")]

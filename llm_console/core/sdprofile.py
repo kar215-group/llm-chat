@@ -569,6 +569,7 @@ def discover(folders, family, diffusion="", want=None, encoders=None):
     files = {"diffusion": diffusion}
     want = dict(want or {})
     encoders = list(encoders or [])
+    manual_missing = []          # 人工指定了但哪儿都没找到的槽位 [(slot, 原值)]（R-20）
 
     def _pick(slot, extra_hints=(), must_not=(), exts=COMPANION_EXTS, recursive=False):
         # 1) 人工指定优先（支持绝对路径 / 只给文件名）
@@ -582,6 +583,12 @@ def discover(folders, family, diffusion="", want=None, encoders=None):
                 if os.path.isfile(p):
                     files[slot] = p
                     return
+            # 人工指定但没找到：**槽位留空 + 记录点名**，绝不落回自动发现——
+            # 偷偷换一个文件意味着用错 VAE/编码器，引擎不报错、只会出糊图/风格错，
+            # 用户根本查不到（R-20）。与 resolve_img_model_path 同一口径：
+            # "显式设置该报错就报错，不偷偷换"。
+            manual_missing.append((slot, w))
+            return
         hints = tuple(SLOTS[slot][2]) + tuple(extra_hints)
         for folder in folders:
             pool = _cands(folder, hints, must_not=must_not, exts=exts, recursive=recursive)
@@ -596,14 +603,20 @@ def discover(folders, family, diffusion="", want=None, encoders=None):
             continue
         if slot not in SLOTS:
             if slot == "high_noise":
-                _pick_high_noise(files, folders, pbase, want)
+                _pick_high_noise(files, folders, pbase, want.get("high_noise"),
+                                 manual_missing)
             continue
         ban = () if slot == "audio_vae" else ("audio",)
         # VAE 家族内部要互相让开：audio_vae / taesd 都不是主 VAE
         if slot == "vae":
             ban = ("audio", "tae")
         if slot == "llm":
-            _pick_llm(files, folders, pbase, want.get("llm"), encoders)
+            # 视频家族**禁用第三档聊天兜底**（R-29/R-38）：视频文本编码器是 kv=0
+            # 的裸权重（由 encoders 参数递进来），"目录里 kv>0 就当编码器"那档是
+            # 生图（Qwen-Image 的 Qwen3VL）专属——共用会让视频链路抓一个真聊天
+            # 模型当 --llm，而缺件预检还说"组件齐全"。
+            _pick_llm(files, folders, pbase, want.get("llm"), encoders,
+                      manual_missing, chat_fallback=(prof.get("kind") != "video"))
             continue
         _pick(slot, must_not=ban)
     # llm_vision：mmproj 一律按"文件名以 mmproj 开头"找（与聊天侧同一判据）
@@ -614,18 +627,23 @@ def discover(folders, family, diffusion="", want=None, encoders=None):
             if pool:
                 files["llm_vision"] = pool[0]
                 break
+    if manual_missing:
+        files["manual_missing"] = manual_missing
     return files
 
 
-def _pick_llm(files, folders, pbase, w, encoders=None):
+def _pick_llm(files, folders, pbase, w, encoders=None, manual_missing=None,
+              chat_fallback=True):
     """LLM 文本编码器的取法，按可信度从高到低三档：
 
-    1. 人工指定（`vid_llm_file` / `img_llm_file`，支持绝对路径或只给文件名）；
+    1. 人工指定（`vid_llm_file` / `img_llm_file`，支持绝对路径或只给文件名）——
+       指定了但哪儿都没找到时**留空并记进 manual_missing**（R-20），不落回下面两档；
     2. **调用方递进来的编码器候选**：视频家族（MiniMax-H3）的文本编码器是 `kv=0` 的
        裸权重，没有 GGUF 元数据，下面那套"kv>0 才算语言模型"的判据抓不到它 ——
        必须由扫描层把认出来的 encoder 角色传进来，否则会抓到模型库顶层的聊天模型上；
-    3. 目录里"带元数据、又不是 mmproj、名字不像组件"的 .gguf —— Qwen-Image 的
-       Qwen3VL 编码器就是这一档（与改造前 resolve_img_files 的判据一致）。
+    3. 目录里"带元数据、又不是 mmproj、名字像编码器"的 .gguf —— Qwen-Image 的
+       Qwen3VL 编码器就是这一档。**仅生图家族可用**（chat_fallback，R-29/R-38：
+       视频家族的编码器是 kv=0 裸权重，这一档对视频只有抓错聊天模型一种结果）。
     """
     from .gguf import gguf_is_chat_capable
     if w:
@@ -637,12 +655,17 @@ def _pick_llm(files, folders, pbase, w, encoders=None):
             if os.path.isfile(p):
                 files["llm"] = p
                 return
+        if manual_missing is not None:
+            manual_missing.append(("llm", w))
+        return
     pool = [p for p in list(encoders or [])
             if p and os.path.isfile(p) and os.path.basename(p) != pbase]
     if pool:
         own = os.path.dirname(files.get("diffusion") or "")
         pool.sort(key=lambda p: 0 if os.path.dirname(p) == own else 1)
         files["llm"] = pool[0]
+        return
+    if not chat_fallback:
         return
     for folder in folders:
         for n in sorted(os.listdir(folder) if os.path.isdir(folder) else []):
@@ -654,18 +677,39 @@ def _pick_llm(files, folders, pbase, w, encoders=None):
                 continue
             if _name_hit(n, ("vae", "clip", "t5", "lora", "tae")):
                 continue
+            # 名字必须命中 llm 槽的家族线索（qwenvl / qwen3vl / mistral / gemma / llm）
+            # 才有资格当编码器——"带元数据、名字不像组件"抓不住边界：同目录平铺的
+            # 纯聊天模型（kv>0、名字不像组件）会被字母序第一个抓走，生图用错编码器、
+            # 整理还会把几十 GB 聊天权重搬进生图组（排查报告 R-06，实测复现）。
+            # 宁可槽位留空让缺件预检点名，也不猜。
+            if not _name_hit(n, SLOTS["llm"][2]):
+                continue
             if gguf_is_chat_capable(p):
                 files["llm"] = p
                 return
 
 
-def _pick_high_noise(files, folders, pbase, want):
-    """Wan2.2 MoE 的高噪段模型：名字里带 high（noise）的那个扩散文件。"""
-    if want:
-        w = str(want)
+def _pick_high_noise(files, folders, pbase, want, manual_missing=None):
+    """Wan2.2 MoE 的高噪段模型：名字里带 high（noise）的那个扩散文件。
+
+    `want` 是 `vid_high_noise_file` 的**值**——调用点此前传的是整个 want 字典，
+    `str(字典)` 永远匹配不上任何路径，人工指定形同死键（R-21）。人工指定但没
+    找到时留空 + 点名、不落回名字扫描（R-20 同口径）；文件名写法（拼搜索目录）
+    也认，与其它槽位一致。
+    """
+    w = str(want or "").strip()
+    if w:
         if os.path.isabs(w) and os.path.isfile(w):
             files["high_noise"] = w
             return
+        for folder in filter(None, folders):
+            p = os.path.join(folder, w)
+            if os.path.isfile(p):
+                files["high_noise"] = p
+                return
+        if manual_missing is not None:
+            manual_missing.append(("high_noise", w))
+        return
     for folder in folders:
         pool = _cands(folder, HIGH_NOISE_HINT, exts=DIFFUSION_EXTS)
         pool = [p for p in pool if os.path.basename(p) != pbase]

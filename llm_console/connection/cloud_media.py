@@ -56,13 +56,20 @@ PROTOCOLS = (PROTOCOL_ALIYUN, PROTOCOL_MINIMAX, PROTOCOL_ZHIPU, PROTOCOL_HUAWEI)
 # 一律归一化成这六个，界面只认归一化结果。
 _STATUS = {
     "PENDING": "pending", "QUEUED": "pending", "PREPARING": "pending",
-    "SUBMITTED": "pending", "QUEUEING": "pending",
+    "SUBMITTED": "pending", "QUEUEING": "pending", "WAITING": "pending",
     "RUNNING": "running", "PROCESSING": "running",
     "SUCCEEDED": "succeeded", "SUCCESS": "succeeded",
+    "COMPLETED": "succeeded", "DONE": "succeeded", "FINISHED": "succeeded",
     "FAILED": "failed", "ERROR": "failed", "INVALID": "failed", "UNKNOWN_ERROR": "failed",
+    "FAIL": "failed",
     "CANCELED": "canceled", "CANCELLED": "canceled",
     "UNKNOWN": "unknown",
 }
+
+# 会计费的提交类 POST 超时/断连时的追加提示（排查报告 R-04）：请求可能已到达服务端，
+# "没拿到回包"不等于"没建单没扣钱"（与坑 53"提交 200 不等于没扣钱"是同一条纪律的两面）。
+_BILL_NOTE = ("注意：请求可能已到达服务端——这一单可能已经创建并计费。"
+              "重发之前，请先在服务商控制台核对账单/任务列表。")
 
 _IMG_KEYS = ("image", "image_url", "url", "image_urls", "download_url", "file_url",
              "result_url", "video_url")
@@ -302,6 +309,12 @@ def explain(status, text, provider, endpoint=""):
     if endpoint and endpoint not in msg:
         msg += tail
     low = (text or "").lower()
+    # 限流 / 网关类状态**先按状态给话**（R-52）：正文里撞巧出现 "duration=" 之类的词
+    # 会被子串表抢走、说成"时长档位不对"（429 回包里带 duration 实测过）
+    if status == 429 or (isinstance(status, int) and 500 <= status < 600):
+        for w, hint in _HINTS:
+            if w in ("throttling", "rate limit"):
+                return msg + "\n  " + hint
     for word, hint in _HINTS:
         if word in low:
             return msg + "\n  " + hint
@@ -375,14 +388,17 @@ def _extract_urls(payload, kind):
 
 def _task_id_of(payload, protocol=PROTOCOL_ALIYUN):
     """任务号各家放的位置不同：阿里云 `output.task_id`、MiniMax/华为顶层 `task_id`、
-    智谱顶层 `id`。只认**字符串**，且不去碰 request_id（那是排查用的请求号，不能当任务号轮询）。"""
+    智谱顶层 `id`。只认**字符串**，且不去碰 request_id（那是排查用的请求号，不能当
+    任务号轮询）。顶层 `id` **只对智谱**当任务号（它的 async-result 契约就是这么放的）：
+    MiniMax/华为回包里的顶层 id 是请求号，写进台账会造出永远取不回的假任务（R-40）。"""
     try:
         if not isinstance(payload, dict):
             return ""
         if protocol == PROTOCOL_ALIYUN:
             out = payload.get("output") or {}
             return str(out.get("task_id") or "")
-        for k in ("task_id", "id"):
+        keys = ("task_id", "id") if protocol == PROTOCOL_ZHIPU else ("task_id",)
+        for k in keys:
             v = payload.get(k)
             if isinstance(v, str) and v.strip():
                 return v.strip()
@@ -505,6 +521,24 @@ def download(url, dest, emit=None, timeout=None, log=None, stop_flag=None):
         if done < 1024:
             _discard(part)
             return False, "下载到的文件过小（%d 字节），判定为失败" % done
+        # 落盘前嗅一眼魔数/内容类型（R-55）：≥1KB 的 HTML/XML/JSON 错误页（签名过期、
+        # 额度不足都会回这些）会被当图片/视频存下来并 mark_done，用户拿到一个打不开的"产物"
+        try:
+            ct = str(r.headers.get("Content-Type") or "").lower()
+        except Exception:
+            ct = ""
+        try:
+            with open(part, "rb") as _f:
+                head = _f.read(512)
+        except Exception:
+            head = b""
+        low_head = head.lstrip()[:64].lower()
+        if (ct.startswith("text/") or ct.startswith("application/xml")
+                or low_head.startswith((b"<!doctype", b"<html", b"<?xml",
+                                        b"<error", b"{"))):
+            _discard(part)
+            return False, ("下载到的不是产物文件（像是网页/错误页：%s），已丢弃"
+                           % (ct or low_head[:24].decode("latin-1", "replace")))
         os.replace(part, dest)
         if log is not None:
             log.w("已下载 %s → %s（%.1f MB，%.1fs）"
@@ -811,7 +845,12 @@ def generate_image(cfg, provider, model, prompt, dest, emit=None, stop_flag=None
     log.w("回包 HTTP %s" % st)
     log.json("回包原文", _safe_json(text))
     if st != 200:
-        return _img_fail(explain(st, text, provider, image_endpoint(provider)), t0, log)
+        err = explain(st, text, provider, image_endpoint(provider))
+        if st == -1:
+            # 超时/断连不等于"没发出去"：这一单可能已在服务端创建并计费，
+            # 必须明说，否则用户重发就是重复扣钱（排查报告 R-04）
+            err += "\n  " + _BILL_NOTE
+        return _img_fail(err, t0, log)
     payload = _safe_json(text)
     if not isinstance(payload, dict):
         return _img_fail("回包不是 JSON，没法解析（原文已存日志）。", t0, log)
@@ -1010,6 +1049,9 @@ def submit_video(cfg, provider, model, prompt, resolution="", duration=0, ratio=
         log.w(err)
     else:
         err = explain(st, text, provider, url)
+        if st == -1:
+            # 同 generate_image：提交超时不等于没建单，必须把"可能已计费"说出来（R-04）
+            err += "\n  " + _BILL_NOTE
         log.w("提交失败：%s" % err)
     out = {"ok": bool(tid), "task_id": tid, "raw": payload,
            "error": err, "log_path": log.path}
@@ -1063,6 +1105,14 @@ def query_task(provider, task_id, model=""):
     iurls = _extract_urls(cont, "image")
     if status == "failed":
         err = err or _says(json.dumps(cont, ensure_ascii=False))
+    if status == "unknown" and not err:
+        # 认不出的状态字面量（MiniMax v1 的 "Fail"、阿里云对已清理 task_id 回的
+        # UNKNOWN 一类）绝不能含糊带过：如实报"状态不认识"，由 wait_task 计入查询
+        # 失败并重试 —— 原来它会落到"其余即成功"分支，任务还在跑就被判死，真正的
+        # 服务端 code/message 被吞（排查报告 R-03）。
+        err = ("服务端返回了不认识的状态（%s）：不能判定成功或失败，"
+               "已按查询失败处理（原文已存日志）。"
+               % str(cont.get("task_status") or cont.get("status") or "空"))
     if proto == PROTOCOL_MINIMAX and not _mm_v2(model) and status == "succeeded" \
             and not urls and not iurls and payload.get("file_id"):
         st2, t2 = _request(provider, "GET", file_endpoint(provider, payload.get("file_id")),
@@ -1138,16 +1188,24 @@ def wait_task(cfg, provider, task_id, dest, kind="video", emit=None, stop_flag=N
                  "error": "查询任务出错：%s: %s" % (type(e).__name__, e),
                  "code": "", "raw": None, "usage": {}, "task_id": task_id,
                  "submit_time": "", "end_time": ""}
-        if q["status"] == "unknown" and q["error"]:
+        if q["status"] == "unknown":
+            # 一切"不认识"（查询异常 / 非 200 / 状态字面量认不出）一律计入查询失败
+            # 并重试；**绝不落到下面的成功分支**（排查报告 R-03：原来要求 error 非空
+            # 才算失败，服务端回 200+UNKNOWN 时会被当"任务已完成"）。
+            q_err = q["error"] or "状态未知（回包没给原因，原文已存日志）。"
+            try:
+                log.json("查询失败（第 %d 次）" % (bad + 1), q.get("raw"))
+            except Exception:
+                pass
             bad += 1
             # 单次查询失败（限流 / 网络抖）不该丢掉已经排队的任务：容忍几轮再说
             if bad <= 3:
-                emit(("line", "查询失败（第 %d 次），继续等：%s" % (bad, q["error"])))
+                emit(("line", "查询失败（第 %d 次），继续等：%s" % (bad, q_err)))
                 emit(("progress", "☁ 云端任务查询失败，重试中… %ds" % int(time.time() - t0)))
                 if _sleep(stop_flag, interval):
                     continue
                 continue
-            res["error"] = "连续 %d 次查不到任务状态：%s" % (bad, q["error"])
+            res["error"] = "连续 %d 次查不到任务状态：%s" % (bad, q_err)
             res["seconds"] = round(time.time() - t0, 1)
             log.w(res["error"])
             if own:
@@ -1223,7 +1281,8 @@ def wait_task(cfg, provider, task_id, dest, kind="video", emit=None, stop_flag=N
         paths = _dest_paths(dest, urls)
         got, errs = [], []
         for url, p in zip(urls, paths):
-            ok, why = download(url, p, emit=emit, log=log, stop_flag=stop_flag)
+            ok, why = download(url, p, emit=emit, log=log, stop_flag=stop_flag,
+                               timeout=int(cfg.get("cloud_download_seconds", 180) or 180))
             (got if ok else errs).append(p if ok else why)
         res.update({"ok": bool(got), "paths": got, "urls": urls, "status": "succeeded",
                     "error": "" if got else (errs[0] if errs else "没拿到产物"),

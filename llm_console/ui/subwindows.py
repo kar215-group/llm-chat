@@ -76,7 +76,21 @@ class SubWindowMixin:
         _kind_name = providers.KIND_LABEL[kind]
         host = parent or self.root
         cfg = self.cfg
+        # 单实例（R-85）：同一条链路反复点入口不再叠窗（原来无判据，控件与回调
+        # 一层层堆积；诊断 / 更新窗早就有这个守卫，这里补齐）
+        _wins = getattr(self, "_costs_wins", None)
+        if _wins is None:
+            _wins = self._costs_wins = {}
+        _prev = _wins.get(kind)
+        if _prev is not None and _prev.winfo_exists():
+            _prev.lift()
+            try:
+                _prev.focus_set()
+            except Exception:
+                pass
+            return
         win = tk.Toplevel(host)
+        _wins[kind] = win
         win.withdraw()          # 先藏起来，摆正了再显示（否则左上角闪一下）
         win.title("成本估算 · 云端%s" % _kind_name)
         theme.style_toplevel(win)   # 经典背景 + 标题栏两件套（坑 186）
@@ -711,7 +725,17 @@ class SubWindowMixin:
                     return
                 self._ui_q.put(lambda s=staging, e=exe_path: _dl_ready(s, e))
 
-            threading.Thread(target=work, daemon=True).start()
+            def _guarded():
+                # 顶层兜底（R-111）：worker 一抛线程即死 → 窗口永停"正在下载…"。
+                # 异常文本走 _restore_prompt 的既有通道退回提示态，绝不静默卡死
+                try:
+                    work()
+                except Exception as e:
+                    try:
+                        self._ui_q.put(lambda w=str(e): _restore_prompt(w))
+                    except Exception:
+                        pass
+            threading.Thread(target=_guarded, daemon=True).start()
 
         def _stop():
             if state["stage"] == "download":

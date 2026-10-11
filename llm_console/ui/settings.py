@@ -4,6 +4,7 @@
 
 
 import os
+import re
 import threading
 import time
 import tkinter as tk
@@ -500,6 +501,18 @@ def _num_error(v):
         lo, hi = _FLOAT_RANGE.get(k, (None, None))
         if lo is not None and not (lo <= f <= hi):
             return "「%s」要填 %.4g ~ %.4g 之间的数字（现在是 %.4g）。" % (k, lo, hi, f)
+    # 「agent 上下文长度」不在 INT_KEYS 里（它写的是按模型记录，不是配置键），这里补上
+    # 等价校验——此前它绕过全部数值检查与区间夹取：填 99999999 照样保存，agent 场景
+    # 下次启动直接按它拉起服务 OOM；填非数字则写回静默失败（排查报告 R-115）。
+    if "agent_ctx" in v:
+        raw = str(v["agent_ctx"].get()).strip()
+        try:
+            n = int(raw)
+        except Exception:
+            return "「agent 上下文长度」要填整数（现在是 %r）。" % raw[:20]
+        lo, hi = _NUM_RANGE["ctx"]
+        if not (lo <= n <= hi):
+            return "「agent 上下文长度」要填 512 ~ 1048576 之间的整数（现在是 %d）。" % n
     return ""
 
 
@@ -971,6 +984,10 @@ class SettingsMixin:
             # 原来这里预填的是全局兜底 cfg["ctx"]，而保存又无条件写进当前模型的记录，
             # 于是"打开任意一页点保存"就会把该模型自动算出的 context 覆盖掉（坑 130）
             v["ctx"] = tk.StringVar(value=str(ctx_for(self.cfg)))
+            # 建页时的"当前模型"快照：设置窗非模态、这一页只建一次，开着窗在主页切了
+            # 模型再点保存时，输入框里装的仍是**旧模型**的值 —— 写回必须落到快照那个
+            # 模型的记录上，不能落到切换后的新模型头上（排查报告 R-114 加重项）。
+            v["_svc_snap"] = os.path.basename(str(self.cfg.get("model", "")))
             e_ctx = theme.entry(t2, textvariable=v["ctx"], width=8)
             _row(t2, r2, "context (-c)", e_ctx,
                  "上下文长度（token）：容纳 系统提示 + 全部对话 + 工具定义 + 回答。"
@@ -1399,6 +1416,8 @@ class SettingsMixin:
                 "agent 通过下面那个地址调用时，服务用这个上下文长度启动"
                 "（默认 35B=131072、27B=32768；改完对下次启动生效）。")
             v["agent_ctx"] = self.agent_ctx_var
+            # 建页时的"当前模型"快照（与服务参数页同一理由，见 _svc_snap；R-114/R-115）
+            v["_api_snap"] = os.path.basename(str(self.cfg.get("model", "")))
 
             fr = ttk.Frame(t4)
             v_bu = tk.StringVar(value=self._api_base_url())
@@ -3958,10 +3977,17 @@ class SettingsMixin:
                             for f in p["files"]:
                                 emit("正在下载 %s（%.0f MB）…"
                                      % (f["name"], f["size"] / 1048576.0))
-                                dest_f = os.path.join(tmp, f["name"])
+                                # 落盘名净化（R-109）：资产名直取有 `..` / 盘符时可写到
+                                # 暂存目录之外；basename + 白名单字符兜底
+                                _safe = re.sub(r"[^0-9A-Za-z._-]", "_",
+                                               os.path.basename(
+                                                   str(f.get("name") or "engine.zip")
+                                                   .replace("\\", "/"))) or "engine.zip"
+                                dest_f = os.path.join(tmp, _safe)
                                 ok, why2 = engine_install.download(
                                     f["url"], dest_f, emit=emit, stop_flag=b["stop"],
-                                    digest=f.get("digest") or "")
+                                    digest=f.get("digest") or "",
+                                    expected_size=int(f.get("size") or 0))
                                 if not ok:
                                     got = False
                                     break
@@ -4253,31 +4279,34 @@ class SettingsMixin:
                         pass
 
         def _global_save(restart=False):
-            """底部「保存」= 通用参数 + **当前这一页里已建区块各自的保存逻辑**，都成功才关窗。
+            """底部「保存」= 通用参数 + **所有已建区块各自的保存逻辑**，都成功才关窗。
 
-            原来只跑当前标签页那一个钩子；现在一页里挂着多个区块（云端页就有服务商 /
-            文本 / 生图生视频三段），所以把**这一页已经建起来的**区块钩子按顺序都跑一遍，
-            任一个不通过就不关窗 —— 保住"底部保存不会把自己刚填的东西丢掉"这条既有语义。
+            钩子跑全部已建（_done）区块，不只当前页（R-116）：`_apply_settings` 的
+            键写回本来就是跨页的（v 是整窗共享），页钩子只跑当前页会造成"外观页挑的
+            主题色 / 服务商页改的名字 / 通用页换的优化模型"切页保存时被**静默丢弃**——
+            主题色最坑：选色框一关预览已经把界面染成新色，用户认定保存好了，重启回退。
+            钩子幂等、已建区块数量有限，全跑的成本可控。任一钩子不通过就不关窗。
             """
             ok, why = self._apply_settings(v)
             if not ok:
                 messagebox.showwarning("还没保存", why)
                 return                          # 一个键都没写，窗也不关：改好再来
-            for it in (page_items.get(state["page"]) or []):
-                body = bodies.get((it["page"], it["section"]))
-                if body is None or not getattr(body, "_done", False):
-                    continue
-                hook = save_hooks.get(body)
-                if hook is None:
-                    continue
-                try:
-                    ok, msg = hook() or (True, "")
-                except Exception as e:
-                    ok, msg = False, "这一区块没能保存：%s" % e
-                if not ok:
-                    messagebox.showwarning(
-                        "还没保存", msg or "这一页有内容没通过检查，请改好再保存。")
-                    return
+            for _items in page_items.values():
+                for it in _items:
+                    body = bodies.get((it["page"], it["section"]))
+                    if body is None or not getattr(body, "_done", False):
+                        continue
+                    hook = save_hooks.get(body)
+                    if hook is None:
+                        continue
+                    try:
+                        ok, msg = hook() or (True, "")
+                    except Exception as e:
+                        ok, msg = False, "这一区块没能保存：%s" % e
+                    if not ok:
+                        messagebox.showwarning(
+                            "还没保存", msg or "这一页有内容没通过检查，请改好再保存。")
+                        return
             # 保存往往就是"第一次配好"的时刻（指了引擎 / 指了模型目录 / 勾了云端模型 /
             # 填了密钥）⇒ 立刻问一次"第一个能用的模型有了没有"，别等下一轮轮询（坑 150）
             try:
@@ -4338,6 +4367,13 @@ class SettingsMixin:
         # 这种复合 id 当文件名写进 model_ngl / model_ctx，污染配置
         local = not providers.is_cloud(c)
         for k in INT_KEYS:
+            if k in ("ctx", "ngl"):
+                # 服务参数页这两个框装的是"当前模型"的按模型值（预填自 ctx_for /
+                # current_ngl）：只能写按模型记录（下面单独处理），**绝不写全局兜底键**
+                # ——否则"什么都不改点保存"就把按模型值抄进 cfg["ctx"]/cfg["ngl"]，
+                # 之后任何没有记录的新模型第一次启动就按被抬高的值拉起（排查报告
+                # R-114；坑 130 当年只堵了"按模型记录被覆盖"那半边）。
+                continue
             if k in v:
                 try:
                     c[k] = int(str(v[k].get()).strip())
@@ -4346,21 +4382,21 @@ class SettingsMixin:
         # context / ngl 按模型记忆（主页面启动用）：**只有这一页真的建了、用户真的填过**
         # 才写记录 —— 判据必须看 v（这一页的输入），不能看 c（配置里有没有这个键，恒为真）。
         # 原来写成 `if local and "ctx" in c:`，于是随便在哪一页点「保存」都会把当前模型的
-        # 层数 / context 记录改写成全局兜底值，静默抹掉自动推算的结果（坑 130）
+        # 层数 / context 记录改写成全局兜底值，静默抹掉自动推算的结果（坑 130）。
+        # 记录键用**建页时的模型快照**（_svc_snap / _api_snap）：设置窗非模态、页只建一次，
+        # 开着窗在主页切模型再保存时，框里装的还是旧模型的值，不能写到新模型头上（R-114）。
+        # 数值已由 _num_error 预检（ctx/ngl 在 INT_KEYS、agent_ctx 有等价校验），
+        # 这里不再 try 吞 —— 写回失败必须让 _global_save 报出来，不能"保存了但没生效"。
         if local and "ctx" in v:
-            try:
-                c.setdefault("model_ctx", {})[
-                    os.path.basename(c.get("model", ""))] = int(c["ctx"])
-            except Exception:
-                pass
+            snap = str(v.get("_svc_snap") or "") or os.path.basename(c.get("model", ""))
+            if snap:      # 模型名为空时不写 "" 键（排查报告 R-43）
+                c.setdefault("model_ctx", {})[snap] = int(str(v["ctx"].get()).strip())
         # agent 场景 context 按模型记忆
         if local and "agent_ctx" in v:
-            try:
-                c.setdefault("model_ctx_api", {})[
-                    os.path.basename(c.get("model", ""))] = int(
-                        str(v["agent_ctx"].get()).strip())
-            except Exception:
-                pass
+            snap = str(v.get("_api_snap") or "") or os.path.basename(c.get("model", ""))
+            if snap:
+                c.setdefault("model_ctx_api", {})[snap] = int(
+                    str(v["agent_ctx"].get()).strip())
         for k in FLOAT_KEYS:
             if k in v:
                 try:
@@ -4420,9 +4456,11 @@ class SettingsMixin:
         if "cloud_file_model_decides" in v:
             c["cloud_file_model_decides"] = bool(v["cloud_file_model_decides"].get())
         # ngl 按模型记忆：设置页改的是"当前模型"的层数（云端模型没有层数概念）。
-        # 判据同 ctx：看 v，不看 c（坑 130）
+        # 判据同 ctx：看 v，不看 c（坑 130）；键用建页快照、不写全局兜底（R-114）。
         if local and "ngl" in v:
-            c.setdefault("model_ngl", {})[os.path.basename(c["model"])] = c["ngl"]
+            snap = str(v.get("_svc_snap") or "") or os.path.basename(c.get("model", ""))
+            if snap:      # 同 ctx：空模型名不落 "" 键（R-43）
+                c.setdefault("model_ngl", {})[snap] = int(str(v["ngl"].get()).strip())
         c["cfg_version"] = CFG_VERSION
         save_config(c)
         self._update_model_label()
