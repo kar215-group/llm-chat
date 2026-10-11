@@ -156,47 +156,56 @@ class ServiceMixin:
         if not self._confirm_fatal_perf(self.cfg.get("model", "")):
             return
         self._begin_svc()
-        self._append("\n[服务] 正在启动 %s（GPU 层数 %d），加载约需十几秒到几分钟…\n"
-                     % (display_name(self.cfg, self.cfg["model"]), current_ngl(self.cfg)), "meta")
-        ctx = ctx_for(self.cfg, agent=agent)
-        kv = estimate_kv_gb(self.cfg, ctx=ctx)
-        if kv:
-            scene = "agent" if agent else "主页面"
-            warn = ("（显存部分偏高，若启动失败请降低 context 或 GPU 层数）"
-                    if kv["vram"] > 4 else "")
-            self._append("[服务] %s场景 context=%d，KV cache 预估：共 %.1fGB（显存 %.1f / 内存 %.1f）%s\n"
-                         % (scene, ctx, kv["total"], kv["vram"], kv["ram"], warn), "meta")
+        # 线程启动前的 setup 段兜底（2026-10-11 排查报告）：_svc_busy 一旦置位，
+        # 中间任何一步意外抛错都必须走一次 _finish_svc，否则按钮永久置灰。
+        # worker 本体另有 _svc_guard 兜；这里只护"还没来得及开线程"的窗口。
+        try:
+            self._append("\n[服务] 正在启动 %s（GPU 层数 %d），加载约需十几秒到几分钟…\n"
+                         % (display_name(self.cfg, self.cfg["model"]), current_ngl(self.cfg)), "meta")
+            ctx = ctx_for(self.cfg, agent=agent)
+            kv = estimate_kv_gb(self.cfg, ctx=ctx)
+            if kv:
+                scene = "agent" if agent else "主页面"
+                warn = ("（显存部分偏高，若启动失败请降低 context 或 GPU 层数）"
+                        if kv["vram"] > 4 else "")
+                self._append("[服务] %s场景 context=%d，KV cache 预估：共 %.1fGB（显存 %.1f / 内存 %.1f）%s\n"
+                             % (scene, ctx, kv["total"], kv["vram"], kv["ram"], warn), "meta")
 
-        def work():
-            launched = os.path.basename(self.cfg["model"])
-            try:
-                self._proc = start_server(self.cfg, ctx)
-            except Exception as e:
-                self._finish_svc(False, "[服务] 启动失败: " + str(e), True)
-                return
-            ok = self._wait_ready()
-            self._finish_svc(ok, "[服务] 就绪，可以开始对话。"
-                             if ok else
-                             "[服务] 启动失败或超时——请检查模型路径与参数（设置 → 服务参数）。",
-                             not ok, launched=launched)
-        threading.Thread(target=self._svc_guard(work), daemon=True).start()
+            def work():
+                launched = os.path.basename(self.cfg["model"])
+                try:
+                    self._proc = start_server(self.cfg, ctx)
+                except Exception as e:
+                    self._finish_svc(False, "[服务] 启动失败: " + str(e), True)
+                    return
+                ok = self._wait_ready()
+                self._finish_svc(ok, "[服务] 就绪，可以开始对话。"
+                                 if ok else
+                                 "[服务] 启动失败或超时——请检查模型路径与参数（设置 → 服务参数）。",
+                                 not ok, launched=launched)
+            threading.Thread(target=self._svc_guard(work), daemon=True).start()
+        except Exception as e:
+            self._finish_svc(False, "[服务] 服务操作中断：%s" % e, True)
 
     def stop_server_async(self):
         if self._svc_busy or not self._server_alive_flag:
             return
         self._begin_svc()
-        self._append("\n[服务] 正在停止…\n", "meta")
+        try:
+            self._append("\n[服务] 正在停止…\n", "meta")
 
-        def work():
-            killed = stop_server(self.cfg)
-            if killed:
-                self._finish_svc(False, "[服务] 服务已停止。")
-            else:
-                # 如实说"没动手"：句柄与端口反查都没找到目标时，一个进程都没杀（R-01）
-                self._finish_svc(False,
-                                 "[服务] 没有找到监听端口 %d 的服务进程（未做任何操作）。"
-                                 % int(self.cfg.get("port") or 0))
-        threading.Thread(target=self._svc_guard(work), daemon=True).start()
+            def work():
+                killed = stop_server(self.cfg)
+                if killed:
+                    self._finish_svc(False, "[服务] 服务已停止。")
+                else:
+                    # 如实说"没动手"：句柄与端口反查都没找到目标时，一个进程都没杀（R-01）
+                    self._finish_svc(False,
+                                     "[服务] 没有找到监听端口 %d 的服务进程（未做任何操作）。"
+                                     % int(self.cfg.get("port") or 0))
+            threading.Thread(target=self._svc_guard(work), daemon=True).start()
+        except Exception as e:
+            self._finish_svc(False, "[服务] 服务操作中断：%s" % e, True)
 
     def restart_server(self, agent=False):
         if self._svc_busy:
@@ -204,26 +213,29 @@ class ServiceMixin:
         if not self._confirm_fatal_perf(self.cfg.get("model", "")):
             return
         self._begin_svc()
-        self._append("\n[服务] 正在重启（%s场景，应用最新服务参数）…\n"
-                     % ("agent" if agent else "主页面"), "meta")
+        try:
+            self._append("\n[服务] 正在重启（%s场景，应用最新服务参数）…\n"
+                         % ("agent" if agent else "主页面"), "meta")
 
-        def work():
-            stop_server(self.cfg)
-            time.sleep(1)
-            if self._closing:
-                return                      # 关闭中：不再启动新服务
-            launched = os.path.basename(self.cfg["model"])
-            try:
-                self._proc = start_server(self.cfg, ctx_for(self.cfg, agent=agent))
-            except Exception as e:
-                self._finish_svc(False, "[服务] 启动失败: " + str(e), True)
-                return
-            ok = self._wait_ready()
-            self._finish_svc(ok, "[服务] 重启完成，可以继续对话。"
-                             if ok else
-                             "[服务] 启动失败或超时——请检查模型路径与参数（设置 → 服务参数）。",
-                             not ok, launched=launched)
-        threading.Thread(target=self._svc_guard(work), daemon=True).start()
+            def work():
+                stop_server(self.cfg)
+                time.sleep(1)
+                if self._closing:
+                    return                  # 关闭中：不再启动新服务
+                launched = os.path.basename(self.cfg["model"])
+                try:
+                    self._proc = start_server(self.cfg, ctx_for(self.cfg, agent=agent))
+                except Exception as e:
+                    self._finish_svc(False, "[服务] 启动失败: " + str(e), True)
+                    return
+                ok = self._wait_ready()
+                self._finish_svc(ok, "[服务] 重启完成，可以继续对话。"
+                                 if ok else
+                                 "[服务] 启动失败或超时——请检查模型路径与参数（设置 → 服务参数）。",
+                                 not ok, launched=launched)
+            threading.Thread(target=self._svc_guard(work), daemon=True).start()
+        except Exception as e:
+            self._finish_svc(False, "[服务] 服务操作中断：%s" % e, True)
 
     def on_start_restart_agent(self):
         """本地模型 API 页的服务按钮：以 agent 场景的 context 启动/重启。"""

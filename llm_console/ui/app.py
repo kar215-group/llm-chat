@@ -44,6 +44,9 @@ class App(ChatMixin, ImageGenMixin, VideoGenMixin, ServiceMixin, ModelsMixin, Se
     def __init__(self, root, cfg, first_run=False):
         self.root = root
         self.cfg = cfg
+        # 实例标记（Y10，W 2026-10-11 定）：启动即登记，赶在任何 save_config 之前；
+        # 发现别的活实例时开口（标记建不起来不拦启动，退回旧行为）。
+        self._other_instance = config.claim_instance()
         # 首跑判定由 main() 传进来（它得在 load_config 之前才知道配置文件原本存不存在）
         self._first_run = bool(first_run)
         # 遮罩引导：同一时刻只允许一层（重复打开会把遮罩叠遮罩，鼠标点哪儿都不通）
@@ -206,6 +209,10 @@ class App(ChatMixin, ImageGenMixin, VideoGenMixin, ServiceMixin, ModelsMixin, Se
                                   "备好引擎与模型后在 设置 → 本地模型 API 里启用。"))
 
         threading.Thread(target=self._status_loop, daemon=True).start()
+        if self._other_instance:
+            self._sq.put(("note",
+                          "[配置] 检测到另一个程序实例正在运行——两边同时改设置会互相覆盖，"
+                          "建议只保留一个（之后的保存会被拒并在这里说明）。"))
         # 不再在启动时自动补全模型参数（W 2026-10-05）：改由「进 模型文件与引擎 页」按
         # 10 分钟冷却触发一次（见 ui/models_ui._auto_scan_models + settings 的 files 进页钩子）。
         root.after(80, self._poll)
@@ -1048,10 +1055,14 @@ class App(ChatMixin, ImageGenMixin, VideoGenMixin, ServiceMixin, ModelsMixin, Se
             sig = "%s|%s" % (path, reason)
             if path and sig != self._write_err_seen:
                 self._write_err_seen = sig
-                self._sq.put(("note",
-                              "[配置] 写不进去：%s（%s）—— 设置不会保存。"
-                              "把本程序换到一个可写的文件夹，或在 设置 → 关于与诊断 里点「一键诊断」。"
-                              % (os.path.basename(path), reason)))
+                if "另一个程序实例" in reason:
+                    # Y10 拒绝保存：原因已在 reason 里说全，别再接"换文件夹"的无关建议
+                    self._sq.put(("note", "[配置] %s\n" % reason))
+                else:
+                    self._sq.put(("note",
+                                  "[配置] 写不进去：%s（%s）—— 设置不会保存。"
+                                  "把本程序换到一个可写的文件夹，或在 设置 → 关于与诊断 里点「一键诊断」。"
+                                  % (os.path.basename(path), reason)))
             time.sleep(3)
 
     # ---- 主循环轮询 ----

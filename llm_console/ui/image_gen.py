@@ -136,10 +136,12 @@ class ImageGenMixin:
         self._saw_decode = False
         self._stop_flag = threading.Event()
         self._set_busy_ui(True)
-        cmd = build_img_cmd(self.cfg, prompt, out, steps, size, diffusion, cfg_scale, seed,
-                            ref_mode=mode, ref_images=used, files=files)
         flags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
         try:
+            # build_cmd 挪进 try（2026-10-11 排查报告）：busy 已置位后到线程启动前
+            # 任何一步抛错都必须复位，否则发送/切模型永久被"任务进行中"拦住
+            cmd = build_img_cmd(self.cfg, prompt, out, steps, size, diffusion, cfg_scale,
+                                seed, ref_mode=mode, ref_images=used, files=files)
             self._img_proc = subprocess.Popen(
                 cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                 text=True, encoding="utf-8", errors="replace",
@@ -265,47 +267,56 @@ class ImageGenMixin:
             except Exception:
                 q.put(e)
 
-        if cur["tid"]:
-            # 取回旧任务：不再提交一次，只查 + 下载
-            res = cloud_media.wait_task(self.cfg, provider, cur["tid"], dest, kind="image",
-                                        emit=emit, stop_flag=stop_flag,
-                                        persist=persist, model=model)
-        else:
-            res = cloud_media.generate_image(
-                self.cfg, provider, model, prompt, dest, emit=emit,
-                stop_flag=stop_flag,
-                negative=str(self.cfg.get("cloud_img_negative", "") or ""),
-                size=str(self.cfg.get("cloud_img_size", "") or ""), seed=seed,
-                ref_images=list(refs or []),
-                ref_mode=str(ref_mode or ""),
-                on_task_id=note_tid, persist=persist)
-        paths = list(res.get("paths") or [])
-        # 真实落地路径可能与服务端给的扩展名一致而与我们的默认值不同（.png vs .jpg），
-        # 所以把主图路径回写：_handle_img_exit 是拿 os.path.isfile(_img_out) 判成功的。
-        # 这里只写普通属性、不碰控件，读它的是主线程的 exit 处理（在事件入队之后）。
-        # 世代守卫：已取消/被替换的旧轮**不得**再写共享字段——那会覆盖新任务刚在
-        # _cloud_begin 里清空/重置的状态（R-02）。
-        if gen == self._img_gen:
-            if paths:
-                self._img_out = paths[0]
-            # 多张产物：主图走原有的内嵌回显，其余的只列路径（一次塞四张进聊天区会把界面撑爆）
-            self._img_extra_paths = paths[1:]
-        new_tid = cur["tid"] or str(res.get("task_id") or "")
-        if new_tid:
-            note_tid(new_tid)              # 兜底：上面没走到（同步路径直接给 url）就不补
-            if paths:
-                cloudjobs.mark_done(new_tid, paths=paths, urls=res.get("urls"),
-                                    seconds=res.get("seconds", 0))
+        try:
+            if cur["tid"]:
+                # 取回旧任务：不再提交一次，只查 + 下载
+                res = cloud_media.wait_task(self.cfg, provider, cur["tid"], dest, kind="image",
+                                            emit=emit, stop_flag=stop_flag,
+                                            persist=persist, model=model)
             else:
-                # 保留"还在等 / 超时"这类真实状态（取回时按它决定显示"取回"还是"继续等"），
-                # 只把真出错的那种折成 unknown
-                st = str(res.get("status") or "")
-                cloudjobs.update_job(
-                    new_tid, status=st if st in cloudjobs.OPEN_STATUS else "unknown",
-                    error=str(res.get("error") or "")[:600])
-        if not paths:
-            q.put(("line", "[ERROR] %s" % (res.get("error") or "云端生图失败")))
-        q.put(("exit", 0 if paths else 1, gen))
+                res = cloud_media.generate_image(
+                    self.cfg, provider, model, prompt, dest, emit=emit,
+                    stop_flag=stop_flag,
+                    negative=str(self.cfg.get("cloud_img_negative", "") or ""),
+                    size=str(self.cfg.get("cloud_img_size", "") or ""), seed=seed,
+                    ref_images=list(refs or []),
+                    ref_mode=str(ref_mode or ""),
+                    on_task_id=note_tid, persist=persist)
+            paths = list(res.get("paths") or [])
+            # 真实落地路径可能与服务端给的扩展名一致而与我们的默认值不同（.png vs .jpg），
+            # 所以把主图路径回写：_handle_img_exit 是拿 os.path.isfile(_img_out) 判成功的。
+            # 这里只写普通属性、不碰控件，读它的是主线程的 exit 处理（在事件入队之后）。
+            # 世代守卫：已取消/被替换的旧轮**不得**再写共享字段——那会覆盖新任务刚在
+            # _cloud_begin 里清空/重置的状态（R-02）。
+            if gen == self._img_gen:
+                if paths:
+                    self._img_out = paths[0]
+                # 多张产物：主图走原有的内嵌回显，其余的只列路径（一次塞四张进聊天区会把界面撑爆）
+                self._img_extra_paths = paths[1:]
+            new_tid = cur["tid"] or str(res.get("task_id") or "")
+            if new_tid:
+                note_tid(new_tid)              # 兜底：上面没走到（同步路径直接给 url）就不补
+                if paths:
+                    cloudjobs.mark_done(new_tid, paths=paths, urls=res.get("urls"),
+                                        seconds=res.get("seconds", 0))
+                else:
+                    # 保留"还在等 / 超时"这类真实状态（取回时按它决定显示"取回"还是"继续等"），
+                    # 只把真出错的那种折成 unknown
+                    st = str(res.get("status") or "")
+                    cloudjobs.update_job(
+                        new_tid, status=st if st in cloudjobs.OPEN_STATUS else "unknown",
+                        error=str(res.get("error") or "")[:600])
+            if not paths:
+                q.put(("line", "[ERROR] %s" % (res.get("error") or "云端生图失败")))
+            q.put(("exit", 0 if paths else 1, gen))
+        except Exception as e:
+            # 兜底（2026-10-11 排查报告）：worker 体内任何未捕获异常都不许吞掉 exit
+            # 事件——没有它主线程不复位 _img_busy，发送/切模型会永久被"任务进行中"拦住
+            try:
+                q.put(("line", "[ERROR] %s" % e, gen))
+            except Exception:
+                pass
+            q.put(("exit", 1, gen))
 
     def _img_reader(self, proc, gen):
         try:

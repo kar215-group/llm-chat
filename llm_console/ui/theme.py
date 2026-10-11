@@ -221,8 +221,13 @@ def apply(root, accent=None, accent_sel=None, mode="light"):
 
 
 # 鼠标点击后仍要落焦点的控件（要打字 / 光标指示属于可用性）；
-# 其余控件点击后焦点还给 root —— focus 态消失，一切焦点环/系统虚框一起消失
-_INPUT_CLASSES = {"Entry", "Text", "Spinbox", "Combobox"}
+# 其余控件点击后焦点还给 root —— focus 态消失，一切焦点环/系统虚框一起消失。
+# 2026-10-11 排查修复：ttk 控件的 winfo_class() 带 T 前缀（TEntry/TSpinbox/
+# TCombobox），旧集合只列了经典 Tk 类名 —— 设置页全部输入框都是 ttk 的，
+# 点击一律被收走焦点：输入框永远无焦点 → 选区恒为未聚焦灰、键入全被吞
+# （症状="选中文本固定灰色、完全无法修改参数"）。补上 ttk 类名即豁免。
+_INPUT_CLASSES = {"Entry", "Text", "Spinbox", "Combobox",
+                  "TEntry", "TSpinbox", "TCombobox"}
 
 
 def install_focus_policy():

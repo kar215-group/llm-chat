@@ -104,24 +104,26 @@ class VideoGenMixin:
         self._vid_phase = "load"
         self._stop_flag = threading.Event()
         self._set_busy_ui(True)
-        cmd = build_video_cmd(self.cfg, prompt, out, files, frames, fps, size,
-                              steps, cfg_scale, seed, ref_img=ref_img)
-        # 每次任务留一份完整引擎日志（与产物同名 + .log）：命令行 + 引擎原话 + 退出码
         self._vid_log = out + ".log"
         self._cloud_vid = False
         self._cloud_tid = ""
-        try:
-            with open(self._vid_log, "w", encoding="utf-8", errors="replace") as lf:
-                lf.write("=== argv ===\n")
-                for i, a in enumerate(cmd):
-                    lf.write("[%2d] %s\n" % (i, a))
-                lf.write("=== cwd=%s ｜ out=%s ｜ 提交于 %s ===\n\n"
-                         % (sd, out, time.strftime("%Y-%m-%d %H:%M:%S")))
-                lf.flush()
-        except Exception:
-            self._vid_log = ""
         flags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
         try:
+            # build_cmd 挪进 try（2026-10-11 排查报告）：busy 已置位后到线程启动前
+            # 任何一步抛错都必须复位，否则发送/切模型永久被"任务进行中"拦住
+            cmd = build_video_cmd(self.cfg, prompt, out, files, frames, fps, size,
+                                  steps, cfg_scale, seed, ref_img=ref_img)
+            # 每次任务留一份完整引擎日志（与产物同名 + .log）：命令行 + 引擎原话 + 退出码
+            try:
+                with open(self._vid_log, "w", encoding="utf-8", errors="replace") as lf:
+                    lf.write("=== argv ===\n")
+                    for i, a in enumerate(cmd):
+                        lf.write("[%2d] %s\n" % (i, a))
+                    lf.write("=== cwd=%s ｜ out=%s ｜ 提交于 %s ===\n\n"
+                             % (sd, out, time.strftime("%Y-%m-%d %H:%M:%S")))
+                    lf.flush()
+            except Exception:
+                self._vid_log = ""
             self._vid_proc = subprocess.Popen(
                 cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                 text=True, encoding="utf-8", errors="replace",
@@ -222,50 +224,59 @@ class VideoGenMixin:
             except Exception:
                 q.put(e)
 
-        if not tid:
-            r = cloud_media.submit_video(
-                self.cfg, provider, model, prompt,
-                resolution=str(self.cfg.get("cloud_video_resolution", "") or ""),
-                duration=_int("cloud_video_duration", 5),
-                ratio=str(self.cfg.get("cloud_video_ratio", "") or ""),
-                negative=str(self.cfg.get("cloud_video_negative", "") or ""),
-                seed=_int("vid_seed", -1), log_path=log_path,
-                title="云端生视频提交 %s" % model)
-            if not r["ok"]:
-                emit(("line", "[ERROR] 提交失败：%s" % r["error"]))
-                q.put(("exit", 1, gen))
-                return
-            tid = r["task_id"]
-            cloudjobs.add_job(tid, "video", provider["id"], provider.get("name", ""),
-                              model, prompt, dest,
-                              resolution=str(self.cfg.get("cloud_video_resolution", "") or ""),
-                              duration=_int("cloud_video_duration", 5))
-        # 取消与取回都要找得到它：这个属性由主线程的 _cancel_chat_video 读。
-        # 世代守卫（R-02）：本轮已被取消/替换时不得写回共享字段（会覆盖新任务刚清空
-        # 的状态、下一次取消打错对象），改为立刻补发真取消并把结果如实告知。
-        if gen == self._vid_gen:
-            self._cloud_tid = tid
-        else:
-            self._late_cancel("video", provider, tid, model)
-
-        def persist(status, raw=None):
-            cloudjobs.update_job(tid, status=status)
-
-        res = cloud_media.wait_task(self.cfg, provider, tid, dest, kind="video",
-                                    emit=emit, stop_flag=stop_flag, persist=persist,
-                                    model=model)
-        paths = list(res.get("paths") or [])
-        if paths:
+        try:
+            if not tid:
+                r = cloud_media.submit_video(
+                    self.cfg, provider, model, prompt,
+                    resolution=str(self.cfg.get("cloud_video_resolution", "") or ""),
+                    duration=_int("cloud_video_duration", 5),
+                    ratio=str(self.cfg.get("cloud_video_ratio", "") or ""),
+                    negative=str(self.cfg.get("cloud_video_negative", "") or ""),
+                    seed=_int("vid_seed", -1), log_path=log_path,
+                    title="云端生视频提交 %s" % model)
+                if not r["ok"]:
+                    emit(("line", "[ERROR] 提交失败：%s" % r["error"]))
+                    q.put(("exit", 1, gen))
+                    return
+                tid = r["task_id"]
+                cloudjobs.add_job(tid, "video", provider["id"], provider.get("name", ""),
+                                  model, prompt, dest,
+                                  resolution=str(self.cfg.get("cloud_video_resolution", "") or ""),
+                                  duration=_int("cloud_video_duration", 5))
+            # 取消与取回都要找得到它：这个属性由主线程的 _cancel_chat_video 读。
+            # 世代守卫（R-02）：本轮已被取消/替换时不得写回共享字段（会覆盖新任务刚清空
+            # 的状态、下一次取消打错对象），改为立刻补发真取消并把结果如实告知。
             if gen == self._vid_gen:
-                self._vid_out = paths[0]    # 真实扩展名由服务端 URL 决定，_handle_vid_exit 要按它判成功
-            cloudjobs.mark_done(tid, paths=paths, urls=res.get("urls"),
-                                seconds=res.get("seconds", 0))
-        else:
-            status = str(res.get("status") or "failed")
-            cloudjobs.update_job(tid, status=status,
-                                 error=str(res.get("error") or "")[:600])
-            emit(("line", "[ERROR] %s" % (res.get("error") or "云端生视频失败")))
-        q.put(("exit", 0 if paths else 1, gen))
+                self._cloud_tid = tid
+            else:
+                self._late_cancel("video", provider, tid, model)
+
+            def persist(status, raw=None):
+                cloudjobs.update_job(tid, status=status)
+
+            res = cloud_media.wait_task(self.cfg, provider, tid, dest, kind="video",
+                                        emit=emit, stop_flag=stop_flag, persist=persist,
+                                        model=model)
+            paths = list(res.get("paths") or [])
+            if paths:
+                if gen == self._vid_gen:
+                    self._vid_out = paths[0]    # 真实扩展名由服务端 URL 决定，_handle_vid_exit 要按它判成功
+                cloudjobs.mark_done(tid, paths=paths, urls=res.get("urls"),
+                                    seconds=res.get("seconds", 0))
+            else:
+                status = str(res.get("status") or "failed")
+                cloudjobs.update_job(tid, status=status,
+                                     error=str(res.get("error") or "")[:600])
+                emit(("line", "[ERROR] %s" % (res.get("error") or "云端生视频失败")))
+            q.put(("exit", 0 if paths else 1, gen))
+        except Exception as e:
+            # 兜底（2026-10-11 排查报告）：worker 体内任何未捕获异常都不许吞掉 exit
+            # 事件——没有它主线程不复位 _vid_busy，发送/切模型会永久被"任务进行中"拦住
+            try:
+                q.put(("line", "[ERROR] %s" % e, gen))
+            except Exception:
+                pass
+            q.put(("exit", 1, gen))
 
     def _vid_reader(self, proc, gen, log_path, t0):
         # 完整引擎输出落盘：内存里的 _vid_tail 只有 12 行，够回答"为什么失败"，

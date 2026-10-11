@@ -162,6 +162,29 @@ def _server_pids():
     except Exception:
         return pids
 
+# GetExtendedTcpTable 行布局（DWORD 对齐，**必须含 State 字段**——2026-10-11 排查
+# 报告修复：原布局漏了它，"端口"读到 LocalAddr 的位置、"PID"读到 RemotePort，
+# 反查恒为空集 → stop_server 兜底恒 0、"改参数重启"被旧实例冒领）：
+#   IPv4: State4+LocalAddr4+LocalPort4+RemoteAddr4+RemotePort4+PID4         = 24B
+#   IPv6: State4+LocalAddr16+ScopeId4+LocalPort4+RemoteAddr16+ScopeId4+RemotePort4+PID4 = 56B
+# 端口 DWORD 的前 2 字节是网络序端口号；PID 在行尾、本机序。af -> (端口偏移, PID 偏移, 行长)
+_TCP_ROW_LAYOUT = {2: (8, 20, 24), 23: (24, 52, 56)}    # 2=AF_INET, 23=AF_INET6
+
+
+def _parse_listener_pids(raw, port, af):
+    """从 GetExtendedTcpTable 返回缓冲解析监听 port 的 PID 集合（纯函数，便于合成缓冲回归）。"""
+    out = set()
+    port_off, pid_off, row_len = _TCP_ROW_LAYOUT[af]
+    n = struct.unpack_from("I", raw, 0)[0]
+    for i in range(n):
+        off = 4 + i * row_len
+        if off + row_len > len(raw):
+            break
+        if struct.unpack_from("!H", raw, off + port_off)[0] == port:
+            out.add(struct.unpack_from("I", raw, off + pid_off)[0])
+    return out
+
+
 def _listening_pids(port):
     """监听指定 TCP 端口的进程 PID 集合（GetExtendedTcpTable；IPv4 + IPv6）。
 
@@ -191,19 +214,7 @@ def _listening_pids(port):
             if iphlpapi.GetExtendedTcpTable(buf, ctypes.byref(size), False, af,
                                             TCP_TABLE_OWNER_PID_LISTENER, 0) != 0:
                 continue
-            # 行布局（DWORD 对齐）：IPv4 = 本地地址4+端口4+远端地址4+端口4+PID4 = 20B；
-            # IPv6 = 本地地址16+端口4+远端地址16+端口4+PID4 = 44B。
-            # 端口 DWORD 的前 2 字节是网络序端口号；PID 在行尾、本机序。
-            addr_len = 4 if af == AF_INET else 16
-            row_len = 2 * addr_len + 12
-            n = struct.unpack_from("I", buf.raw, 0)[0]
-            for i in range(n):
-                off = 4 + i * row_len
-                if off + row_len > size.value:
-                    break
-                lport = struct.unpack_from("!H", buf.raw, off + addr_len)[0]
-                if lport == port:
-                    out.add(struct.unpack_from("I", buf.raw, off + row_len - 4)[0])
+            out |= _parse_listener_pids(buf.raw, port, af)
     except Exception:
         return out
     return out
@@ -297,12 +308,47 @@ def build_server_cmd(cfg, ctx=None):
         args += ["--mmproj", proj]
     return args
 
+def port_busy(port):
+    """127.0.0.1 上试 bind 该端口：True = 已被占用（启动前预检用）。
+
+    非法端口号（0 / 70000 / 非数字）**不能报"空闲"**（R-107 同一判据）：那种
+    配置下服务必然起不来，当"忙"处理与它的后果同一量级。判据与诊断页共用
+    （diagnose._port_busy 委托到这里），不再各写一份。
+    """
+    import socket
+    try:
+        p = int(port)
+        if not (1 <= p <= 65535):
+            return True
+    except Exception:
+        return True
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        s.bind(("127.0.0.1", p))
+        return False
+    except OSError:
+        return True
+    except Exception:
+        return False
+    finally:
+        try:
+            s.close()
+        except Exception:
+            pass
+
+
 def start_server(cfg, ctx=None):
     """启动 llama-server，返回进程句柄（供关闭时中止加载用）。
 
     ctx 显式给定时用它（agent 场景按 model_ctx_api 记录；GUI 场景用 model_ctx）。
+    端口已被占用时**直接抛**（2026-10-11 排查报告）：否则新进程绑不上端口就退，
+    /health 由别人家的实例答 200，界面误报"就绪"，参数怎么改都不生效——宁可明确失败。
     """
     global _SERVER_PROC
+    if port_busy(cfg.get("port")):
+        raise RuntimeError(
+            "端口 %s 已被占用——可能有别的 llama-server（或上一次启动的进程）还没退，"
+            "请先停止服务或换一个端口" % (cfg.get("port"),))
     flags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
     p = subprocess.Popen(build_server_cmd(cfg, ctx),
                          creationflags=flags,
@@ -316,37 +362,40 @@ def stop_server(cfg=None):
     """停掉本配置在用的 llama-server → 返回杀掉的进程数（0 = 没找到/没动手）。
 
     兜底路径**绝不按映像名 taskkill**（排查报告 R-01）：同机多开时那会杀掉挂在
-    别的端口上跑别的活的无辜实例，且零提示。句柄缺失（外部 vbs 启动等场景）时
-    改为按 `cfg["port"]` 反查监听 PID，确认映像名是 llama-server.exe 才按 PID 杀；
-    查不到就一个都不杀——调用侧按返回值如实说"没有找到监听端口 %d 的服务进程"。
+    别的端口上跑别的活的无辜实例，且零提示。句柄活着只杀自己拉起的进程；句柄
+    缺失**或句柄进程已退**（外部 vbs 启动、另一实例占着端口——2026-10-11 排查
+    报告：原来这种情况下不落端口反查，恒报"没找到"）时，按 `cfg["port"]` 反查
+    监听 PID，确认映像名是 llama-server.exe 才按 PID 杀；查不到就一个都不杀——
+    调用侧按返回值如实说"没有找到监听端口 %d 的服务进程"。
     """
     global _SERVER_PROC
     if os.name != "nt":
         return 0
     killed = 0
     p = _SERVER_PROC
-    if p is not None:
-        # 有句柄只杀自己拉起的进程
+    if p is not None and p.poll() is None:
+        # 有句柄且进程还活着：只杀自己拉起的进程
         try:
-            if p.poll() is None:
-                p.kill()
-                killed = 1
+            p.kill()
+            killed = 1
         except Exception:
-            pass                        # 进程已退出等情况——目标同样是"它停了"
-    else:
-        # 句柄缺失：按端口反查 PID（监听者 ∩ llama-server 映像名单），逐个 /pid 杀
-        try:
-            port = int((cfg or {}).get("port") or 0)
-        except Exception:
-            port = 0
-        targets = _listening_pids(port) & _server_pids() if port else set()
-        flags = subprocess.CREATE_NO_WINDOW
-        for pid in sorted(targets):
-            r = subprocess.run(["taskkill", "/f", "/pid", str(pid)],
-                               creationflags=flags,
-                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            if r.returncode == 0:
-                killed += 1
+            killed = 0                  # 进程刚退出等竞态：与"句柄已死"同路，不再盲杀
+        _SERVER_PROC = None
+        _reset_alive_cache()
+        return killed
+    # 句柄缺失，或句柄还在但进程已退：按端口反查 PID（监听者 ∩ llama-server 映像名单）
+    try:
+        port = int((cfg or {}).get("port") or 0)
+    except Exception:
+        port = 0
+    targets = _listening_pids(port) & _server_pids() if port else set()
+    flags = subprocess.CREATE_NO_WINDOW
+    for pid in sorted(targets):
+        r = subprocess.run(["taskkill", "/f", "/pid", str(pid)],
+                           creationflags=flags,
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        if r.returncode == 0:
+            killed += 1
     _SERVER_PROC = None
     _reset_alive_cache()
     return killed

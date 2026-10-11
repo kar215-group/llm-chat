@@ -17,7 +17,7 @@ from ..core.config import (APP_DIR, APP_VERSION, CFG_VERSION, DEFAULT_CONFIG,
                            gen_api_key, save_config)
 from ..core.models import has_local_chat, scan_models, scan_video_models, usable_local
 from ..core.params import ctx_for, current_ngl
-from ..core.server import _query_serving_model, server_process_alive
+from ..core.server import _query_serving_model, server_alive, server_process_alive
 from ..connection import cloud
 from . import theme
 from . import widgets
@@ -3712,7 +3712,13 @@ class SettingsMixin:
                 _say(sv, stl, _flavor_line(b, k, fv))
 
             def _guard(b, k, co):
-                """装之前拦一下"正在被用"的那份引擎：覆盖它等于把跑着的服务弄坏。"""
+                """装之前拦一下"正在被用"的那份引擎：覆盖它等于把跑着的服务弄坏。
+
+                判活两级（2026-10-11 排查报告，与 _confirm_shared_vram 的收紧同思路，
+                坑 189）：本程序旗标优先；旗标说没跑而全机有 llama-server.exe 时，
+                按**本配置端口** HTTP 复核一次——映像名判活分不清"别人挂在别的端口
+                上的实例"，原来直接拦会把别窗口 / vbs / 别的前端的服务误伤进来。
+                """
                 cur = str(co() or "").strip()
                 if not cur:
                     return ""
@@ -3721,7 +3727,10 @@ class SettingsMixin:
                         engine_install.default_dir(k))
                 except Exception:
                     return ""
-                if same and server_process_alive():
+                if not same:
+                    return ""
+                if self._server_alive_flag or (
+                        server_process_alive() and server_alive(self.cfg)):
                     return "这份引擎正在运行，请先在主页面停止服务再安装。"
                 return ""
 

@@ -125,30 +125,14 @@ def _zone_marked(path):
 def _port_busy(port):
     """能不能占住这个端口。127.0.0.1 上的 bind 是本地的，不发任何包出去。
 
+    实现在 `core.server.port_busy`（2026-10-11 起：启动前预检与诊断共用同一套
+    判据，不再各写一份 bind）。本名保留：诊断条目与潜在打桩都指它。
     非法端口号（0 / 70000 / 非数字）**不能报"空闲"**（R-107）：那种配置下服务
     必然起不来，当"忙"处理与它的后果同一量级（原来的 int(bind) 抛 OverflowError/
     ValueError 落进 except 被折成"空闲"）。
     """
-    import socket
-    try:
-        p = int(port)
-        if not (1 <= p <= 65535):
-            return True
-    except Exception:
-        return True
-    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    try:
-        s.bind(("127.0.0.1", p))
-        return False
-    except OSError:
-        return True
-    except Exception:
-        return False
-    finally:
-        try:
-            s.close()
-        except Exception:
-            pass
+    from .server import port_busy
+    return port_busy(port)
 
 
 def _config_state():

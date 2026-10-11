@@ -30,7 +30,7 @@ CONFIG_PATH = os.path.join(APP_DIR, "gui_config.json")
 
 # 版本号：发版时改这一处（--selfcheck / --version 会打印它）。
 # GitHub Release 的 tag 要与它一致（tag 去掉开头的 v），Actions 工作流会做一致性校验。
-APP_VERSION = "1.2.2"
+APP_VERSION = "1.2.3"
 
 CFG_VERSION = 3
 
@@ -388,8 +388,138 @@ def write_error():
     return (_LAST_WRITE["path"], _LAST_WRITE["reason"])
 
 
+# ---- 跨实例保护（Y10，W 2026-10-11 定："检测到别的实例开口 + 拒绝整份覆写"）----
+# save_config 把内存整份 cfg 全量落盘，而 _CFG_LOCK 只锁本进程：双实例时后写者赢，
+# 另一个刚改的参数被静默盖回（现象 = "参数改了不生效"）。每个实例启动时在 APP_DIR
+# 登记一份 PID 标记（含进程创建时间，防 PID 复用误判），save_config 发现"另一个
+# 活实例在用**同一份配置文件**"就拒绝保存，原因落 _LAST_WRITE 走既有开口。
+# 标记按"配置文件路径"区分：自检把 CONFIG_PATH 指到临时目录，与真程序互不误伤。
+
+_INSTANCE_MARK_PREFIX = "llm_console.instance_"      # APP_DIR 下的标记文件（白名单 .gitignore 外）
+_MY_MARK = {"path": None}                            # 本进程的标记文件路径
+
+
+def _process_created_ft(pid):
+    """进程创建时间（FILETIME，100ns 纪元值；取不到返回 0）。"""
+    import ctypes
+    k = ctypes.WinDLL("kernel32", use_last_error=True)
+    k.OpenProcess.restype = ctypes.c_void_p
+    k.OpenProcess.argtypes = [ctypes.c_ulong, ctypes.c_int, ctypes.c_ulong]
+    k.GetProcessTimes.argtypes = [ctypes.c_void_p] + [ctypes.POINTER(ctypes.c_ulonglong)] * 4
+    k.CloseHandle.argtypes = [ctypes.c_void_p]
+    h = k.OpenProcess(0x1000, False, int(pid))       # PROCESS_QUERY_LIMITED_INFORMATION
+    if not h:
+        return 0
+    try:
+        ct, et, kt, ut = (ctypes.c_ulonglong() for _ in range(4))
+        if not k.GetProcessTimes(h, ctypes.byref(ct), ctypes.byref(et),
+                                 ctypes.byref(kt), ctypes.byref(ut)):
+            return 0
+        return ct.value
+    finally:
+        k.CloseHandle(h)
+
+
+def _instance_mark_alive(data):
+    """标记里的进程是否仍是登记时那个活进程（PID 复用 → 创建时间对不上 → 视为死残留）。"""
+    try:
+        pid = int(data.get("pid") or 0)
+    except Exception:
+        return False
+    if not pid:
+        return False
+    ft = _process_created_ft(pid)
+    return ft != 0 and ft == int(data.get("created") or -1)
+
+
+def claim_instance():
+    """App 启动时登记本实例标记，并清掉死实例的残留标记。
+
+    返回是否发现**别的活实例**（是否同一份配置由 other_instance_running 现判，
+    这里只做粗报）。登记失败不拦启动：最坏退回旧行为（双实例静默竞写），
+    不能因为保护机制建不起来就连配置都写不了。
+    """
+    import glob
+    seen_other = False
+    try:
+        for f in glob.glob(os.path.join(APP_DIR, _INSTANCE_MARK_PREFIX + "*.json")):
+            try:
+                with open(f, "r", encoding="utf-8") as fh:
+                    data = json.load(fh)
+            except Exception:
+                _safe_remove(f)
+                continue
+            try:
+                same_pid = int(data.get("pid") or 0) == os.getpid()
+            except Exception:
+                same_pid = False
+            if same_pid:
+                continue             # 本进程旧标记（同进程重复建 App 等）：不当作"别的实例"
+            if _instance_mark_alive(data):
+                seen_other = True
+            else:
+                _safe_remove(f)
+    except Exception:
+        pass
+    try:
+        mark = os.path.join(APP_DIR, "%s%d.json" % (_INSTANCE_MARK_PREFIX, os.getpid()))
+        atomic_write_json(mark, {"pid": os.getpid(),
+                                 "created": _process_created_ft(os.getpid()),
+                                 "cfg": os.path.abspath(CONFIG_PATH)})
+        _MY_MARK["path"] = mark
+        import atexit
+        atexit.register(_drop_instance_mark)
+    except Exception:
+        _MY_MARK["path"] = None
+    return seen_other
+
+
+def _safe_remove(path):
+    try:
+        os.remove(path)
+    except Exception:
+        pass
+
+
+def _drop_instance_mark():
+    _safe_remove(_MY_MARK["path"] or "")
+
+
+def other_instance_running():
+    """有没有另一个活实例在用**同一份配置文件**（Y10 的判据；互不相干的实例不算）。"""
+    import glob
+    try:
+        mine = os.path.abspath(CONFIG_PATH)
+        my_mark = _MY_MARK["path"]
+        for f in glob.glob(os.path.join(APP_DIR, _INSTANCE_MARK_PREFIX + "*.json")):
+            if my_mark and os.path.abspath(f) == os.path.abspath(my_mark):
+                continue
+            try:
+                with open(f, "r", encoding="utf-8") as fh:
+                    data = json.load(fh)
+            except Exception:
+                continue
+            if data.get("cfg") == mine and _instance_mark_alive(data):
+                return True
+    except Exception:
+        return False
+    return False
+
+
 def save_config(cfg):
+    """整份落盘（_CFG_LOCK 内）。
+
+    检测到同一份配置的另一个活实例时**拒绝保存**（Y10，W 2026-10-11 定"开口 +
+    拒绝整份覆写"）：整份覆写会把对方刚改的参数静默盖回。拒绝原因落
+    _LAST_WRITE，由 App._status_loop 的既有开口说出来。
+    """
     with _CFG_LOCK:
+        if other_instance_running():
+            _LAST_WRITE.update(
+                path=CONFIG_PATH, n=_LAST_WRITE["n"] + 1,
+                reason="检测到另一个程序实例正在运行——为免互相覆盖设置，本次保存已拒绝；"
+                       "请先关闭另一个实例再改设置。")
+            return False
         return atomic_write_json(CONFIG_PATH, cfg)
 
 def base_url(cfg):
