@@ -104,7 +104,7 @@ class VideoGenMixin:
         self._vid_phase = "load"
         self._stop_flag = threading.Event()
         self._set_busy_ui(True)
-        self._vid_log = out + ".log"
+        self._vid_log = config.media_log_path(self.cfg, out)
         self._cloud_vid = False
         self._cloud_tid = ""
         flags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
@@ -194,7 +194,7 @@ class VideoGenMixin:
         gen, q, stop = self._cloud_begin("video")
         self._cloud_pid = str(provider["id"])
         self._vid_out = out
-        self._vid_log = out + ".log"
+        self._vid_log = config.media_log_path(self.cfg, out)
         self._update_vid_progress_line("☁ 提交云端任务… %s（%s）"
                                        % (providers.short_of(model),
                                           provider.get("name") or ""))
@@ -215,7 +215,7 @@ class VideoGenMixin:
                 return int(v) if v not in (None, "") else dft
             except Exception:
                 return dft
-        log_path = dest + ".log"
+        log_path = config.media_log_path(self.cfg, dest, "cloud")
 
         def emit(e):
             # 事件带上世代号再入队（同生图 worker；R-13）：_poll 对过期轮的残留直接丢弃
@@ -256,7 +256,7 @@ class VideoGenMixin:
 
             res = cloud_media.wait_task(self.cfg, provider, tid, dest, kind="video",
                                         emit=emit, stop_flag=stop_flag, persist=persist,
-                                        model=model)
+                                        model=model, log_path=log_path)
             paths = list(res.get("paths") or [])
             if paths:
                 if gen == self._vid_gen:

@@ -466,6 +466,8 @@ _FLOAT_RANGE = {
     "temperature": (0.0, 10.0), "top_p": (0.0, 1.0), "repeat_penalty": (0.0, 10.0),
     "vram_gb": (0.0, 4096.0), "ram_gb": (0.0, 4096.0),
     "img_cfg": (0.0, 100.0), "img_strength": (0.0, 1.0), "vid_cfg": (0.0, 100.0),
+    # 底图重绘的另外两档与 `img_strength` 同尺度（0~1）
+    "img_strength_light": (0.0, 1.0), "img_strength_mid": (0.0, 1.0),
     # 与 img_cfg / vid_cfg 同尺度（都是 --cfg-scale 一族的旋钮）；0 = 不传、跟 --cfg-scale 走
     "img_guide_scale": (0.0, 100.0),
 }
@@ -1135,6 +1137,8 @@ class SettingsMixin:
                         "img_clip_g_file", "img_t5_file", "img_negative",
                         "img_seed", "img_backend", "img_params_backend",
                         "img_extra_args", "img_output_dir",
+                        "img_strength_auto", "img_strength_light", "img_strength_mid",
+                        "img_strength",
                         "img_guide_scale", "img_ref_args"))
             ent(t3, r3, "img_output_dir", "输出目录",
                 "本地生图的落地目录；留空 = 产物文件夹下的 本地\\image"
@@ -1173,6 +1177,30 @@ class SettingsMixin:
                 "原样拼到命令行末尾，是「识别没覆盖到」的人工出口。例如 "
                 "--scheduler karras --prediction eps 或 --taesd <路径> 做快速预览。",
                 width=30, hint="可留空", fold=fold_img)
+            # 底图重绘的强度分档（2026-10-11）：判据与取值口径只有 core/media.edit_strength
+            # 那一处，这里只是把三档的值交给人。`img_strength`（常规档）以前**页面根本没有
+            # 入口**，只能改配置文件 —— 顺带补上。
+            v["img_strength_auto"] = tk.BooleanVar(
+                value=bool(self.cfg.get("img_strength_auto", True)))
+            cb_auto_st = theme.check(t3, text="按提示词自动调整",
+                                     variable=v["img_strength_auto"])
+            row(t3, r3, "自动分档", cb_auto_st,
+                "底图重绘时按提示词判改动幅度选强度：只动画质的走小改，改背景或某个东西的走普通改，"
+                "重画换风格与判不出的走大幅；关掉则恒用大幅档。只对本地 sd.cpp 的底图重绘生效。",
+                fold=fold_img)
+            ent(t3, r3, "img_strength_light", "重绘强度·小改",
+                "提示词只动画质（变清晰 / 修复 / 抠图）或明说「保持不变」时发出去的 "
+                "sd-cli --strength；越低越保得住原图，太低就几乎不改画面。",
+                hint="越低越保真", fold=fold_img)
+            ent(t3, r3, "img_strength_mid", "重绘强度·普通改",
+                "提示词要改属性或局部（换背景 / 去掉或加上某个东西）时发出去的 sd-cli --strength；"
+                "构图还在，但人脸、衣服这类细节会开始被重画。",
+                hint="构图在、细节漂", fold=fold_img)
+            ent(t3, r3, "img_strength", "重绘强度·大幅",
+                "提示词要换主体 / 重画 / 换风格时发出去的 sd-cli --strength，"
+                "也是判不出改动幅度时的兜底值；取值 0~1，留空或填 0 会退回出厂值。",
+                hint="兜底档", fold=fold_img)
+
             # 带图两档各自专属的可调项（W 2026-10-06：先收进折叠区，日后随高级选项
             # 一起搬去独立页）。参数名以 sd-cli --help 为准（坑 95：没实测就写明依据）：
             #   --img-cfg-scale  default: same as --cfg-scale（底图重绘那一路的原文）
@@ -4464,6 +4492,9 @@ class SettingsMixin:
             c["show_usage"] = bool(v["show_usage"].get())
         if "cloud_file_model_decides" in v:
             c["cloud_file_model_decides"] = bool(v["cloud_file_model_decides"].get())
+        # 底图重绘的自动分档开关（三档的数值走 FLOAT_KEYS 那条通用回写）
+        if "img_strength_auto" in v:
+            c["img_strength_auto"] = bool(v["img_strength_auto"].get())
         # ngl 按模型记忆：设置页改的是"当前模型"的层数（云端模型没有层数概念）。
         # 判据同 ctx：看 v，不看 c（坑 130）；键用建页快照、不写全局兜底（R-114）。
         if local and "ngl" in v:

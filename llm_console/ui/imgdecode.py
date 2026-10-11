@@ -37,6 +37,23 @@ def photo(path, max_px):
         return None
 
 
+def photo_of(im, fast=False):
+    """PIL 图 → tk.PhotoImage（经内存里的 PNG）。失败返回 None，不抛。
+
+    走 PNG 而不是 ImageTk：本项目的图片路径一律**不依赖 `PIL.ImageTk`**
+    （它在部分 Pillow 构建里缺席），与 `_via_pillow` 同一条路。
+
+    `fast=True` 只把 PNG 压缩降档（6 → 1）：交互式重画（涂抹预览）要的是"这一帧
+    什么时候出来"，临时 PNG 大一点无所谓 —— 实测这一步占单帧成本的大头。
+    """
+    try:
+        buf = io.BytesIO()
+        im.save(buf, "PNG", compress_level=1 if fast else 6)
+        return tk.PhotoImage(data=base64.b64encode(buf.getvalue()).decode("ascii"))
+    except Exception:
+        return None
+
+
 def _via_pillow(path, max_px):
     try:
         from PIL import Image, ImageOps
@@ -46,8 +63,6 @@ def _via_pillow(path, max_px):
                 alpha = im.mode in ("LA", "PA") or "transparency" in im.info
                 im = im.convert("RGBA" if alpha else "RGB")
             im.thumbnail((max_px, max_px), getattr(Image, "Resampling", Image).LANCZOS)
-            buf = io.BytesIO()
-            im.save(buf, "PNG")
-        return tk.PhotoImage(data=base64.b64encode(buf.getvalue()).decode("ascii"))
+        return photo_of(im)
     except Exception:
         return None

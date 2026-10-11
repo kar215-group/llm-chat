@@ -311,7 +311,10 @@ class ChatMixin:
         tip = lambda k=kind, p=path, f=fallback: self._tile_tip(k, p, f)
         for w in (tile, prev, lab):
             widgets.bind_tip(w, tip)
-            w.bind("<Button-1>", self._strip_drag_start)
+            # 点一下 = 打开涂抹遮罩页（只在本地底图重绘档；其余档在状态行说一句为什么），
+            # 按住拖动仍是左右滑动 —— 两者靠"这次按下移动了多少像素"区分，
+            # 所以要把这块瓷砖的身份带进拖动处理器。
+            w.bind("<Button-1>", lambda e, k=kind, p=path: self._strip_drag_start(e, k, p))
             w.bind("<B1-Motion>", self._strip_drag_move)
             w.bind("<ButtonRelease-1>", self._strip_drag_end)
             w.bind("<MouseWheel>", self._strip_wheel)
@@ -400,8 +403,12 @@ class ChatMixin:
         else:
             self._rebuild_attach_strip()
 
-    def _strip_drag_start(self, e):
+    def _strip_drag_start(self, e, kind="", path=""):
         self._strip_drag_x = e.x_root
+        self._strip_moved = 0
+        # 这块瓷砖的身份：松手时若一步没挪（点击），就按它打开涂抹遮罩页。
+        # 空白处按下时 kind=""/path="" → 那一下点击什么都不做。
+        self._strip_tile = (kind, path) if (kind and path) else None
         try:
             self.attach_canvas.configure(cursor="fleur")
         except Exception:
@@ -413,15 +420,22 @@ class ChatMixin:
             return
         dx = e.x_root - self._strip_drag_x
         self._strip_drag_x = e.x_root
+        self._strip_moved += abs(int(dx))
         if dx:
             self.attach_canvas.xview_scroll(int(-dx), "units")
 
     def _strip_drag_end(self, _e):
+        moved, tile = self._strip_moved, getattr(self, "_strip_tile", None)
         self._strip_drag_x = None
+        self._strip_moved = 0
+        self._strip_tile = None
         try:
             self.attach_canvas.configure(cursor="")
         except Exception:
             pass
+        # 点击（没挪）落在图片瓷砖上 → 涂抹遮罩。阈值 4px：手抖一两像素仍算点击。
+        if tile and moved <= 4 and tile[0] == "image":
+            self._open_mask_editor(tile[1])
 
     def _strip_wheel(self, e):
         """滚轮在瓷砖条上 = 横向滑动（这条没有纵向内容）；没溢出时不吞事件。"""
@@ -436,10 +450,6 @@ class ChatMixin:
         return "break"
 
     # ---- 附件条右侧：本次带图两档选择 ----
-    # 依据标志 → 人话（坑 101：界面必须照实显示，别把没实测的写成实测）
-    _REFMODE_FLAG = {"tested": "开发机真机跑过", "help": "sd-cli --help 点名",
-                     "unknown": "未实测（通用入口）", "none": "无依据",
-                     "官方页": "服务商官方页"}
 
     def _ref_family(self):
         """模式判定用的模型族：云端不需要；本地按发送侧同一口径（resolve_img_files）。"""
@@ -486,18 +496,48 @@ class ChatMixin:
             info = modes.get(m) or {}
             rb.configure(state="normal" if info.get("ok") else "disabled")
             widgets.bind_tip(rb, lambda m=m: self._refmode_tip(m, modes.get(m) or {}))
+        # 「重绘强度」只在底图重绘档出现：主体参考根本不传 --strength（自检钉着），
+        # 云端生图也没有这个入参 —— 摆着就是让人去拧一个不生效的旋钮。
+        row = getattr(self, "_strength_row", None)
+        if row is not None:
+            if want == capability.MODE_EDIT and not providers.is_cloud(self.cfg):
+                lab = next((c for t, c in self._strength_choices
+                            if t == self._img_strength_tier), self._strength_choices[0][1])
+                self._strength_var.set(lab)
+                row.pack(anchor="w", padx=8, pady=(0, 6))
+            else:
+                row.pack_forget()
         self._refresh_attach_note()
 
+    def _on_strength_pick(self):
+        """附件条「重绘强度」下拉：本次任务的档位（"" = 自动按提示词判）。
+
+        与 `_img_ref_mode` 同一口径：会话内跟着这次发送走，**不写配置文件**
+        （要长期固定就关 设置 → 本地模型 → 生图（sd.cpp） 里的自动分档，
+        并把「重绘强度」填成想要的值）。
+        """
+        label = str(self._strength_var.get() or "")
+        self._img_strength_tier = next(
+            (t for t, lab in self._strength_choices if lab == label), "")
+
+    def _strength_tip(self):
+        c = self.cfg
+        return ("底图重绘时把原图改多少：越高越不像原图，自动＝按提示词判改动幅度"
+                "（小改 %s / 普通改 %s / 大幅 %s，在 设置 → 本地模型 → 生图（sd.cpp） 改）"
+                % (media.strength_value(c, "light"), media.strength_value(c, "mid"),
+                   media.strength_value(c, "heavy")))
+
     def _refmode_tip(self, mode, info):
-        flag = self._REFMODE_FLAG.get(str(info.get("flag") or ""),
-                                      str(info.get("flag") or ""))
-        head = (info.get("why") if not info.get("ok")
-                else capability.modes_note(mode))
-        return "%s\n依据：%s" % (head or capability.modes_note(mode), flag)
+        """一句话：置灰时说清"为什么不行"，可用时说清"这一档是干什么的"。"""
+        return info.get("why") or capability.modes_note(mode)
 
     def _on_ref_mode_pick(self):
         self._img_ref_mode = self._ref_mode_var.get()
-        self._refresh_attach_note()     # 多图取舍的提示跟着档位变
+        # 状态行（多图取舍）与强度行的显隐都跟着档位变 —— 两件都在 `_refresh_ref_mode_zone`
+        # 里（它会顺手刷状态行）。原来只刷状态行，而强度行的显隐判在那个函数里 ——
+        # 用户手点「主体参考」后那一行会一直挂着，要等换模型/重挂附件才消失
+        # （W 2026-10-11 报"选主体参考时是不是可以隐去"）。
+        self._refresh_ref_mode_zone()
 
     def _refresh_attach_note(self):
         """附件条状态行：预算截断 / 底图重绘多图取舍。状态信息留行内，不挪悬停（ADR §5.2）。"""
@@ -516,6 +556,12 @@ class ChatMixin:
             # 与发送侧共用同一份取舍判断（media.plan_ref_images），说的和发的不会对不上
             note = media.plan_ref_images(self._attached_images,
                                          capability.MODE_EDIT)[2]
+        if not note and self._attached_images:
+            # 已涂遮罩要看得见（遮罩是"看不见的输入"，不显示就成了静默行为）。
+            # 状态行是"当前状态"不是"说明"，所以留在行内（ADR §5.2 判据④）。
+            mp = self._mask_path_of(self._attached_images[0])
+            if mp and os.path.isfile(mp):
+                note = "已涂遮罩：只重绘涂抹区，其余保持不变（点图片可改）"
         var.set(note)
         if note:
             self.attach_note.grid()

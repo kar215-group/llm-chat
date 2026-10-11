@@ -14,7 +14,8 @@ from tkinter import ttk, messagebox
 from ..core.config import (load_config, DEFAULT_CONFIG, APP_DIR, APP_VERSION,
                            CONFIG_PATH)
 from ..core import (capability, cloudjobs, codesign, config, crashlog, diagnose,
-                    engine_install, providers, secrets, selfupdate, throttle, updater)
+                    engine_install, media, providers, secrets, selfupdate, throttle,
+                    updater)
 from ..core.models import (auto_locate_models_dir, dir_has_any_gguf, display_name,
                           extra_sources, first_usable, has_local_chat,
                           selected_usable)
@@ -30,6 +31,7 @@ from .service import ServiceMixin
 from .models_ui import ModelsMixin, NO_MODEL_LABEL, model_missing
 from .settings import SettingsMixin
 from .subwindows import SubWindowMixin
+from .maskedit import MaskEditMixin
 from .promptopt_ui import PromptOptMixin
 
 # 输出栏那条「[环境] 三条路都还没通」提示的文字标签：首个可用模型一出现，
@@ -38,7 +40,7 @@ ENV_HINT_TAG = "env_hint"
 
 
 class App(ChatMixin, ImageGenMixin, VideoGenMixin, ServiceMixin, ModelsMixin, SettingsMixin,
-          SubWindowMixin, PromptOptMixin):
+          SubWindowMixin, MaskEditMixin, PromptOptMixin):
     """主窗口外壳：布局、主轮询、状态灯、退出；其余职责分散在各 Mixin。"""
 
     def __init__(self, root, cfg, first_run=False):
@@ -652,6 +654,7 @@ class App(ChatMixin, ImageGenMixin, VideoGenMixin, ServiceMixin, ModelsMixin, Se
                               lambda _e: self.attach_canvas.configure(
                                   scrollregion=self.attach_canvas.bbox("all")))
         self._strip_drag_x = None   # 拖动滑动的锚点（x_root）；None = 没在拖
+        self._strip_moved = 0       # 这一次按下累计移动了多少像素（区分"点击"与"拖动"）
         for w in (self.attach_canvas, self._tile_inner):
             w.bind("<Button-1>", self._strip_drag_start)
             w.bind("<B1-Motion>", self._strip_drag_move)
@@ -674,6 +677,24 @@ class App(ChatMixin, ImageGenMixin, VideoGenMixin, ServiceMixin, ModelsMixin, Se
                              command=self._on_ref_mode_pick, bootstyle="primary")
             rb.pack(anchor="w", padx=8, pady=(0, 3))
             self._refmode_radios[m] = rb
+        # 底图重绘档专属：本次任务的强度档（"" = 交给提示词自动分档）。
+        # 只加一行下拉，不开第二个分区 —— 附件条与输入区同属固定外框，
+        # 每多一行都在挤可伸缩的聊天区（坑 56）。
+        self._strength_choices = [("", "自动")] + [
+            (t, media.TIER_LABEL[t]) for t in media.STRENGTH_TIERS]
+        self._strength_var = tk.StringVar(value=self._strength_choices[0][1])
+        self._strength_row = sr = theme.tint(
+            tk.Frame(self.refmode_zone, background=theme.c("bg")), bg="bg")
+        theme.tint(tk.Label(sr, text="重绘强度", background=theme.c("bg"),
+                            foreground=theme.c("label"),
+                            font=("Microsoft YaHei UI", 9)),
+                   fg="label", bg="bg").pack(side="left")
+        self._strength_comb = theme.comb(sr, textvariable=self._strength_var,
+                                         values=[c for _t, c in self._strength_choices],
+                                         width=8, state="readonly")
+        self._strength_comb.pack(side="left", padx=(4, 0))
+        self._strength_comb.bind("<<ComboboxSelected>>", lambda _e: self._on_strength_pick())
+        widgets.bind_tip(self._strength_comb, lambda: self._strength_tip())
         self.refmode_zone.grid_remove()   # 非生图模型不显示；_refresh_ref_mode_zone 决定
 
         # -- 状态行（空时 grid_remove）--
@@ -688,6 +709,16 @@ class App(ChatMixin, ImageGenMixin, VideoGenMixin, ServiceMixin, ModelsMixin, Se
         self._attached_image = None  # 待发送图片路径（单张视图：附件条与既有调用都读它）
         self._attached_images = []   # 待发送图片路径列表（生图带图两档都要多张；顺序即发送顺序）
         self._img_ref_mode = ""      # 本次生图带图用哪一档（""=按本模型默认档；右侧区域可显式选）
+        # 本次底图重绘指定的强度档（""=自动按提示词判）。**按次、不落配置文件**：
+        # 与 `_img_ref_mode` 同一口径（会话内跟着这次发送走，不写 gui_config.json）
+        self._img_strength_tier = ""
+        # 涂抹遮罩（会话内临时，见 ui/maskedit.py）：图片路径 → 遮罩 PNG 路径。
+        # 只有"本地 + 底图重绘"档用得着；关掉程序即失效，不落任何配置。
+        self._masks = {}
+        self._mask_tmpdir = ""
+        self._mask_win = None        # 涂抹页单实例
+        self._mask_img = ""          # 涂抹页当前涂的是哪张图（换图时旧窗关掉重开）
+        self._strip_tile = None      # 附件条上"这一次按下"落在哪块瓷砖（用来区分点击与拖动）
         self._attached_file = None   # 待发送文本附件（read_document + 预算截取的成品块）；单文档，新挂替换旧的
 
         bot = ttk.Frame(self.root)
@@ -939,10 +970,10 @@ class App(ChatMixin, ImageGenMixin, VideoGenMixin, ServiceMixin, ModelsMixin, Se
         self._cloud_tid = tid
         if kind == "image":
             self._img_out = dest
-            self._img_log = dest + ".log"
+            self._img_log = config.media_log_path(self.cfg, dest, "cloud")
         else:
             self._vid_out = dest
-            self._vid_log = dest + ".log"
+            self._vid_log = config.media_log_path(self.cfg, dest, "cloud")
         self._append("\n[云端] 取回 task_id=%s…（查状态，已完成就直接下载）\n"
                      % tid[:16], "meta")
         threading.Thread(target=self._cloud_video_worker if kind == "video"

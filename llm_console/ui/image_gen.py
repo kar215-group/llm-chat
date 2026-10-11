@@ -11,7 +11,7 @@ from tkinter import ttk
 
 from ..core import capability, cloudjobs, config, providers, sdprofile
 from . import theme
-from ..core.media import (build_img_cmd, img_out_dir, plan_ref_images,
+from ..core.media import (build_img_cmd, edit_strength, img_out_dir, plan_ref_images,
                           resolve_img_files, resolve_img_model_path)
 from ..connection import cloud_media
 from . import imgdecode
@@ -77,6 +77,12 @@ class ImageGenMixin:
             return
         mode = mode or capability.default_ref_mode(self.cfg, files["family"])
         used, dropped, drop_note = plan_ref_images(refs, mode)
+        st_value = None              # 底图重绘档才算强度；None = 交给 build_img_cmd 自己判
+        # 用户涂的遮罩（白 = 要重绘）：只跟底图重绘档的第一张图走（那一档只认一张）。
+        mask_path = ""
+        if used and mode == capability.MODE_EDIT:
+            _mp = self._mask_path_of(used[0])
+            mask_path = _mp if (_mp and os.path.isfile(_mp)) else ""
         if not refs and mode:
             mode = ""                      # 纯文生图不带模式，省得回显与日志里出现无意义的档位
         # "必闪退"档启动确认（2026-10-06）：摆在消费输入框之前，点否一个字都不丢（坑 133）
@@ -118,7 +124,14 @@ class ImageGenMixin:
                          % (capability.MODE_LABEL.get(mode, "带图"), len(used),
                             "" if not drop_note else "（%s）" % drop_note), "meta")
             if mode == capability.MODE_EDIT:
-                self._append("　重绘强度 %s\n" % self.cfg.get("img_strength", 0.6), "meta")
+                # 强度在这里算一次、拼命令行时原样交出去（`strength=`）：
+                # 回显说 0.7 而引擎收到 0.9 是这类 bug 最难查的一种。
+                # 原来这里读 `cfg["img_strength"]` 且兜底写 0.6，与命令行侧的 0.9 对不上。
+                _st_tier, st_value, st_why = edit_strength(
+                    self.cfg, prompt, tier=self._img_strength_tier)
+                self._append("　重绘强度 %s（%s）%s\n"
+                             % (st_value, st_why,
+                                "｜遮罩：只重绘涂抹区" if mask_path else ""), "meta")
         self._img_gen += 1
         mygen = self._img_gen
         mark = "imgprog%d" % mygen
@@ -127,10 +140,10 @@ class ImageGenMixin:
         self._img_mark = mark
         self._img_busy = True
         self._img_out = out
-        # 每次任务重新开始：末尾缓冲、云端日志与"这一次是不是云端"都要归零
+        # 每次任务重新开始：末尾缓冲、日志与"这一次是不是云端"都要归零
         self._img_tail = []
         self._img_extra_paths = []
-        self._img_log = ""
+        self._img_log = config.media_log_path(self.cfg, out)   # media_logs，不在产物目录（W 2026-10-11）
         self._cloud_img = False
         self._t0 = time.time()
         self._saw_decode = False
@@ -141,7 +154,21 @@ class ImageGenMixin:
             # build_cmd 挪进 try（2026-10-11 排查报告）：busy 已置位后到线程启动前
             # 任何一步抛错都必须复位，否则发送/切模型永久被"任务进行中"拦住
             cmd = build_img_cmd(self.cfg, prompt, out, steps, size, diffusion, cfg_scale,
-                                seed, ref_mode=mode, ref_images=used, files=files)
+                                seed, ref_mode=mode, ref_images=used, files=files,
+                                strength=st_value, mask=mask_path)
+            # 完整引擎日志（命令行 + 引擎原话 + 退出码），与生视频链路同形：界面只回显末几行，
+            # "引擎说完成了文件在哪"这类问题只能靠这份文件回答（`10` §2 一直是这么写的，
+            # 但生图这条链路的落盘此前根本没接上 —— 2026-10-11 补）。
+            try:
+                with open(self._img_log, "w", encoding="utf-8", errors="replace") as lf:
+                    lf.write("=== argv ===\n")
+                    for i, a in enumerate(cmd):
+                        lf.write("[%2d] %s\n" % (i, a))
+                    lf.write("=== cwd=%s ｜ out=%s ｜ 提交于 %s ===\n\n"
+                             % (sd, out, time.strftime("%Y-%m-%d %H:%M:%S")))
+                    lf.flush()
+            except Exception:
+                self._img_log = ""
             self._img_proc = subprocess.Popen(
                 cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                 text=True, encoding="utf-8", errors="replace",
@@ -152,7 +179,10 @@ class ImageGenMixin:
             self._set_busy_ui(False)
             self._append("[错误] 启动生图引擎失败: %s\n" % e, "error")
             return
-        threading.Thread(target=self._img_reader, args=(self._img_proc, mygen),
+        # 日志路径走参数而不是 self._img_log：取消后立刻重开一次任务时，
+        # 旧线程会把自己的输出追加进新任务的日志里（与生视频同一处理）
+        threading.Thread(target=self._img_reader,
+                         args=(self._img_proc, mygen, self._img_log, self._t0),
                          daemon=True).start()
 
     # ---- 云端生图（二期：服务商原生接口，按 providers.media_api 分派）----
@@ -207,7 +237,7 @@ class ImageGenMixin:
         gen, q, stop = self._cloud_begin("image")
         self._cloud_pid = str(provider["id"])
         self._img_out = out
-        self._img_log = out + ".log"
+        self._img_log = config.media_log_path(self.cfg, out)
         self._update_img_progress_line("☁ 云端生图中… %s（%s）"
                                        % (providers.short_of(model),
                                           provider.get("name") or ""))
@@ -268,11 +298,14 @@ class ImageGenMixin:
                 q.put(e)
 
         try:
+            # 日志路径按产物算、当参数传（不读 self._img_log）：这条 worker 可能属于
+            # 已被取消/替换的旧轮，读共享字段会把自己的输出写进新任务的日志里。
+            log_path = config.media_log_path(self.cfg, dest, "cloud")
             if cur["tid"]:
                 # 取回旧任务：不再提交一次，只查 + 下载
                 res = cloud_media.wait_task(self.cfg, provider, cur["tid"], dest, kind="image",
                                             emit=emit, stop_flag=stop_flag,
-                                            persist=persist, model=model)
+                                            persist=persist, model=model, log_path=log_path)
             else:
                 res = cloud_media.generate_image(
                     self.cfg, provider, model, prompt, dest, emit=emit,
@@ -281,6 +314,7 @@ class ImageGenMixin:
                     size=str(self.cfg.get("cloud_img_size", "") or ""), seed=seed,
                     ref_images=list(refs or []),
                     ref_mode=str(ref_mode or ""),
+                    log_path=log_path,
                     on_task_id=note_tid, persist=persist)
             paths = list(res.get("paths") or [])
             # 真实落地路径可能与服务端给的扩展名一致而与我们的默认值不同（.png vs .jpg），
@@ -318,11 +352,25 @@ class ImageGenMixin:
                 pass
             q.put(("exit", 1, gen))
 
-    def _img_reader(self, proc, gen):
+    def _img_reader(self, proc, gen, log_path="", t0=None):
+        # 完整引擎输出落盘（与 _vid_reader 同形）：内存里的 _img_tail 只有 12 行，
+        # 够回答"为什么失败"，不够回答"引擎说自己成功了却没写出文件"。
+        log = None
+        try:
+            # 行缓冲：应用被强杀时也要留下"引擎最后说了什么"
+            log = open(log_path, "a", encoding="utf-8", errors="replace",
+                       buffering=1) if log_path else None
+        except Exception:
+            log = None
         try:
             for line in proc.stdout:
                 if self._closing:
                     break
+                if log is not None:
+                    try:
+                        log.write(line if line.endswith("\n") else line + "\n")
+                    except Exception:
+                        pass
                 self._img_q.put(("line", line.rstrip()))
         except Exception:
             pass
@@ -330,6 +378,13 @@ class ImageGenMixin:
             rc = proc.wait()
         except Exception:
             rc = -1
+        if log is not None:
+            try:
+                log.write("=== 退出码 %s ｜ 用时 %.1fs ===\n"
+                          % (rc, time.time() - (t0 or time.time())))
+                log.close()
+            except Exception:
+                pass
         self._img_q.put(("exit", rc, gen))
 
     def _update_img_progress_line(self, text):

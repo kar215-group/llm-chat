@@ -30,7 +30,7 @@ CONFIG_PATH = os.path.join(APP_DIR, "gui_config.json")
 
 # 版本号：发版时改这一处（--selfcheck / --version 会打印它）。
 # GitHub Release 的 tag 要与它一致（tag 去掉开头的 v），Actions 工作流会做一致性校验。
-APP_VERSION = "1.2.3"
+APP_VERSION = "1.3.0beta1"
 
 CFG_VERSION = 3
 
@@ -103,7 +103,15 @@ DEFAULT_CONFIG = {
     "img_size": "1024x1024",
     "img_cfg": 2.5,                # 官方推荐值
     "img_seed": -1,                # -1 = 随机
-    "img_strength": 0.9,           # 参考图编辑强度（附图时生效；实测 0.9 效果最好）
+    "img_strength": 0.9,           # 重绘强度·大幅档 = 兜底（坑 25：0.9 才"改得动"指令）
+    # 底图重绘的强度分档（2026-10-11）：`img_strength` 就是**大幅档 = 判不出时的兜底**，
+    # 另外两档在它下面。数值来自开发机 qwen-image-2.1 实测（`_selftest/_probe_strength.py`，
+    # 同一底图同种子：漂移量 0.4→15 / 0.65→24 / 0.9→59，只有 0.9 真会执行提示词）。
+    # 判据与取值口径见 core/media.edit_strength 与 `10` §5.0.2；换模型族未实测。
+    # ⚠ 兜底故意留在 0.9 = 分档上线前的行为 ⇒ 老配置零迁移、判不出的提示词一条不退化。
+    "img_strength_light": 0.4,     # 小改档：只动画质（变清晰 / 修复 / 抠图）
+    "img_strength_mid": 0.65,      # 普通改档：改属性或局部（换背景 / 去掉某物）
+    "img_strength_auto": True,
     # 两档各自的可调项。**留空 / 0 = 不传**，用引擎自己的默认（help 原文的 default）：
     #   img_guide_scale → --img-cfg-scale  底图重绘档的图像引导强度（default: same as --cfg-scale）
     #   img_ref_args    → --ref-image-args 主体参考档的参考图处理键值对（empty = 按模型权重自动判断）
@@ -213,6 +221,8 @@ DEFAULT_CONFIG = {
     # ---- 对话记录（仅文本语言模型；本期只存不读，见 core/chatlog.py）----
     "chat_log_save": True,           # 每轮结束 / 关窗 / 清空前自动写一份 JSON
     "chat_log_dir": "",              # 留空 = <程序目录>/chat_logs（不写死盘符，项目要分发）
+    # 生图 / 生视频的任务日志（本地与云端共用；与产物**分开**，W 2026-10-11 定）
+    "media_log_dir": "",             # 留空 = <程序目录>/media_logs
     # ---- 新设备排障与首次引导（见 core/crashlog.py、core/diagnose.py、ui/guide.py）----
     # 崩溃日志"已经看过"的指纹（mtime:size）：同一条崩溃只提醒一次
     "crashlog_seen": "",
@@ -254,7 +264,8 @@ INT_KEYS = ("port", "ngl", "ctx", "threads", "reasoning_budget",
             "cloud_download_seconds", "cloud_keep_days")
 
 FLOAT_KEYS = ("temperature", "top_p", "repeat_penalty", "vram_gb", "ram_gb",
-              "img_cfg", "img_strength", "vid_cfg", "img_guide_scale")
+              "img_cfg", "img_strength", "vid_cfg", "img_guide_scale",
+              "img_strength_light", "img_strength_mid")
 
 # 「model」故意不在这里：它与云端复合 id 共用（坑 146），写回另有分支（settings._apply_settings）
 STR_KEYS = ("models_dir", "host", "api_key", "reasoning_mode",
@@ -272,7 +283,7 @@ STR_KEYS = ("models_dir", "host", "api_key", "reasoning_mode",
             "output_dir", "img_output_dir", "vid_output_dir",
             "cloud_img_dir", "cloud_vid_dir", "cloud_img_size",
             "cloud_img_negative", "cloud_video_resolution", "cloud_video_ratio",
-            "cloud_video_negative", "chat_log_dir", "prompt_opt_model")
+            "cloud_video_negative", "chat_log_dir", "media_log_dir", "prompt_opt_model")
 
 _CFG_LOCK = threading.RLock()   # 可重入：save_config 自带锁，调用方若已持锁不会自我死锁
 
@@ -584,3 +595,38 @@ def cloud_media_dir(cfg, kind):
         return d
     return os.path.join(output_root(cfg), "云端",
                         "image" if kind == "image" else "video")
+
+
+def media_log_dir(cfg):
+    """媒体任务的日志目录：`media_log_dir` 优先，留空 = **配置文件所在目录**下的 `media_logs`。
+
+    **日志与产物分开放**（W 2026-10-11 定）：产物是给人看的结果，日志是排障用的过程，
+    混在一起会被一起删除 / 一起备份 / 一起整理（原来就是 `<产物名>.log` 躺在产物旁边）。
+
+    默认挂**配置文件所在目录**而不是 `APP_DIR`：生产环境两者是同一个（`gui_config.json`
+    就在程序目录里），而自检把 `CONFIG_PATH` 指到临时目录时日志自动跟着隔离 ——
+    否则任何一套碰到媒体链路的套件都会往仓库根写出 `media_logs/`（本轮真踩过，
+    坑 215；实例标记文件用的是同一条判据）。`media_log_dir` 填相对路径时仍按程序目录解析。
+    """
+    d = str((cfg or {}).get("media_log_dir", "") or "").strip()
+    if d:
+        return d if os.path.isabs(d) else os.path.join(APP_DIR, d)
+    return os.path.join(os.path.dirname(os.path.abspath(CONFIG_PATH)), "media_logs")
+
+
+def media_log_path(cfg, product_path, tag=""):
+    """某次媒体任务的日志路径 = `media_log_dir` 下 + **产物主名**（同 img_20261011_181500）。
+
+    沿用产物主名是为了"看着产物就能找到对应日志"；`tag` 用于同一产物有多份日志的链路
+    （云端生视频=提交 + 取回各一份）。目录在这里就建好 —— 调用方都是写完当行就 open，
+    不该各自再 makedirs（少一处忘建 = 一份日志静默消失）。
+    """
+    stem = os.path.splitext(os.path.basename(str(product_path or "")))[0] or "task"
+    if tag:
+        stem = "%s_%s" % (stem, tag)
+    d = media_log_dir(cfg)
+    try:
+        os.makedirs(d, exist_ok=True)
+    except Exception:
+        pass
+    return os.path.join(d, stem + ".log")

@@ -256,9 +256,164 @@ def plan_ref_images(refs, mode):
     return paths, 0, ""
 
 
+# --------------------------------------------------------------- 底图重绘的重绘强度
+#
+# `--strength` 是"底图被加噪再重绘多少"的旋钮，也是**唯一**能防住"我想小改一下，
+# 结果模型给我画了另一张图"的引擎参数（`10` §5.0、坑 25）。原来它是一个全局定值
+# （`img_strength`，实测最佳 0.9），于是"变清晰""换个背景"这类小改也按 0.9 发出去。
+#
+# 三档 = 对"这次要改多大"的判断，取值各自一个配置键（数值来自开发机 qwen-image-2.1 实测，
+# 见 `10` §5.0.2；同一张底图、同种子、20 步，"与原图平均像素差"是 0~255 的漂移量）：
+#   light  小改   0.4   只动画质（变清晰 / 修复 / 抠图），漂移 15，画面几乎原样
+#   mid    普通改 0.65  改属性或局部（换背景 / 去掉某物），漂移 24，构图在、身份开始漂
+#   heavy  大幅   0.9   换主体 / 重画 / 换风格，漂移 59，指令这才被执行但原图也没了
+# ⚠ **兜底是 heavy = `img_strength`（现状值）**：实测只有这一档真会执行提示词，
+#   判不出来时替用户降到 0.65 = 既改不动指令、又把原图改坏（两头不讨好）。
+STRENGTH_TIERS = ("light", "mid", "heavy")
+TIER_LABEL = {"light": "小改", "mid": "普通改", "heavy": "大幅"}
+TIER_DEFAULT = "heavy"
+# 档位 → 取值用的配置键。heavy 复用既有键 `img_strength`：出厂值不变 ⇒ 老配置零迁移、
+# 判不出的提示词行为与分档上线前逐字一致。
+TIER_KEY = {"light": "img_strength_light", "mid": "img_strength_mid",
+            "heavy": "img_strength"}
+
+# 线索表。**只在底图重绘档生效**，所以"清晰 / 放大"这类纯文生图里也常见的词不会污染那边。
+# 裁决顺序（`match_strength_tier`）：明示保结构 → 小改；重画/换风格 → 大幅；
+# 再质感修复 → 小改；再属性/局部 → 普通改；都没有 → 大幅（兜底）。
+# 一句话取向：**"别改坏"优先于"改到位"** —— W 报的原始症状就是小改被重绘成另一张图。
+_ST_KEEP = ("保持不变", "保持原样", "保持原图", "保持构图", "保持主体", "主体不变",
+            "人物不变", "背景不变", "其余不变", "其它不变", "其他不变", "剩下的不变",
+            "不要改变", "不要改", "别改变", "不要动", "都别动", "别动", "不动",
+            "原样", "只改", "只换", "仅改", "保留原", "维持原",
+            "keep unchanged", "keep the same", "unchanged", "don't change",
+            "do not change", "keep everything", "everything else stays",
+            "rest unchanged", "keep composition", "same composition", "preserve",
+            "only change", "nothing else")
+# 只动画质 / 修图：主体与构图都要留
+_ST_LIGHT = (
+    "变清晰", "更清晰", "清晰一点", "清晰化", "提高清晰度", "清晰度", "高清", "超清",
+    "锐化", "去模糊", "消除模糊", "去雾", "变清楚", "去噪", "降噪", "减少噪点",
+    "去颗粒", "噪点", "修复", "翻新", "老照片", "提高分辨率", "超分", "放大",
+    "补光", "调亮", "变亮", "调色", "校色", "白平衡", "上色", "增强", "画质",
+    "美颜", "磨皮", "去瑕疵", "修补", "补全",
+    "sharpen", "deblur", "unblur", "denoise", "reduce noise", "upscale",
+    "super resolution", "enhance quality", "restore", "old photo", "colorize",
+)
+# 改属性 / 局部增删：构图要留，但确实动了画面内容
+_ST_MID = (
+    "抠图", "抠出来", "提取主体", "去背景", "去掉背景", "移除背景", "删除背景",
+    "换背景", "背景换", "换个背景", "透明背景", "换成透明", "透明底", "去底",
+    "白底", "纯白背景", "纯色背景",
+    "remove background", "background removal", "cut out", "cutout",
+    "transparent background", "white background",
+    "去掉", "去除", "删掉", "移除", "擦除", "去水印", "去字幕", "去马赛克",
+    "去反光", "去阴影", "加上", "添加一个", "补一个",
+    "remove watermark", "remove object", "erase", "inpaint", "touch up",
+)
+_ST_HEAVY = (
+    "重新画", "重画", "再画一张", "改画", "大幅修改", "大改", "彻底改", "完全改成",
+    "换成另一种", "换个风格", "换风格", "改风格", "风格化", "动漫风", "变成动漫",
+    "卡通风", "卡通化", "油画", "水彩", "水墨", "像素风", "手绘", "素描", "插画风",
+    "赛博朋克", "3d渲染", "三维渲染", "换成夜景", "变成夜景", "换个场景", "换场景",
+    "变成另一个人", "换个脸", "换装", "变成年轻", "变成老年", "以这张为参考",
+    "参考这张重新", "重新生成",
+    "redraw", "repaint", "re-imagine", "reimagine", "restyle", "stylize",
+    "anime style", "cartoon style", "oil painting", "watercolor", "pixel art",
+    "in the style of", "convert to", "transform into", "different scene",
+    "another person", "change the style", "cyberpunk", "3d render",
+    "anime", "cartoon", "concept art",
+)
+
+
+def _strength_rx(hints):
+    """线索表 → 一条编译好的正则。拉丁线索必须**整词**命中，
+    否则 "hd" 会在 "shadow" 里、"erase" 会在 "restored" 里冒出来；
+    中文没有词边界，按子串算。拉丁词之间允许夹冠词
+    （"remove background" 要能命中 "remove the background"）。"""
+    parts = []
+    for h in hints:
+        hh = str(h).lower()
+        if re.fullmatch(r"[a-z0-9 .'-]+", hh):
+            toks = [re.escape(t) for t in hh.split() if t]
+            body = r"\s+(?:the\s+|an\s+|a\s+)?".join(toks)
+            parts.append(r"(?<![a-z0-9])%s(?![a-z0-9])" % body)
+        else:
+            parts.append(re.escape(hh))
+    return re.compile("|".join(parts), re.I)
+
+
+_ST_RX_KEEP = _strength_rx(_ST_KEEP)
+_ST_RX_LIGHT = _strength_rx(_ST_LIGHT)
+_ST_RX_MID = _strength_rx(_ST_MID)
+_ST_RX_HEAVY = _strength_rx(_ST_HEAVY)
+
+
+def match_strength_tier(prompt):
+    """提示词 → `(档位, 命中的线索, 是否也带"大幅重绘"线索)`。只判档，不取值。
+
+    顺序：明示保结构 → 小改；重画/换风格 → 大幅；质感修复 → 小改；属性/局部 → 普通改；
+    都没有 → 大幅（兜底）。第三条返回值用在"明说保持不变、又要换风格"那种自相矛盾的
+    提示词上：照样按小改走（别改坏优先），但要把这层矛盾说出来，不能静默判档。
+    """
+    t = str(prompt or "")
+    if not t.strip():
+        return TIER_DEFAULT, "", False
+    heavy = _ST_RX_HEAVY.search(t)
+    hit = _ST_RX_KEEP.search(t)
+    if hit:
+        return "light", hit.group(0), bool(heavy)
+    if heavy:
+        return "heavy", heavy.group(0), False
+    hit = _ST_RX_LIGHT.search(t)
+    if hit:
+        return "light", hit.group(0), False
+    hit = _ST_RX_MID.search(t)
+    if hit:
+        return "mid", hit.group(0), False
+    return TIER_DEFAULT, "", False
+
+
+def strength_value(cfg, tier):
+    """某一档要发给引擎的数值（不可用 / 越界时回落到出厂默认，不发给引擎一个 0）。"""
+    key = TIER_KEY.get(str(tier or "").strip(), TIER_KEY[TIER_DEFAULT])
+    try:
+        val = float(cfg.get(key))
+    except (TypeError, ValueError):
+        val = float(config.DEFAULT_CONFIG.get(key, 0.9))
+    if not (0.0 < val <= 1.0):
+        val = float(config.DEFAULT_CONFIG.get(key, 0.9))
+    return val
+
+
+def edit_strength(cfg, prompt, tier=""):
+    """底图重绘这次真正要发的 `--strength` → `(档位, 数值, 界面上那一句短说明)`。
+
+    · `tier` 非空 = 用户在附件条按次指定了档（"" = 交给提示词判）；
+    · `img_strength_auto` = False ⇒ 不看提示词，恒用 `img_strength`（固定档）。
+    界面回显与 `build_img_cmd` 读的是同一个函数、同一份入参，所以"说出去的强度"
+    与"拼进命令行的强度"不可能对不上（与 `plan_ref_images` 同一条纪律）。
+    说明只留一句（W 2026-10-11 定：主界面不堆依据与实测细节）。
+    """
+    tier = str(tier or "").strip()
+    if tier not in STRENGTH_TIERS:
+        tier = ""
+    if not bool(cfg.get("img_strength_auto", True)):
+        if not tier:
+            return TIER_DEFAULT, strength_value(cfg, TIER_DEFAULT), "固定档"
+    elif not tier:
+        tier, hit, clash = match_strength_tier(prompt)
+        why = "自动·%s" % TIER_LABEL[tier]
+        if clash and tier == "light":
+            why += "（提示词也要重画）"
+        elif not hit and tier == TIER_DEFAULT:
+            why += "（判不出改动幅度）"
+        return tier, strength_value(cfg, tier), why
+    return tier, strength_value(cfg, tier), "手动指定·%s" % TIER_LABEL[tier]
+
+
 def build_img_cmd(cfg, prompt, out_path, steps, size, diffusion_path, cfg_scale, seed,
                   init_img=None, vae=None, llm=None, family=None, files=None,
-                  ref_mode="", ref_images=None):
+                  ref_mode="", ref_images=None, strength=None, mask=None):
     """组装 sd-cli 生图命令行（形状由模型族决定，参数值仍来自配置）。
 
     Qwen-Image 这条链路保持改造前的逐字顺序：
@@ -267,6 +422,9 @@ def build_img_cmd(cfg, prompt, out_path, steps, size, diffusion_path, cfg_scale,
       附图时再补 --llm_vision、（CFG 低于 3.0 时提到 3.0）、-i、--strength。
     其它家族：单文件权重走 `-m`；CLIP 系补 --clip_l/--clip_g/--t5xxl；不硬塞
     flow-shift 与采样器（让引擎按模型自己定），尺寸按各家的对齐值补整。
+
+    `strength` = 底图重绘档这次要发的 `--strength`；留 None = 在这里按提示词自动分档
+    （`edit_strength`）。界面侧（`ui/image_gen.py`）先算好再传进来，回显与命令行同源。
     """
     sd = cfg.get("sd_dir", "")
     if files is None:
@@ -356,8 +514,14 @@ def build_img_cmd(cfg, prompt, out_path, steps, size, diffusion_path, cfg_scale,
             if minimum and float(cfg_scale) < float(minimum):
                 i = args.index("--cfg-scale")
                 args[i + 1] = str(minimum)
-            args += ["-i", _used[0],
-                     "--strength", str(cfg.get("img_strength", 0.9))]
+            if strength is None:
+                _t, strength, _w = edit_strength(cfg, prompt)
+            args += ["-i", _used[0], "--strength", str(strength)]
+            # 用户涂的遮罩（白 = 要重绘）：只挂底图重绘档 —— 实测不带遮罩时这份权重
+            # 不执行"只换背景/只改衣物"这类指令，带上遮罩遮罩外基本逐像素不动（坑 214）。
+            # 主体参考档（-r）不吃遮罩，所以只在 else 这条分支里拼。
+            if mask and os.path.isfile(str(mask)):
+                args += ["--mask", str(mask)]
             # 图像引导强度是"inpaint / image edit 模型"专用的那一路 --help 原文：
             #   --img-cfg-scale <float>  default: same as --cfg-scale
             # 与上面"把 --cfg-scale 抬到 edit_cfg_min"是**两件事**（那个管文本提示词的影响力，

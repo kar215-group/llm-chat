@@ -799,7 +799,7 @@ def image_body(model, prompt, size="", negative="", seed=-1, extra=None,
 
 
 def generate_image(cfg, provider, model, prompt, dest, emit=None, stop_flag=None,
-                   negative="", size="", seed=-1, log=None, ref_images=None,
+                   negative="", size="", seed=-1, log=None, log_path="", ref_images=None,
                    on_task_id=None, persist=None, ref_mode=""):
     """云端生图：同步端点出 URL；万一服务端给了 task_id，就地转成轮询。
 
@@ -818,7 +818,9 @@ def generate_image(cfg, provider, model, prompt, dest, emit=None, stop_flag=None
     t0 = time.time()
     own = log is None
     if own:
-        log = _Log(dest + ".log", "云端生图 %s" % model)
+        # 日志落到 media_logs（与产物分开，W 2026-10-11 定）；_Log 的标题沿用原样
+        log = _Log(log_path or config.media_log_path(cfg, dest, "cloud"),
+                   "云端生图 %s" % model)
     timeout = int(cfg.get("cloud_image_wait_seconds", 180) or 180)
     proto = protocol_of(provider)
     bad = ref_images_error(provider, ref_images, mode=ref_mode)
@@ -1148,7 +1150,7 @@ _LABEL = {"pending": "排队中", "running": "生成中", "succeeded": "已完�
 
 
 def wait_task(cfg, provider, task_id, dest, kind="video", emit=None, stop_flag=None,
-              log=None, deadline=None, persist=None, model=""):
+              log=None, log_path="", deadline=None, persist=None, model=""):
     """轮询到终态并下载产物。进度来自轮询，**不是** stdout，但仍推进同一个队列。
 
     emit 的事件与本地引擎一致：("progress", 文本) 刷进度行、("line", 文本) 进尾部缓冲。
@@ -1159,7 +1161,8 @@ def wait_task(cfg, provider, task_id, dest, kind="video", emit=None, stop_flag=N
     emit = emit or (lambda e: None)
     own = log is None
     if own:
-        log = _Log(dest + ".log", "云端生%s %s" % ("图" if kind == "image" else "视频", task_id))
+        log = _Log(log_path or config.media_log_path(cfg, dest, "cloud"),
+                   "云端生%s %s" % ("图" if kind == "image" else "视频", task_id))
     interval = max(5, int(cfg.get("cloud_poll_seconds", 15) or 15))
     if deadline is None:
         deadline = time.time() + max(60, int(cfg.get("cloud_wait_minutes", 20) or 20) * 60)
