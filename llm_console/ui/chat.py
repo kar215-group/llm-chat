@@ -637,8 +637,10 @@ class ChatMixin:
             elif self._remote_busy():
                 # 主页面那个「停止生成」停不掉远程任务（它只管本机这一轮），
                 # 所以指清出口在哪，别让人对着一个按了没反应的按钮试。
-                self._append("\n[提示] 手机端有一个远程生图在进行：等它完成，"
-                             "或在 设置 → 远程访问 点「停止远程任务」。\n", "meta")
+                #  kinds 由 `_remote_busy_kind` 现算：手机那头可能是出图也可能是对话。
+                self._append("\n[提示] 手机端有一个远程%s在进行：等它完成，"
+                             "或在 设置 → 远程访问 点「停止远程任务」。\n"
+                             % self._remote_busy_kind(), "meta")
             return
         text = self.input.get("1.0", "end").strip()
         if not text:

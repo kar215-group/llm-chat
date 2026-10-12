@@ -30,7 +30,7 @@ CONFIG_PATH = os.path.join(APP_DIR, "gui_config.json")
 
 # 版本号：发版时改这一处（--selfcheck / --version 会打印它）。
 # GitHub Release 的 tag 要与它一致（tag 去掉开头的 v），Actions 工作流会做一致性校验。
-APP_VERSION = "1.3.0beta2"
+APP_VERSION = "1.3.0beta3"
 
 CFG_VERSION = 3
 
@@ -189,6 +189,13 @@ DEFAULT_CONFIG = {
     # "本设备自己的任务"；开启后台账（remote_jobs.json）里的历史远程产物
     # 对任何已配对设备可见（16 §4 第 3 条预留的口径：放宽判据、形状不动）。
     "remote_history": False,
+    # 对外开放范围（2026-10-12 P0-5，判据在 connection/remote_net.resolve_bind）：
+    #   all        = 全部网卡（默认，与一期行为逐字一致）
+    #   tailscale  = 只绑 Tailscale 虚拟网卡那个地址（把攻击面收到只有隧道能到的位置；
+    #                本机没有那个地址时**回退 all 并在状态行如实说**）
+    #   v4         = 收全部 IPv4 网卡、不收 IPv6
+    # 默认 all = 现行为，所以不抬 cfg_version（proxy_enabled 那次抬闸是因为旧默认不安全）。
+    "remote_bind": "all",
     # ---- 云端 API（v31 一期：OpenAI 兼容文本；密钥存 secrets.json，不进备份）----
     # 每项：{id, name, base_url, kind:"text", models:[...], enabled, timeout, extra_headers}
     "cloud_providers": [],

@@ -221,6 +221,12 @@ class App(ChatMixin, ImageGenMixin, VideoGenMixin, ServiceMixin, ModelsMixin, Se
         self.remote.jobs = remote_mod.RemoteJobs(
             cfg, local_busy=self._any_busy,
             note_fn=lambda m: self._sq.put(("note", m)))
+        # 远程文本聊天（99 K7）：同一个双向互斥口径 —— 手机聊天在跑时本机发送被拦，
+        # 反过来手机提交聊天时也要问 `_any_busy`（生图 / 生视频 / 服务操作都在里面）。
+        # **不调 ensure_model**：远程聊天只打当前已加载的文本模型，绝不换载。
+        # 聊天不接 note_fn：它没有要往输出栏说的话（远程那头的动静只在按钮状态上，
+        # 见 `_remote_busy_kind`），不再多挂一个没人调的回调（上一轮已记下同类死参数）
+        self.remote.chat = remote_mod.RemoteChat(cfg, local_busy=self._any_busy)
         self._remote_starting = False     # 远程监听面的后台启动在飞（防重复拨开关）
         if bool(cfg.get("remote_enabled", False)):
             # 启动失败（证书坏 / 端口被占）**绝不拦住程序起来**（坑 129 家族：
@@ -818,12 +824,24 @@ class App(ChatMixin, ImageGenMixin, VideoGenMixin, ServiceMixin, ModelsMixin, Se
         self.clear_btn.configure(state="disabled" if blocked else "normal")
 
     def _remote_busy(self):
-        """远程那头有没有生图在跑（远程访问未启用 / 尚未建好 = False）。"""
+        """远程那头有没有任务在跑（生图或对话；远程访问未启用 / 尚未建好 = False）。"""
+        return bool(self._remote_busy_kind())
+
+    def _remote_busy_kind(self):
+        """在跑的是哪一种 → "生图" / "对话" / ""（空 = 没在跑）。
+
+        闸门只管"有没有"，但这句要能拼进提示文案：手机上发起的是聊天还是出图，
+        人在电脑端看到的该是实话（坑 128：一个判据两个入口，别在入口里各写一遍）。
+        """
         r = getattr(self, "remote", None)
         try:
-            return bool(r and r.jobs and r.jobs.busy())
+            if r and r.jobs and r.jobs.busy():
+                return "生图"
+            if r and r.chat and r.chat.busy():
+                return "对话"
         except Exception:
-            return False
+            return ""
+        return ""
 
     def start_remote_async(self, on_done=None, note_ok=True):
         """后台线程里起远程监听面，完了经 `_ui_q` 回主线程 → 是否真的排上了。
@@ -843,6 +861,10 @@ class App(ChatMixin, ImageGenMixin, VideoGenMixin, ServiceMixin, ModelsMixin, Se
             err = ""
             try:
                 self.remote.start()
+            except remote_mod.RemoteStartError as e:
+                # 文案已是人话（端口越界等）：直接展示，不套异常类型前缀
+                err = str(e)
+                crashlog.note("远程访问启动失败：%r" % e)
             except Exception as e:
                 err = "%s: %s" % (type(e).__name__, e)
                 crashlog.note("远程访问启动失败：%r" % e)
@@ -1754,8 +1776,10 @@ class App(ChatMixin, ImageGenMixin, VideoGenMixin, ServiceMixin, ModelsMixin, Se
         # 不随父进程结束子进程 —— 不收就是一个占着显存的孤儿（下次启动报显存不足，
         # 而界面上"远程任务"已经没人管了）。cancel 里当场 kill（不等下一行输出）。
         try:
-            if self._remote_busy():
+            if self.remote.jobs is not None and self.remote.jobs.busy():
                 self.remote.jobs.cancel(None, "local")
+            if self.remote.chat is not None and self.remote.chat.busy():
+                self.remote.chat.cancel("local")
         except Exception:
             pass
         self.remote.stop()            # 远程监听面一起收掉

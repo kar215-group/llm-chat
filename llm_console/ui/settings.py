@@ -3042,9 +3042,19 @@ class SettingsMixin:
                 value=bool(self.cfg.get("remote_enabled", False)))
             v["remote_https"] = tk.BooleanVar(
                 value=True if simple else bool(self.cfg.get("remote_https", True)))
+            # 三档标签的唯一来源在 remote_net.BIND_LABELS（界面不写第二份字面量）
+            _bind_labels = [remote_mod.BIND_LABELS[k]
+                            for k in (remote_mod.BIND_ALL,
+                                      remote_mod.BIND_TAILSCALE,
+                                      remote_mod.BIND_V4)]
+            _bind_by_label = {remote_mod.BIND_LABELS[k]: k
+                              for k in (remote_mod.BIND_ALL,
+                                        remote_mod.BIND_TAILSCALE,
+                                        remote_mod.BIND_V4)}
+            bind_cb = None
 
             def _apply_remote():
-                """读本页开关 → 写 cfg → 重启监听 → 回显。
+                """读本页开关与档位 → 写 cfg → 重启监听 → 回显。
 
                 W 2026-10-11 定的交互：**开关即保存即生效**（不是"打勾 → 底部
                 保存"两步）——开关一拨，状态行立刻更新。端口改动仍走底部
@@ -3052,11 +3062,17 @@ class SettingsMixin:
                 状态行给人话，让"保存"照常走完（坑 194 家族的 cfg 写侧已在此
                 前完成，这里只影响监听起不起得来）。普通模式 **恒 https**
                 （W 2026-10-11：普通用户不露这个选项，默认开启）。
+
+                `remote_bind` 不在 STR_KEYS 通用循环里：**改了必须重绑监听才成立**，
+                所以与两个布尔键同款走本页钩子（钩子自己落盘）。
                 """
                 en = bool(v["remote_enabled"].get())
                 https = True if simple else bool(v["remote_https"].get())
                 self.cfg["remote_enabled"] = en
                 self.cfg["remote_https"] = https
+                if bind_cb is not None:
+                    self.cfg["remote_bind"] = _bind_by_label.get(
+                        str(bind_cb.get()), remote_mod.BIND_ALL)
                 try:
                     save_config(self.cfg)
                 except Exception:
@@ -3119,6 +3135,28 @@ class SettingsMixin:
                                 "手机浏览器首次访问会提示不安全 —— 点「继续访问」"
                                 "即可；身份认证靠配对码，不靠证书提示。").grid(
                     row=i, column=2, sticky="w", pady=(4, 4))
+                # 对外开放范围（P0-5，2026-10-12；仅高级模式——普通模式照旧
+                # "拨一下开关就能用"，不多一个会让人连不上的选项）
+                i = rrem["i"]
+                rrem["i"] += 1
+                ttk.Label(trem, text="对外开放范围").grid(
+                    row=i, column=0, sticky="w", padx=(0, 8), pady=5)
+                bind_cb = ttk.Combobox(trem, values=_bind_labels,
+                                       state="readonly", width=22)
+                bind_cb.set(remote_mod.BIND_LABELS.get(
+                    str(self.cfg.get("remote_bind", remote_mod.BIND_ALL)
+                        or remote_mod.BIND_ALL),
+                    remote_mod.BIND_LABELS[remote_mod.BIND_ALL]))
+                bind_cb.grid(row=i, column=1, sticky="w", pady=5)
+                bind_cb.bind("<<ComboboxSelected>>",
+                             lambda *a: _apply_remote())
+                widgets.HelpDot(trem,
+                                "默认对整个局域网开放。装了 Tailscale 可以只绑"
+                                "虚拟网卡那个地址（走了隧道才连得上）；选「仅局域网"
+                                "IPv4」就不收 IPv6 的连接。改这里会重启监听并立即"
+                                "生效；选 Tailscale 而本机没有那个地址时，会退回"
+                                "全部网卡并在状态行说出来。").grid(
+                    row=i, column=2, sticky="w", pady=5)
 
             # ---- 状态行 + 网址(****) + 配对码 + 设备(次级窗) ----
             stat_var = tk.StringVar(value="")
@@ -3288,6 +3326,9 @@ class SettingsMixin:
                     stat = "已启动"
                     if self.remote.scheme() != "https":
                         stat += "（当前是明文 HTTP，仅建议局域网内使用）"
+                    # 想只绑 Tailscale 但本机没那个地址 → 已退回全部网卡，如实说
+                    if getattr(self.remote, "bind_note", ""):
+                        stat += "（" + self.remote.bind_note + "）"
                     code_var.set(_pair_text())
                     stat_var.set(stat)
                 else:
@@ -3316,9 +3357,15 @@ class SettingsMixin:
             # /api/cancel，GUI 侧一直没有按钮。device_id="local" = 本机全可见
             # （与产物取回同一口径）；置 stop_flag 后由 reader 线程收进程。
             def _stop_remote_job():
-                jobs = getattr(self.remote, "jobs", None)
+                # 两种远程任务都能停（生图 / 对话）：这一颗按钮是电脑端唯一的人工出口，
+                # 拆成两颗只会让人先猜哪颗管哪件事。
+                r = self.remote
+                jobs = getattr(r, "jobs", None)
+                chat = getattr(r, "chat", None)
                 if jobs is not None and jobs.busy() and jobs.cancel(None, "local"):
                     stat_var.set("已停止远程生图任务。")
+                elif chat is not None and chat.busy() and chat.cancel("local"):
+                    stat_var.set("已停止远程对话。")
                 else:
                     stat_var.set("当前没有远程任务在跑。")
             theme.button(btn_row, text="停止远程任务", width=13,
