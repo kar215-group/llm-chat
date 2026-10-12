@@ -19,6 +19,7 @@ from ..core.models import has_local_chat, scan_models, scan_video_models, usable
 from ..core.params import ctx_for, current_ngl
 from ..core.server import _query_serving_model, server_alive, server_process_alive
 from ..connection import cloud
+from ..connection import remote as remote_mod
 from . import theme
 from . import widgets
 
@@ -137,6 +138,13 @@ NAV_SPEC = [
              "（agent、脚本、外部工具）填这个地址就能直接用它。\n"
              "只转本地模型：云端对话在应用内直连服务商，生图 / 生视频也不经这里。\n"
              "要有本地文本模型才开得起 —— 没有时这一项默认关闭。"},
+    {"key": "remote", "label": "远程访问", "page": "remote", "section": "remote",
+     "title": "远程访问（手机浏览器）",
+     "help": "把本机变成同一 Wi-Fi 里手机浏览器能访问的小站：手机打开这里显示的"
+             "地址、输入 6 位配对码，电脑端确认后即可使用。\n"
+             "只有配对过的设备能连（电脑端随时可吊销）；传输走自签 HTTPS 证书，"
+             "浏览器首次访问会提示不安全，点「继续访问」即可，身份验证靠配对码。\n"
+             "一期只开放本地生图；开启前请先在「通用」页了解「允许锁屏运行」。"},
     {"key": "general", "label": "通用", "page": "general", "section": "general",
      "title": "通用",
      "help": "提示词优化（输入框右上角的星星）用哪个文本模型三路重写。\n"
@@ -207,6 +215,8 @@ SIMPLE_NAV_SPEC = [
          "nav_hide": "c_img",
          "title": "云端生视频", "help": ""},
     ]},
+    {"key": "remote", "label": "远程访问", "page": "remote", "section": "remote",
+     "title": "远程访问（手机浏览器）", "help": ""},
     {"key": "general", "label": "通用", "page": "general", "section": "general",
      "title": "通用", "help": ""},
     {"key": "appearance", "label": "外观", "page": "appearance", "section": "appearance",
@@ -450,7 +460,7 @@ NEW_PROVIDER_LABEL = "＋ 新建服务商…"      # 下拉里"还没建起来"�
 # 注意 0 的语义：ngl / threads / top_k / vram_gb / ram_gb 的 0 都是"自动 / 全 CPU"，
 # 必须留在区间内（别把 0 当非法值拦掉）。
 _NUM_RANGE = {
-    "port": (1, 65535), "proxy_port": (1, 65535),
+    "port": (1, 65535), "proxy_port": (1, 65535), "remote_port": (1024, 65535),
     "ctx": (512, 1048576), "ngl": (0, 999), "threads": (0, 512),
     "max_tokens": (1, 1048576), "reasoning_budget": (0, 1048576),
     "seed": (-1, 2147483647), "top_k": (0, 100000),
@@ -2965,10 +2975,48 @@ class SettingsMixin:
                           style="Dim.TLabel").grid(
                     row=i, column=0, columnspan=3, sticky="w", pady=(0, 4))
 
+            # ---- 允许锁屏运行（2026-10-11 远程连接前置，99 K1；W 定主次两键联动）----
+            # 主键 = 阻止系统睡眠（core/keepawake）；次生键「仅接电源时保持唤醒」
+            # 只在主键开着时显示（W 2026-10-11 定）。保存时顺手 refresh 让效果
+            # 立即生效（不等 keepawake 线程的下个 tick）。
+            v["keepawake_enabled"] = tk.BooleanVar(
+                value=bool(self.cfg.get("keepawake_enabled", False)))
+            v["keepawake_ac_only"] = tk.BooleanVar(
+                value=bool(self.cfg.get("keepawake_ac_only", False)))
+            i = rgen["i"]
+            rgen["i"] += 1
+            kw_cb = theme.check(tgen, text="允许锁屏运行",
+                                variable=v["keepawake_enabled"])
+            kw_cb.grid(row=i, column=0, columnspan=2, sticky="w", pady=(10, 4))
+            if not simple:
+                widgets.HelpDot(tgen,
+                                "勾选后本软件会阻止系统自动睡眠，息屏后手机等设备"
+                                "仍能连上来。\n使用电池会更耗电；笔记本合盖后的行为"
+                                "取决于系统设置。").grid(row=i, column=2, sticky="w",
+                                                        pady=(10, 4))
+            i = rgen["i"]
+            rgen["i"] += 1
+            kw_ac = theme.check(tgen, text="仅接电源时保持唤醒",
+                                variable=v["keepawake_ac_only"])
+            kw_ac.grid(row=i, column=0, columnspan=3, sticky="w",
+                       padx=(18, 0), pady=(0, 6))
+
+            def _kw_sync():
+                # 次生键显隐随主键：grid_remove 只挪格子不销毁，值不丢
+                if v["keepawake_enabled"].get():
+                    kw_ac.grid()
+                else:
+                    kw_ac.grid_remove()
+            kw_cb.configure(command=_kw_sync)
+            _kw_sync()
+
             def _save_general():
                 # 读控件当前文本而不是 gvar：ttk.Combobox.set() 不保证回写
                 # textvariable（Tk 的历史语义），readonly 态下 comb.get() 才是真值
                 self.cfg["prompt_opt_model"] = by_label.get(str(comb.get()), "")
+                self.cfg["keepawake_enabled"] = bool(v["keepawake_enabled"].get())
+                self.cfg["keepawake_ac_only"] = bool(v["keepawake_ac_only"].get())
+                self._keepawake.refresh()   # 保存即生效，不等下个续约周期
                 # 钩子自己落盘（本页的值不在 _apply_settings 的 v 里；外观页同款约定）
                 try:
                     save_config(self.cfg)
@@ -2976,6 +3024,377 @@ class SettingsMixin:
                     pass
                 return True, ""
             save_hooks[tgen] = _save_general
+
+        @section("remote", "remote")
+        def _tremote(trem, rrem):
+            """远程访问页（2026-10-11，99 K1；普通 + 高级模式都有；同日 W 三条
+            精简：主页面只留状态 + **** + 两个次级窗入口）。
+
+            启用开关（拨上即生效）+ 端口（改动走底部「保存」）+ HTTPS 开关
+            （**仅高级模式**，普通模式恒 https 不出选项）+ 状态行（只说
+            "已启动"，**不显示网址**）+「网址 ****」→ 次级窗（一个 IPv6 +
+            一个 IPv4，各带「复制」+ 证书指纹）+ 配对码（6 位一次性、5 分钟
+            有效，W 拍板的设备配对制）+「已配对设备」次级窗（可吊销）。
+            布尔键与重启逻辑在本页钩子里（`_apply_settings` 不管布尔键 ——
+            与 keepawake 两键同款约定）。
+            """
+            v["remote_enabled"] = tk.BooleanVar(
+                value=bool(self.cfg.get("remote_enabled", False)))
+            v["remote_https"] = tk.BooleanVar(
+                value=True if simple else bool(self.cfg.get("remote_https", True)))
+
+            def _apply_remote():
+                """读本页开关 → 写 cfg → 重启监听 → 回显。
+
+                W 2026-10-11 定的交互：**开关即保存即生效**（不是"打勾 → 底部
+                保存"两步）——开关一拨，状态行立刻更新。端口改动仍走底部
+                「保存」统一入口。启动失败（端口被占用等）不抛、不弹窗：
+                状态行给人话，让"保存"照常走完（坑 194 家族的 cfg 写侧已在此
+                前完成，这里只影响监听起不起得来）。普通模式 **恒 https**
+                （W 2026-10-11：普通用户不露这个选项，默认开启）。
+                """
+                en = bool(v["remote_enabled"].get())
+                https = True if simple else bool(v["remote_https"].get())
+                self.cfg["remote_enabled"] = en
+                self.cfg["remote_https"] = https
+                try:
+                    save_config(self.cfg)
+                except Exception:
+                    pass
+                if self.remote.running():
+                    self.remote.stop()
+                if en:
+                    # 起监听那一步**首次要同步跑 PowerShell 造自签证书**（超时给到
+                    # 60s）——挂主线程就是"拨一下开关、整个界面冻住"。挪后台线程，
+                    # 状态行先说一句，起完再回显（跨线程一律经 _ui_q，铁律 7）。
+                    stat_var.set("正在启动（首次要生成一份自签证书，可能要几秒）…")
+                    code_var.set("—")
+
+                    def _started(err):
+                        try:
+                            if not trem.winfo_exists():
+                                return          # 页面已经关了（切主题会整窗重建）
+                        except Exception:
+                            return
+                        if err:
+                            stat_var.set(
+                                "启动失败：%s。常见原因是端口被别的程序占用——"
+                                "换一个端口再拨一次开关。" % err)
+                            code_var.set("—")
+                            return
+                        _remote_refresh()
+
+                    self.start_remote_async(on_done=_started, note_ok=False)
+                    return
+                _remote_refresh()
+
+            def _save_remote():
+                _apply_remote()
+                return True, ""
+            save_hooks[trem] = _save_remote
+            i = rrem["i"]
+            rrem["i"] += 1
+            theme.check(trem, text="启用远程访问（手机浏览器远程使用本软件）",
+                        variable=v["remote_enabled"],
+                        command=_apply_remote).grid(
+                row=i, column=0, columnspan=3, sticky="w", pady=(4, 4))
+            if not simple:
+                widgets.HelpDot(trem,
+                                "开启后本机对局域网开放一个网页入口。安全三件套"
+                                "一并生效：只有配对过的设备能连、传输走自签 HTTPS、"
+                                "所有访问都记审计日志。默认关。").grid(
+                    row=i, column=2, sticky="w", pady=(4, 4))
+            ent(trem, rrem, "remote_port", "端口",
+                "远程访问的监听端口；被占用时换一个（1024~65535）。改完保存即重启监听。",
+                width=7)
+            if not simple:
+                i = rrem["i"]
+                rrem["i"] += 1
+                theme.check(trem, text="使用 HTTPS（自签证书，推荐）",
+                            variable=v["remote_https"],
+                            command=_apply_remote).grid(
+                    row=i, column=0, columnspan=3, sticky="w", pady=(4, 4))
+                widgets.HelpDot(trem,
+                                "证书由本机 PowerShell 自动生成（免管理员）。"
+                                "手机浏览器首次访问会提示不安全 —— 点「继续访问」"
+                                "即可；身份认证靠配对码，不靠证书提示。").grid(
+                    row=i, column=2, sticky="w", pady=(4, 4))
+
+            # ---- 状态行 + 网址(****) + 配对码 + 设备(次级窗) ----
+            stat_var = tk.StringVar(value="")
+            code_var = tk.StringVar(value="")
+            i = rrem["i"]
+            rrem["i"] += 1
+            ttk.Label(trem, textvariable=stat_var, style="Dim.TLabel",
+                      wraplength=430, justify="left").grid(
+                row=i, column=0, columnspan=3, sticky="w", pady=(6, 2))
+            i = rrem["i"]
+            rrem["i"] += 1
+            ttk.Label(trem, text="网址").grid(row=i, column=0, sticky="w",
+                                              padx=(0, 8), pady=5)
+            theme.button(trem, text="****", width=7,
+                         command=lambda: _open_urls()).grid(
+                row=i, column=1, sticky="w", pady=5)
+            if not simple:
+                widgets.HelpDot(trem,
+                                "具体网址默认不外露（手机在旁边才能看到）。点开"
+                                "是一个 IPv6 和一个 IPv4 地址，各带「复制」。"
+                                "IPv6 适合手机用流量，IPv4 适合同一 Wi-Fi / "
+                                "热点。").grid(
+                    row=i, column=2, sticky="w", pady=5)
+            i = rrem["i"]
+            rrem["i"] += 1
+            ttk.Label(trem, text="配对码").grid(row=i, column=0, sticky="w",
+                                                padx=(0, 8), pady=5)
+            ttk.Label(trem, textvariable=code_var, font=(
+                "Consolas", 14, "bold")).grid(row=i, column=1, sticky="w",
+                                              pady=5)
+            if not simple:
+                widgets.HelpDot(trem,
+                                "手机在配对页输入这个码，电脑端弹窗确认后即完成配对。"
+                                "码是一次性的，5 分钟没用过就失效；点「刷新配对码」"
+                                "重出。").grid(row=i, column=2, sticky="w", pady=5)
+            i = rrem["i"]
+            rrem["i"] += 1
+            btn_row = ttk.Frame(trem)
+            btn_row.grid(row=i, column=0, columnspan=3, sticky="w", pady=(0, 6))
+
+            _panels = {}        # 标题 → 已开着的次级窗（单实例判据，坑 208⑤）
+
+            def _panel(title):
+                """本页三个次级窗的共同骨架（坑 161 / 186：withdraw 后
+                center_on、style_toplevel 必调）。
+
+                **单实例**：同一个窗已经开着就把它抬到前面并返回 `(None, None)` ——
+                连点两下叠两个一模一样的窗，用户分不清哪个是当前状态（成本估算窗
+                早已这么治，R-85；这一页是 2026-10-11 新加的，当时漏了）。
+                调用方拿到 None 直接 return。
+                """
+                old = _panels.get(title)
+                if old is not None:
+                    try:
+                        if old.winfo_exists():
+                            old.lift()
+                            old.focus_force()
+                            return None, None
+                    except Exception:
+                        pass
+                    _panels.pop(title, None)
+                w = tk.Toplevel(win)
+                w.withdraw()
+                w.title(title)
+                _panels[title] = w
+
+                def _gone(e, t=title, ww=w):
+                    if getattr(e, "widget", None) is ww:
+                        _panels.pop(t, None)
+
+                w.bind("<Destroy>", _gone, add="+")
+                theme.style_toplevel(w, "panel")
+                frm = ttk.Frame(w, padding=14)
+                frm.pack(fill="both", expand=True)
+                return w, frm
+
+            def _open_urls():
+                """网址次级窗：一个 IPv6 + 一个 IPv4（W 2026-10-11 定：不铺
+                全部），各带「复制」；证书指纹也收在这里。"""
+                w, frm = _panel("远程访问 · 网址")
+                if w is None:
+                    return                      # 已经开着：抬到前面就够了
+                if not self.remote.running():
+                    ttk.Label(frm, text="远程服务未启动。", style="Dim.TLabel"
+                              ).pack(anchor="w")
+                    widgets.center_on(w, host=win)
+                    return
+                scheme = self.remote.scheme()
+                port = self.cfg.get("remote_port", 8443)
+                ips = remote_mod.local_ips() or []
+                v6 = next((x for x in ips
+                           if remote_mod.ip_label(x) == "v6"), "")
+                v4 = next((x for x in ips
+                           if remote_mod.ip_label(x) in ("v4", "tailscale")), "")
+                rows = []
+                if v6:
+                    rows.append(("IPv6（手机用流量时用这个）",
+                                 "%s://[%s]:%s" % (scheme, v6, port)))
+                if v4:
+                    lab = ("（Tailscale）" if remote_mod.ip_label(v4) ==
+                           "tailscale" else "（同一 Wi-Fi / 热点时用这个）")
+                    rows.append(("IPv4" + lab, "%s://%s:%s" % (scheme, v4, port)))
+                if not rows:
+                    ttk.Label(frm, text="没有可用的本机地址。",
+                              style="Dim.TLabel").pack(anchor="w", pady=4)
+                for name, url in rows:
+                    ttk.Label(frm, text=name, style="Dim.TLabel"
+                              ).pack(anchor="w", pady=(6, 0))
+                    rowf = ttk.Frame(frm)
+                    rowf.pack(anchor="w")
+                    ttk.Label(rowf, text=url, font=("Consolas", 11)).pack(
+                        side="left")
+                    b = theme.button(rowf, text="复制", width=6)
+
+                    def _copy(u=url, bt=None):
+                        win.clipboard_clear()
+                        win.clipboard_append(u)
+                        if bt and bt.winfo_exists():
+                            bt.configure(text="已复制")
+                        win.after(1200, lambda: (
+                            bt.winfo_exists() and bt.configure(text="复制")))
+
+                    b.configure(command=lambda u=url, bt=b: _copy(u, bt))
+                    b.pack(side="left", padx=8)
+                if self.remote.cert_fp:
+                    ttk.Label(frm, text="证书指纹（SHA-256）：%s"
+                              % self.remote.cert_fp, style="Dim.TLabel",
+                              wraplength=380, justify="left"
+                              ).pack(anchor="w", pady=(10, 0))
+                widgets.center_on(w, host=win)
+
+            def _open_devices():
+                """已配对设备次级窗（吊销后列表就地重画）。"""
+                w, frm = _panel("远程访问 · 已配对设备")
+                if w is None:
+                    return                      # 已经开着：抬到前面就够了
+
+                def redraw():
+                    for c in frm.winfo_children():
+                        c.destroy()
+                    devs = self.remote.devices()
+                    if not devs:
+                        ttk.Label(frm, text="还没有已配对的设备。",
+                                  style="Dim.TLabel").pack(anchor="w")
+                    else:
+                        ttk.Label(frm, text="吊销后需要重新配对：",
+                                  style="Dim.TLabel").pack(anchor="w")
+                        for d in devs:
+                            rowf = ttk.Frame(frm)
+                            rowf.pack(anchor="w", pady=2)
+                            ttk.Label(rowf, text="%s（%s，最近活跃 %s）" % (
+                                d.get("name", "?"), d.get("id", "?"),
+                                d.get("last_seen", "?"))).pack(side="left")
+                            theme.button(rowf, text="吊销", width=6,
+                                         command=lambda did=d["id"]:
+                                         (self.remote.revoke(did), redraw())
+                                         ).pack(side="left", padx=8)
+                    code_var.set(_pair_text())
+
+                redraw()
+                widgets.center_on(w, host=win)
+
+            def _remote_refresh():
+                """状态行 / 配对码的回显（进页 + 保存后都调）。网址与设备
+                收在次级窗（W 2026-10-11 精简），主页面只说"已启动"。"""
+                if self.remote.running():
+                    stat = "已启动"
+                    if self.remote.scheme() != "https":
+                        stat += "（当前是明文 HTTP，仅建议局域网内使用）"
+                    code_var.set(_pair_text())
+                    stat_var.set(stat)
+                else:
+                    code_var.set("—")
+                    stat_var.set("未启动。打开上方开关即可（即开即生效）。")
+
+            def _pair_text():
+                # 上一码被试错作废（按码限次，15 §1 2026-10-12 行）；原话 W 已逐字
+                # 点头，常量在 remote 侧（与手机端那句同处一行，别改一处漏一处）。
+                if self.remote.pair_burned():
+                    return remote_mod.PAIR_BURNED_PAGE
+                left = self.remote.pair_code_left()
+                return "已出一个，剩 %d 秒（点「刷新配对码」重出）" % left if left else "—"
+
+            def _new_code():
+                if not self.remote.running():
+                    stat_var.set("先打开「启用远程访问」开关（拨上即生效），"
+                                 "再生成配对码。")
+                    return
+                code_var.set(self.remote.new_pair_code())
+            theme.button(btn_row, text="刷新配对码", width=12,
+                         command=_new_code).pack(side="left")
+            theme.button(btn_row, text="已配对设备…", width=14,
+                         command=_open_devices).pack(side="left", padx=8)
+            # 「停止远程任务」（16 §4 第 6 条，二期 W 拍板并入）：一期 API 已有
+            # /api/cancel，GUI 侧一直没有按钮。device_id="local" = 本机全可见
+            # （与产物取回同一口径）；置 stop_flag 后由 reader 线程收进程。
+            def _stop_remote_job():
+                jobs = getattr(self.remote, "jobs", None)
+                if jobs is not None and jobs.busy() and jobs.cancel(None, "local"):
+                    stat_var.set("已停止远程生图任务。")
+                else:
+                    stat_var.set("当前没有远程任务在跑。")
+            theme.button(btn_row, text="停止远程任务", width=13,
+                         command=_stop_remote_job).pack(side="left", padx=8)
+
+            def _open_audit():
+                """审计次级窗（仅高级模式；普通模式可裁 = 16 §4 第 6 条口径）。
+                只读展示 remote_audit.jsonl 的元数据行，清空前问一句。"""
+                w, frm = _panel("远程访问 · 审计")
+                if w is None:
+                    return                      # 已经开着：抬到前面就够了
+                box = tk.Text(frm, height=16, width=64, wrap="word",
+                              font=("Consolas", 9), bd=0, highlightthickness=1,
+                              highlightbackground=theme.c("border"),
+                              highlightcolor=theme.c("accent"),
+                              **theme.text_kw())
+                box.pack(fill="both", expand=True)
+
+                def redraw():
+                    rows = remote_mod.read_audit()
+                    box.configure(state="normal")
+                    box.delete("1.0", "end")
+                    if not rows:
+                        box.insert("end", "（还没有审计记录）")
+                    else:
+                        for r in rows:      # read_audit 已按时间倒序
+                            box.insert("end", "%s  %-14s %-15s %s  %s\n" % (
+                                r.get("t", "?"), r.get("ip", "?"),
+                                r.get("action", "?"),
+                                "成功" if r.get("ok") else "失败",
+                                str(r.get("detail", ""))[:60]))
+                    box.configure(state="disabled")
+
+                def _clear():
+                    if messagebox.askyesno("清空审计", "清空审计日志？", parent=w):
+                        remote_mod.clear_audit()
+                        redraw()
+                bar = ttk.Frame(frm)
+                bar.pack(anchor="w", pady=(8, 0))
+                theme.button(bar, text="清空", width=8,
+                             command=_clear).pack(side="left")
+                ttk.Label(bar, text="（只记元数据：时间 / 来源 / 动作 / 成败，"
+                                    "不含提示词与附件内容）",
+                          style="Dim.TLabel").pack(side="left", padx=8)
+                redraw()
+                widgets.center_on(w, host=win)
+            if not simple:
+                theme.button(btn_row, text="查看审计…", width=11,
+                             command=_open_audit).pack(side="left", padx=8)
+
+            # 历史产物开关（16 §4 第 3 条，二期 W 拍板并入；默认关）。布尔键
+            # 在本页钩子里即拨即存（与 remote_enabled 同款约定，_apply_settings
+            # 不管布尔键）；取回判据每次请求现读，不用重启监听。
+            v["remote_history"] = tk.BooleanVar(
+                value=bool(self.cfg.get("remote_history", False)))
+
+            def _apply_history():
+                self.cfg["remote_history"] = bool(v["remote_history"].get())
+                try:
+                    save_config(self.cfg)
+                except Exception:
+                    pass
+            i = rrem["i"]
+            rrem["i"] += 1
+            theme.check(trem, text="允许取回历史产物（不限本次远程会话产生的）",
+                        variable=v["remote_history"],
+                        command=_apply_history).grid(
+                row=i, column=0, columnspan=3, sticky="w", pady=(2, 4))
+            if not simple:
+                widgets.HelpDot(trem,
+                                "默认关：每台设备只能取回自己提交的任务产物。"
+                                "开启后，任何已配对的设备都能取回台账里的历史"
+                                "远程产物（台账最多 200 条）。").grid(
+                    row=i, column=2, sticky="w", pady=(2, 4))
+
+            _remote_refresh()
 
         @section("appearance", "appearance")
         def _tapr(tapr, rapr):
@@ -3179,7 +3598,7 @@ class SettingsMixin:
                     ("本地模型工作台 · 版本 %s" % APP_VERSION,
                      ("Microsoft YaHei UI", 9), theme.c("dim"), (0, 2)),
                     ("llama.cpp 对话 · sd.cpp 生图生视频 · 云端服务商",
-                     ("Microsoft YaHei UI", 9), "#808080", (0, 0))):
+                     ("Microsoft YaHei UI", 9), theme.c("hint"), (0, 0))):
                 lab = ttk.Label(names, text=txt_, foreground=fg, font=font,
                                 wraplength=420, justify="left")
                 lab.pack(anchor="w", pady=pady)
@@ -3212,7 +3631,7 @@ class SettingsMixin:
                                 wraplength=560, justify="left",
                                 font=("Microsoft YaHei UI", 9))
 
-            def _say(text, color="#5a6a7a"):
+            def _say(text, color=theme.c("note")):
                 ustate.set(text)
                 ust_lab.configure(foreground=color)
 
@@ -3250,7 +3669,7 @@ class SettingsMixin:
                     _say("发现新版本：%s（%s）　本机：%s　发布于 %s"
                          % (info.get("name") or info["tag"],
                             info["tag"], cur, info.get("published") or "日期未知")
-                         + note, "#1a7f37")
+                         + note, theme.c("oklit"))
                     if dialog:
                         # 手动点的：弹「发现新版本」次级窗口（能一键更新），永远弹
                         # —— 不再看 upd_dismissed 的旧账（2026-10-05）
@@ -3263,18 +3682,18 @@ class SettingsMixin:
                 elif state == updater.STATE_LATEST:
                     _say("已是最新：%s（%s）。"
                          % (updater.display_version(info.get("tag") or cur), ch_text_)
-                         + note, "#1a7f37")
+                         + note, theme.c("oklit"))
                 elif state == updater.STATE_AHEAD:
                     # 报实话：不并进「已是最新」（多半是自己编的版本还没打 tag）；
                     # 彩蛋（W 2026-10-05）：本机比线上最新的还新时，文案末尾追一句
                     # 「莫非你是测试用户！」—— 只看本次返回结果，不额外去查另一个通道。
                     _say("本机 %s 比线上最新的 %s 还新（%s）。%s"
                          % (cur, updater.display_version(info.get("tag") or "？"),
-                            ch_text_, updater.AHEAD_EGG) + note, "#b06000")
+                            ch_text_, updater.AHEAD_EGG) + note, theme.c("warndim"))
                 else:
                     # msg 自带"检查更新失败："前缀，这里不再叠一层（2026-10-03）
                     msg = info.get("msg") or "检查更新失败：原因未知。"
-                    _say(msg + note, "#b00020")
+                    _say(msg + note, theme.c("errdeep"))
                     if dialog:
                         messagebox.showwarning("检查更新", msg)
 
@@ -3618,7 +4037,7 @@ class SettingsMixin:
             theme.button(brf, text="重置开发者选项",
                        command=reset_dev).pack(side="top", anchor="w")
 
-            for var, fg in ((tok_lab, "#5a6a7a"), (msg_lab, "#1a7f37")):
+            for var, fg in ((tok_lab, theme.c("note")), (msg_lab, theme.c("oklit"))):
                 i = r_dev["i"]
                 r_dev["i"] += 1
                 ttk.Label(t_dev, textvariable=var, foreground=fg, wraplength=720,
@@ -3681,11 +4100,11 @@ class SettingsMixin:
                 # （和坑 42 里 `os.path.join("", "output")` 在 CWD 建目录是同一个根子）。
                 # 四态里的"未就位 / 已就位"落在这里，"未就位"后面跟原因（W 2026-10-05）。
                 if not str(cfg_of() or "").strip():
-                    return "未就位：还没指路（「打开目标目录」会告诉你该放去哪儿）", "#b00020"
+                    return "未就位：还没指路（「打开目标目录」会告诉你该放去哪儿）", theme.c("errdeep")
                 exe = str(exe_of() or "")
                 if os.path.isfile(exe):
-                    return "已就位：" + exe, "#1a7f37"
-                return "未就位：指了路但找不到该文件：" + exe, "#b00020"
+                    return "已就位：" + exe, theme.c("oklit")
+                return "未就位：指了路但找不到该文件：" + exe, theme.c("errdeep")
 
             # ---- 这几个 helper **定义在循环之外**，全部显式收参。
             #
@@ -3694,7 +4113,7 @@ class SettingsMixin:
             # 解析到的是**最后一次循环**的定义 —— 也就是两个引擎都去动 sd 那份。
             # 2026-10-04 真踩过：点 llama 的「检查更新」（当时叫「刷新版本」），写进状态行
             # 的是 sd 的版本行（坑 124 的同族，只是方向反过来）。
-            def _say(sv, stl, text="", color="#5a5a5a"):
+            def _say(sv, stl, text="", color=theme.c("dim")):
                 sv.set(text)
                 stl.configure(foreground=color)
 
@@ -3827,7 +4246,7 @@ class SettingsMixin:
                     """按当前 mode 刷按钮文字与状态行（四态文案的唯一出口）。"""
                     mode = b.get("mode") or "idle"
                     if mode == "checking":
-                        _say(sv, stl, "正在查…", "#b58900")
+                        _say(sv, stl, "正在查…", theme.c("warnlit"))
                         btn.configure(text="检查更新", state="disabled")
                         return
                     if mode == "ready":
@@ -3887,7 +4306,7 @@ class SettingsMixin:
                         if not builds:
                             bb["mode"] = "idle"
                             rf()
-                            _say(sv, stl, why or "没查到带本平台安装包的版本。", "#b00020")
+                            _say(sv, stl, why or "没查到带本平台安装包的版本。", theme.c("errdeep"))
                             return
                         bb["builds"] = builds
                         ids = [f["id"] for f in engine_install.flavors_from(builds[0])]
@@ -3966,7 +4385,7 @@ class SettingsMixin:
                         # 同一句也写进状态行：无头自检看不见 messagebox，
                         # 而"没查过就点更新"这条规矩必须能被断言（也更像这页的口径）。
                         _say(sv, stl, "还没查过可用版本 —— 先点「检查更新」，再选一个档位。",
-                             "#b00020")
+                             theme.c("errdeep"))
                         return
                     why = _guard(b, k, co)
                     if why and not messagebox.askyesno("更新引擎", why + "\n\n仍要继续吗？"):
@@ -3989,7 +4408,7 @@ class SettingsMixin:
                         if not ok:
                             b["mode"] = "idle"
                             rf()
-                            _say(sv, stl, why_, "#b00020")
+                            _say(sv, stl, why_, theme.c("errdeep"))
                             messagebox.showwarning(
                                 "更新引擎",
                                 "%s\n\n也可以点「复制下载链接」自己下。" % why_)

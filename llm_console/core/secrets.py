@@ -91,3 +91,72 @@ def mask(key):
     if len(k) <= 8:
         return "*" * len(k)
     return "%s…%s（共 %d 字符）" % (k[:4], k[-4:], len(k))
+
+
+# ---------------------------------------------------------------------------
+# 远程访问的已配对设备（2026-10-11，99 K1）。与 api_keys / github_token 同文件分键：
+# 也是一把凭据，只留在本机、不进 gui_config.json（备份会带走）。**token 本体只在
+# 配对成功那一刻下发给设备，本机只存 SHA-256 哈希** —— secrets.json 意外外流也
+# 直接冒充不了任何设备（哈希不可逆推，坑 209 的"密钥文件最小暴露"纪律）。
+# 条目形状：{id, name, token_hash, added, last_seen}
+# ---------------------------------------------------------------------------
+
+def remote_devices():
+    """已配对设备清单（返回副本，改它不落盘）。"""
+    with _LOCK:
+        data = load_secrets().get("remote_devices")
+        return [dict(d) for d in data if isinstance(d, dict)] \
+            if isinstance(data, list) else []
+
+
+def find_remote_device_by_hash(token_hash):
+    """按 token 哈希找设备（鉴权用）；没配对返回 None。"""
+    h = str(token_hash or "")
+    if not h:
+        return None
+    for d in remote_devices():
+        if d.get("token_hash") == h:
+            return d
+    return None
+
+
+def _save_devices(devices):
+    data = load_secrets()
+    data.setdefault("version", 1)
+    data["remote_devices"] = devices
+    return save_secrets(data)
+
+
+def add_remote_device(name, token_hash, now_iso):
+    """登记一台新设备（配对确认成功时调）；返回设备 id。读-改-写全程持锁。"""
+    with _LOCK:
+        did = "dev_%d" % (len(remote_devices()) + 1)
+        while any(d.get("id") == did for d in remote_devices()):
+            did += "x"
+        _save_devices(remote_devices() + [{
+            "id": did, "name": str(name or "未命名设备"),
+            "token_hash": str(token_hash), "added": now_iso,
+            "last_seen": now_iso}])
+        return did
+
+
+def remove_remote_device(dev_id):
+    """吊销一台设备（返回是否真的删了）。"""
+    with _LOCK:
+        devices = remote_devices()
+        rest = [d for d in devices if d.get("id") != str(dev_id)]
+        if len(rest) == len(devices):
+            return False
+        return _save_devices(rest)
+
+
+def touch_remote_device(dev_id, now_iso):
+    """更新 last_seen（鉴权成功时顺手记；失败静默 —— 回显丢了不值得报）。"""
+    with _LOCK:
+        devices = remote_devices()
+        changed = False
+        for d in devices:
+            if d.get("id") == str(dev_id):
+                d["last_seen"] = now_iso
+                changed = True
+        return _save_devices(devices) if changed else True

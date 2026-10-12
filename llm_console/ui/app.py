@@ -14,13 +14,13 @@ from tkinter import ttk, messagebox
 from ..core.config import (load_config, DEFAULT_CONFIG, APP_DIR, APP_VERSION,
                            CONFIG_PATH)
 from ..core import (capability, cloudjobs, codesign, config, crashlog, diagnose,
-                    engine_install, media, providers, secrets, selfupdate, throttle,
-                    updater)
+                    engine_install, keepawake, media, providers, secrets,
+                    selfupdate, throttle, updater)
 from ..core.models import (auto_locate_models_dir, dir_has_any_gguf, display_name,
                           extra_sources, first_usable, has_local_chat,
                           selected_usable)
 from ..core.server import _query_serving_model, server_process_alive, server_state, stop_server
-from ..connection import cloud_media
+from ..connection import cloud_media, remote as remote_mod
 from ..connection.proxy import ProxyServer
 from .dialogs import ExitDialog
 from . import guide, theme, widgets
@@ -209,6 +209,33 @@ class App(ChatMixin, ImageGenMixin, VideoGenMixin, ServiceMixin, ModelsMixin, Se
             # 不起代理必须说一声：否则 agent 那边是"连不上"，用户在这儿什么线索都没有
             self._sq.put(("note", "API 代理没有启动：这台机器上还没有可转发的本地文本模型。"
                                   "备好引擎与模型后在 设置 → 本地模型 API 里启用。"))
+
+        # 远程访问（99 K1，connection/remote.py）：手机浏览器 → 本机。
+        # 启动闸 = remote_enabled（默认关）；配对制 + HTTPS + 审计三件套在服务端
+        # 硬性生效。配对确认回调经 _ui_q 编排（handler 线程绝不直接碰 Tk，坑 54）。
+        self.remote = remote_mod.RemoteServer(
+            cfg, note_fn=lambda m: self._sq.put(("note", m)),
+            confirm_pair=self._confirm_pair_remote)
+        # 远程生图任务管理器（99 K1 一期）：互斥双向 —— submit 问 _any_busy，
+        # _any_busy 也查 jobs.busy()。单槽：同一时间全机只跑一份 sd-cli。
+        self.remote.jobs = remote_mod.RemoteJobs(
+            cfg, local_busy=self._any_busy,
+            note_fn=lambda m: self._sq.put(("note", m)))
+        self._remote_starting = False     # 远程监听面的后台启动在飞（防重复拨开关）
+        if bool(cfg.get("remote_enabled", False)):
+            # 启动失败（证书坏 / 端口被占）**绝不拦住程序起来**（坑 129 家族：
+            # __init__ 里炸 = 窗口都没有，用户只剩一个空错误日志）。落在输出栏
+            # 说明 + 远程保持停用，设置页再拨一次开关就能重试。
+            # **后台起**（start_remote_async）：首次要同步跑 PowerShell 造证书，
+            # 挂主线程上就是"窗口还没画出来先冻几十秒"。
+            self.start_remote_async()
+
+        # 锁屏运行（远程连接前置，2026-10-11，99 K1）：常驻线程按配置"续约"
+        # SetThreadExecutionState。意愿判据纯读 cfg（keepawake 线程不许碰 Tk 变量，
+        # 坑 54）；「仅接电源」在电池机上自动降级为不抑制。设置页保存后走
+        # `_keepawake.refresh()` 立即生效，不等下个 tick。
+        self._keepawake = keepawake.KeepAwake(self._keepawake_want)
+        self._keepawake.start()
 
         threading.Thread(target=self._status_loop, daemon=True).start()
         if self._other_instance:
@@ -565,6 +592,11 @@ class App(ChatMixin, ImageGenMixin, VideoGenMixin, ServiceMixin, ModelsMixin, Se
             height=6,
             font=("Microsoft YaHei UI", 10),
             **theme.text_kw(fallback_bg="#ffffff"))
+        # 建件那套几何与配色兜底记在控件上：切主题后 retint 原样重放
+        # （theme_use 的重涂会改 padx/pady/highlightthickness 与选区色）。
+        self.chat._text_geom = {"relief": "flat", "bd": 0, "highlightthickness": 0,
+                                "padx": 1, "pady": 1}
+        self.chat._text_fallback_bg = "#ffffff"
         self.chat_scroll = theme.scroll(mid, command=self.chat.yview)
         self.chat.configure(yscrollcommand=self.chat_scroll.set)
         self.chat_scroll.pack(side="right", fill="y")
@@ -702,6 +734,9 @@ class App(ChatMixin, ImageGenMixin, VideoGenMixin, ServiceMixin, ModelsMixin, Se
         self.attach_note = ttk.Label(self.attach_frame, textvariable=self._attach_note_var,
                                      foreground=theme.c("muted"),
                                      font=("Microsoft YaHei UI", 9))
+        # 盖戳（坑 181）：ttk.Label 的显式 foreground 是建件时烘焙的，theme_use 不重设
+        # —— 不盖戳切一次主题就留着旧模式的字色（浅色的 muted 压在深色底上对比≈2.6:1）
+        theme.tint(self.attach_note, fg="muted")
         self.attach_note.grid(row=1, column=0, columnspan=2, sticky="w")
         self.attach_note.grid_remove()
 
@@ -735,6 +770,9 @@ class App(ChatMixin, ImageGenMixin, VideoGenMixin, ServiceMixin, ModelsMixin, Se
                              relief="flat", highlightthickness=1,
                              highlightbackground=theme.c("border"),
                              **theme.text_kw())
+        self.input._text_geom = {"relief": "flat", "highlightthickness": 1,
+                                 "padx": 1, "pady": 1}
+        self.input._text_fallback_bg = None
         self.input.pack(side="left", fill="both", expand=True)
         self.input.bind("<Return>", self._on_return)
         self.input.bind("<Shift-Return>", self._on_shift_return)
@@ -762,7 +800,10 @@ class App(ChatMixin, ImageGenMixin, VideoGenMixin, ServiceMixin, ModelsMixin, Se
         - 发送 / 清空：任一任务在跑或服务操作中都禁用。
         """
         running = bool(busy) or self._img_busy or self._vid_busy
-        blocked = running or self._svc_busy
+        # 远程那头在生图时也算 blocked（与 _any_busy / send_message 的闸门同一口径）：
+        # 不禁用的话按钮看着能点，点下去只会被闸门拦回来 —— 两份 sd-cli 抢显存的
+        # 那道闸必须"看得见"（99 K1 的双向互斥）。
+        blocked = running or self._svc_busy or self._remote_busy()
         # 提示词优化的候选面板开着时，输入框藏在面板后面：任何第三方收尾
         # （svc_done / 生图 exit / 换载完成…）都不得解禁「发送」——否则会把用户
         # 看不见的原文发出去（云端 = 真扣费，排查报告 R-31）。解禁只发生在面板
@@ -776,14 +817,69 @@ class App(ChatMixin, ImageGenMixin, VideoGenMixin, ServiceMixin, ModelsMixin, Se
                                     text="停止生成")
         self.clear_btn.configure(state="disabled" if blocked else "normal")
 
+    def _remote_busy(self):
+        """远程那头有没有生图在跑（远程访问未启用 / 尚未建好 = False）。"""
+        r = getattr(self, "remote", None)
+        try:
+            return bool(r and r.jobs and r.jobs.busy())
+        except Exception:
+            return False
+
+    def start_remote_async(self, on_done=None, note_ok=True):
+        """后台线程里起远程监听面，完了经 `_ui_q` 回主线程 → 是否真的排上了。
+
+        为什么不在调用线程直接 `remote.start()`：首次启用要生成一份自签证书，
+        那一步是**同步跑 PowerShell**（`New-SelfSignedCertificate`，超时给到 60s）
+        —— 挂主线程上就是"拨一下开关、整个界面冻住几秒到一分钟"；启动路径里那次
+        连窗口都还没画出来，用户看到的是"程序打不开"。
+        `on_done(err)` 在主线程调（err 空串 = 起来了）；`note_ok` = 要不要往输出栏
+        写那两句（设置页自己回显状态行时传 False，别两处各说一遍）。
+        """
+        if self._remote_starting:
+            return False
+        self._remote_starting = True
+
+        def work():
+            err = ""
+            try:
+                self.remote.start()
+            except Exception as e:
+                err = "%s: %s" % (type(e).__name__, e)
+                crashlog.note("远程访问启动失败：%r" % e)
+
+            def done():
+                self._remote_starting = False
+                if note_ok:
+                    if err:
+                        self._sq.put(("note",
+                                      "远程访问启动失败（证书或端口问题），暂未开启——"
+                                      "到 设置 → 远程访问 重新拨一次开关可重试。"))
+                    elif self.remote.running():
+                        # W 2026-10-11：主页只提醒一次、不带网址（地址在
+                        # 设置 → 远程访问 的「网址 ****」里）。
+                        self._sq.put(("note",
+                                      "远程服务已启动（网址与配对码在 设置 → 远程访问）"))
+                if on_done is not None:
+                    try:
+                        on_done(err)
+                    except Exception:
+                        pass
+            self._ui_q.put(done)
+
+        threading.Thread(target=work, daemon=True, name="remote-start").start()
+        return True
+
     def _any_busy(self):
-        """任一任务在进行（生成 / 生图 / 生视频 / 服务操作）→ True。忙碌的统一判据。
+        """任一任务在进行（生成 / 生图 / 生视频 / 服务操作 / 远程生图）→ True。
 
         与 _set_busy_ui 的 blocked 同一口径。"任务在跑时不该动 cfg / 引擎"的入口
         （切模型、手动指向、整理对话框、发送、清空）一律判它，别各自只盯 _busy
-        （坑 19：四个忙碌标志各查各的，迟早漏一个）。
+        （坑 19：四个忙碌标志各查各的，迟早漏一个）。远程生图（99 K1）纳入同一
+        口径：两份 sd-cli 并发抢显存 + 单槽共享状态互相覆盖，都必须靠这一道闸
+        串行化（双向 —— RemoteJobs.submit 也问本函数）。
         """
-        return bool(self._busy or self._img_busy or self._vid_busy or self._svc_busy)
+        return bool(self._busy or self._img_busy or self._vid_busy
+                    or self._svc_busy or self._remote_busy())
 
     def _open_containing(self, path):
         """在资源管理器中打开文件所在文件夹并选中该文件。"""
@@ -1043,6 +1139,7 @@ class App(ChatMixin, ImageGenMixin, VideoGenMixin, ServiceMixin, ModelsMixin, Se
     def _status_loop(self):
         probe_broken = False
         was_ready = False
+        was_remote_busy = False
         while not self._closing:
             try:
                 # 先做毫秒级本地进程检查：进程不在则无需（也避免）等待 HTTP 超时
@@ -1064,6 +1161,13 @@ class App(ChatMixin, ImageGenMixin, VideoGenMixin, ServiceMixin, ModelsMixin, Se
                             if changed:
                                 self._sq.put(("serving", name))
                 was_ready = ready
+                # 远程那头的单槽忙碌是**手机提交的**，本机没有任何事件会走到
+                # _set_busy_ui —— 只在这里做边沿检测，让「发送」按钮跟着灰/亮
+                # （与 _any_busy / send_message 的闸门同一口径，别让按钮看着能点）。
+                rb = self._remote_busy()
+                if rb != was_remote_busy:
+                    was_remote_busy = rb
+                    self._sq.put(("remote_busy", rb))
             except Exception as e:
                 # 判活现在是**硬抛**语义（进程表快照失败时不静默退回 tasklist，见
                 # core/server._probe_snapshot）：这里必须接住并说出来，否则常驻线程直接
@@ -1356,6 +1460,17 @@ class App(ChatMixin, ImageGenMixin, VideoGenMixin, ServiceMixin, ModelsMixin, Se
             self.input.configure(highlightbackground=theme.c("border"))
         except Exception:
             pass
+        # theme_use 的重涂会顺手改掉经典 Text 的**几何与选区色**（实测切一次主题：
+        # 聊天区 pady 1→8、highlightthickness 0→2，输入框 highlightthickness 1→2；
+        # selectbackground 回主题默认 ⇒ 用户在外观页挑的「选中文本强调色」被静默
+        # 重置，要重启才回来）—— 建件时记下的那套参数在这里原样重放。
+        for _w in (self.chat, self.input):
+            try:
+                _w.configure(**getattr(_w, "_text_geom", {}))
+                _w.configure(**theme.text_kw(
+                    fallback_bg=getattr(_w, "_text_fallback_bg", None)))
+            except Exception:
+                pass
         # active* 两色不在 `_tint` 戳的重涂范围（tint 只管 fg/bg 两向），
         # 而 theme_use 会连它们一起改掉 —— 悬停时的底色/字色在这里补
         try:
@@ -1369,6 +1484,16 @@ class App(ChatMixin, ImageGenMixin, VideoGenMixin, ServiceMixin, ModelsMixin, Se
         except Exception:
             pass
         theme.retint_widgets(self.root)
+        # 附件瓷砖整条重建：瓷砖 Frame 的描边与「×」按钮的四色都是建件时烘焙的经典
+        # tk 色、又没盖 tint 戳，theme_use 会把「×」重涂成**主色实心块 + 黑字**
+        # （实测 #ffffff/#7E8081 → #7e9abd/#000000），瓷砖描边则原地留浅色
+        # （#d6d6d6 压在 #2e3440 上）。逐个补 active*/highlight* 要盯五个键还漏，
+        # 重建只有十几个控件、且天然跟建件同一份参数（坑 181 同族）。
+        if getattr(self, "_attached_images", None) or getattr(self, "_attached_file", None):
+            try:
+                self._rebuild_attach_strip()
+            except Exception:
+                pass
         if self._last_status:
             try:
                 self._render_status(*self._last_status)
@@ -1529,6 +1654,10 @@ class App(ChatMixin, ImageGenMixin, VideoGenMixin, ServiceMixin, ModelsMixin, Se
                 self._append("[提示] 加载失败，你的消息已放回输入框，可稍后重试。\n", "error")
         elif tag == "note":
             self._append("\n[服务] " + str(item[1]) + "\n", "meta")
+        elif tag == "remote_busy":
+            # 远程生图的忙/闲边沿（_status_loop 检测）：按当前状态重算一遍按钮。
+            # 只刷按钮，不写对话流 —— 手机端起任务不该在电脑端的聊天区留一行。
+            self._set_busy_ui(self._busy)
         elif tag == "ngl":
             _, key, res = item
             self._append("\n[服务] 新模型 %s（共 %d 层）：按显存 %.1fGB 与模型大小估算，"
@@ -1540,6 +1669,46 @@ class App(ChatMixin, ImageGenMixin, VideoGenMixin, ServiceMixin, ModelsMixin, Se
             if os.path.basename(self.cfg["model"]) == key:
                 self._update_model_label()
             self._append("\n[服务] 模型别名已生成：%s\n" % alias, "meta")
+
+    def _confirm_pair_remote(self, info):
+        """远程配对确认（connection/remote 在 handler 线程调）→ 弹窗问用户。
+
+        跨线程编排：把 askyesno 丢进 _ui_q、用 Event 等回答（坑 54 纪律）；
+        用户 2 分钟没理 = 拒绝（不吊着远端的请求）。弹窗期间 _poll 被模态
+        占住是可接受的 —— 本来就该等人拿主意。
+        """
+        if self._closing:
+            return False
+        ev = threading.Event()
+        box = {"ok": False}
+
+        def ask():
+            try:
+                box["ok"] = bool(messagebox.askyesno(
+                    "远程配对请求",
+                    "有设备请求连接远程访问：\n\n来自：%s\n设备：%s\n\n"
+                    "只允许你自己发起的设备接入。允许这次配对吗？"
+                    % (info.get("ip", "?"), info.get("name", "?")),
+                    parent=self.root))
+            except Exception:
+                box["ok"] = False
+            finally:
+                ev.set()
+        self._ui_q.put(ask)
+        ev.wait(timeout=120)
+        return box["ok"]
+
+    def _keepawake_want(self):
+        """锁屏运行的意愿判据（keepawake 线程每 15 秒问一次；只读 cfg，不碰 Tk）。
+
+        「仅接电源时保持唤醒」：判不了电源状态时按"接着电源"算（见 keepawake.on_ac
+        的放行方向）—— 语义是"电池机才降级"，判错成没电会让桌面机永远不保持唤醒。
+        """
+        if not bool(self.cfg.get("keepawake_enabled", False)):
+            return False
+        if bool(self.cfg.get("keepawake_ac_only", False)) and not keepawake.on_ac():
+            return False
+        return True
 
     def on_close(self, force=False):
         # 提示词优化在跑就先叫停（工作线程收到 stop_flag 后自行收尾，不阻塞关窗）
@@ -1580,6 +1749,20 @@ class App(ChatMixin, ImageGenMixin, VideoGenMixin, ServiceMixin, ModelsMixin, Se
         # 关窗前把对话记录补一份：中途没走到 _finish_turn 的内容（只有用户话）也留住
         self._save_chat_log()
         self._closing = True
+        self._keepawake.stop()        # 清掉睡眠抑制，别让它残留到进程死后
+        # 远程那头还在跑的生图一起收掉：sd-cli 虽然是本进程的子进程，但 Windows
+        # 不随父进程结束子进程 —— 不收就是一个占着显存的孤儿（下次启动报显存不足，
+        # 而界面上"远程任务"已经没人管了）。cancel 里当场 kill（不等下一行输出）。
+        try:
+            if self._remote_busy():
+                self.remote.jobs.cancel(None, "local")
+        except Exception:
+            pass
+        self.remote.stop()            # 远程监听面一起收掉
+        # 会话内临时的两份材料（涂抹遮罩 PNG / 拍平 EXIF 后的底图副本）跟着收掉：
+        # 都是原图分辨率级别的文件，留在 %TEMP% 里一次次累积没人清。
+        self._mask_cleanup()
+        media.cleanup_temp()
         self.proxy.stop()
         self._dev_upd_stop()          # 撤掉后台查更新的定时器，别让它对着拆到一半的根窗打
         self.root.destroy()

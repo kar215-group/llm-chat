@@ -31,7 +31,7 @@ class MaskEditMixin:
     MASK_BRUSH_MIN = 4
     MASK_BRUSH_MAX = 160
 
-    def _mask_can_paint(self):
+    def _mask_can_paint(self, image_path=""):
         """这一档能不能涂遮罩 → `(能不能, 不能时的原因)`（原因写进附件条状态行）。"""
         from ..core import capability, providers
         if providers.is_cloud(self.cfg):
@@ -40,7 +40,24 @@ class MaskEditMixin:
             return False, "遮罩只在生图模型的「底图重绘」档用得上。"
         if self._effective_ref_mode() != capability.MODE_EDIT:
             return False, "当前是「主体参考」档，遮罩用不上——切回「底图重绘」再点图片涂抹。"
+        # 底图重绘一次只认第一张（`media.plan_ref_images`），涂在其余几张上的遮罩
+        # 发送时根本不会被读到 —— 与其让用户白涂一遍再静默丢掉，点这里就说清。
+        imgs = list(getattr(self, "_attached_images", None) or [])
+        if image_path and len(imgs) > 1 and imgs[0] != image_path:
+            return False, "底图重绘一次只认第一张图：这张不会送去重绘，遮罩用不上。"
         return True, ""
+
+    def _mask_cleanup(self):
+        """删掉本会话涂出来的那些遮罩（关窗时调；不删就一次次留在 %TEMP% 里）。"""
+        d, self._mask_tmpdir = self._mask_tmpdir, ""
+        self._masks = {}
+        if not d:
+            return
+        try:
+            import shutil
+            shutil.rmtree(d, ignore_errors=True)
+        except Exception:
+            pass
 
     def _mask_path_of(self, image_path):
         """这张图这次任务要带的遮罩 PNG（没涂过 = 空串）。"""
@@ -62,7 +79,7 @@ class MaskEditMixin:
 
     def _open_mask_editor(self, image_path):
         """打开涂抹页（单实例）。返回窗口或 None。"""
-        ok, why = self._mask_can_paint()
+        ok, why = self._mask_can_paint(image_path)
         if not ok:
             # 说一句为什么就够了：不弹窗、不悬停（W 2026-10-11）
             self._attach_note_var.set(why)
@@ -122,6 +139,11 @@ class MaskEditMixin:
 
         cv = tk.Canvas(body, width=dw, height=dh, highlightthickness=1,
                        highlightbackground=theme.c("border"), background=theme.c("bg"))
+        # 退出 ttkbootstrap 的自动重涂 + 自己盖戳：`theme_use` 的 walk 会把经典
+        # Canvas 的底色涂对、却顺手把 `highlightthickness` 清零（那圈 1px 描边没了）。
+        # 底色交给 `_tint` 戳由 retint 重涂，几何就谁也碰不到了。
+        cv._tb_no_autostyle = True
+        theme.tint(cv, bg="bg")
         cv.pack(pady=(6, 8))
         holder = {"photo": None, "over": None}
         # 两份遮罩：`mask` 原图分辨率（落盘、喂引擎），`small` 显示分辨率（预览）。
@@ -179,6 +201,15 @@ class MaskEditMixin:
 
         refresh_overlay()
 
+        # 窗口销毁时取消挂起的重画：`_open_mask_editor` 换图那条路径是直接
+        # `win.destroy()` 的（走不到 close()），after_idle 会在画布没了之后跑一次，
+        # 抛一个没人接的 TclError。`<Destroy>` 对子控件也派发，只认窗口自己那次。
+        def _on_win_destroy(e):
+            if getattr(e, "widget", None) is win:
+                cancel_pending()
+
+        win.bind("<Destroy>", _on_win_destroy, add="+")
+
         bar = ttk.Frame(body)
         bar.pack(fill="x")
         ttk.Label(bar, text="笔刷", font=("Microsoft YaHei UI", 9)).pack(side="left")
@@ -194,7 +225,7 @@ class MaskEditMixin:
             small.paste(0, (0, 0, dw, dh))
             refresh_overlay()
 
-        ttk.Button(bar, text="清空", command=clear).pack(side="left")
+        theme.button(bar, text="清空", command=clear).pack(side="left")
 
         # ---- 笔刷范围提示：跟着鼠标的一个圈（红=涂，蓝=擦），大小就是笔刷粗细 ----
         ring = {"item": None, "at": (0, 0)}
@@ -315,7 +346,7 @@ class MaskEditMixin:
             close()
             self._refresh_attach_note()
 
-        ttk.Button(foot, text="取消", command=close).pack(side="right")
+        theme.button(foot, text="取消", command=close).pack(side="right")
         theme.button(foot, text="确定", command=commit, bootstyle="primary").pack(
             side="right", padx=(0, 6))
         win.protocol("WM_DELETE_WINDOW", close)

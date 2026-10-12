@@ -11,8 +11,9 @@ from tkinter import ttk
 
 from ..core import capability, cloudjobs, config, providers, sdprofile
 from . import theme
-from ..core.media import (build_img_cmd, edit_strength, img_out_dir, plan_ref_images,
-                          resolve_img_files, resolve_img_model_path)
+from ..core.media import (build_img_cmd, edit_strength, img_out_dir, mask_hint,
+                          plan_ref_images, resolve_img_files,
+                          resolve_img_model_path)
 from ..connection import cloud_media
 from . import imgdecode
 
@@ -129,9 +130,15 @@ class ImageGenMixin:
                 # 原来这里读 `cfg["img_strength"]` 且兜底写 0.6，与命令行侧的 0.9 对不上。
                 _st_tier, st_value, st_why = edit_strength(
                     self.cfg, prompt, tier=self._img_strength_tier)
-                self._append("　重绘强度 %s（%s）%s\n"
+                # 自动判到"小改"档而这次没带遮罩：给一句指路（判据在 media.mask_hint，
+                # W 2026-10-12 拍板；手机网页的回显问的是同一处）
+                _hint = mask_hint(_st_tier, auto=not str(
+                    self._img_strength_tier or "").strip(),
+                    has_mask=bool(mask_path))
+                self._append("　重绘强度 %s（%s）%s%s\n"
                              % (st_value, st_why,
-                                "｜遮罩：只重绘涂抹区" if mask_path else ""), "meta")
+                                "｜遮罩：只重绘涂抹区" if mask_path else "",
+                                _hint), "meta")
         self._img_gen += 1
         mygen = self._img_gen
         mark = "imgprog%d" % mygen

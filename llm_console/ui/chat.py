@@ -546,22 +546,28 @@ class ChatMixin:
             return
         note = ""
         meta = self._attached_file
+        # 「底图重绘 + 生图模型」= 遮罩真会被带上的前提（与发送侧同一套判据）
+        img_edit = (str(self.cfg.get("model_kind") or "") == "image"
+                    and self._effective_ref_mode() == capability.MODE_EDIT)
         if meta and meta.get("dropped"):
             note = ("超出本次上下文预算（约 %d token），先只带前 %d 行；"
                     "云端模型可在 设置 → 云端模型 → 文本模型 打开「让它自己决定读哪些行」。"
                     % (meta.get("budget", 0), len(meta.get("kept") or [])))
-        elif (str(self.cfg.get("model_kind") or "") == "image"
-              and self._effective_ref_mode() == capability.MODE_EDIT
-              and len(self._attached_images or []) > 1):
+        elif img_edit and len(self._attached_images or []) > 1:
             # 与发送侧共用同一份取舍判断（media.plan_ref_images），说的和发的不会对不上
             note = media.plan_ref_images(self._attached_images,
                                          capability.MODE_EDIT)[2]
-        if not note and self._attached_images:
+        if self._attached_images and img_edit and not providers.is_cloud(self.cfg):
             # 已涂遮罩要看得见（遮罩是"看不见的输入"，不显示就成了静默行为）。
             # 状态行是"当前状态"不是"说明"，所以留在行内（ADR §5.2 判据④）。
+            # ① 判据收紧到发送侧那一套：云端生图链路根本不读 `_masks`，切到云端
+            #    模型还说"已涂遮罩"就是界面说谎（与坑 212"回显一个值、发另一个值"同族）；
+            # ② 与上面那句多图取舍**并排显示**，不再互斥 —— 原来 `if not note` 让
+            #    "只认一张"把遮罩那句挤掉，多图时涂了遮罩也一个字不说。
             mp = self._mask_path_of(self._attached_images[0])
             if mp and os.path.isfile(mp):
-                note = "已涂遮罩：只重绘涂抹区，其余保持不变（点图片可改）"
+                mn = "已涂遮罩：只重绘涂抹区，其余保持不变（点图片可改）"
+                note = (note + "｜" + mn) if note else mn
         var.set(note)
         if note:
             self.attach_note.grid()
@@ -616,7 +622,10 @@ class ChatMixin:
         return "break"
 
     def send_message(self):
-        if self._busy or self._svc_busy or self._img_busy or self._vid_busy:
+        # 闸门判 `_any_busy()`（含远程那头），不再各查各的四个标志：远程生图与本地
+        # 生图抢同一张卡，两份 sd-cli 并发 = 显存不够、两边一起失败（99 K1 的双向
+        # 互斥；坑 19"四个忙碌标志各查各的，迟早漏一个"就是这一处漏的）。
+        if self._any_busy():
             # 用"中止"而不是"取消"：云端任务进入运行态后取消不掉，「停止生成」在那边
             # 只是"不再等它"（_cloud_cancel_task 会把实情说出来），这里别先给错承诺。
             if self._img_busy:
@@ -625,6 +634,11 @@ class ChatMixin:
             elif self._vid_busy:
                 self._append("\n[提示] 生视频进行中：点「停止生成」中止当前任务，或等它完成。\n",
                              "meta")
+            elif self._remote_busy():
+                # 主页面那个「停止生成」停不掉远程任务（它只管本机这一轮），
+                # 所以指清出口在哪，别让人对着一个按了没反应的按钮试。
+                self._append("\n[提示] 手机端有一个远程生图在进行：等它完成，"
+                             "或在 设置 → 远程访问 点「停止远程任务」。\n", "meta")
             return
         text = self.input.get("1.0", "end").strip()
         if not text:

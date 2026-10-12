@@ -191,6 +191,13 @@ class SpotlightGuide(object):
         self.punch = self._try_punch()
         self.cv = tk.Canvas(self.win, bg=(self.KEY if self.punch else self.DARK),
                             highlightthickness=0, bd=0)
+        # **退出 ttkbootstrap 的自动重涂**（2.2.3 的 `_theme_walk` 认这个属性）：
+        # 遮罩靠 `-transparentcolor` 把 KEY 色打成透明洞，而 theme_use 会按
+        # `update_canvas_style` 把画布底色重涂成主题 bg（实测 #010203 → #2e3440）
+        # ⇒ 打洞失配，遮罩变成一块不透明整屏盖住主窗（引导期间跟随系统翻了深浅、
+        # 或在设置窗里切主题就会中）。这两件的颜色本来就不跟主题走，自己管。
+        self.win._tb_no_autostyle = True
+        self.cv._tb_no_autostyle = True
         self.cv.pack(fill="both", expand=True)
         # 绑在**主窗**上的每一对 (事件, funcid) 都记下来：close() 要逐个解掉。
         # 必须记 funcid —— 不带 funcid 的 `unbind(seq)` 会把主窗自己在这条事件上的

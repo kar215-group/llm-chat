@@ -30,7 +30,7 @@ CONFIG_PATH = os.path.join(APP_DIR, "gui_config.json")
 
 # 版本号：发版时改这一处（--selfcheck / --version 会打印它）。
 # GitHub Release 的 tag 要与它一致（tag 去掉开头的 v），Actions 工作流会做一致性校验。
-APP_VERSION = "1.3.0beta1"
+APP_VERSION = "1.3.0beta2"
 
 CFG_VERSION = 3
 
@@ -168,6 +168,27 @@ DEFAULT_CONFIG = {
     "proxy_autostart": True,
     "proxy_port": 8081,
     "proxy_last_model": "",        # 上次成功经代理加载的模型（回退用）
+    # ---- 锁屏运行（远程连接前置，2026-10-11，W 拍板见 99 K1）----
+    # 「允许锁屏运行」= 阻止系统自动睡眠（core/keepawake.py），息屏后仍可被远程连接。
+    # 新键默认关：load_config 先铺 DEFAULT_CONFIG 再盖用户值，老配置自动落到 False，
+    # 不需要 cfg_version 闸（不存在"旧值被翻错"的问题）。
+    "keepawake_enabled": False,
+    # 「仅接电源时保持唤醒」：勾上后，用电池时不阻止睡眠（省电）；只在主键开着时算数。
+    "keepawake_ac_only": False,
+    # ---- 远程访问（2026-10-11，W 拍板见 99 K1；connection/remote.py）----
+    # 默认关（沿用 proxy_enabled 先例；新键无旧值，load_config 铺默认即生效，
+    # 不需要 cfg_version 闸）。开启 = 新的对外监听面：配对制 + HTTPS + 审计三件套
+    # 一并生效（缺一不开是服务端的硬行为，不靠开关拼）。
+    "remote_enabled": False,
+    "remote_port": 8443,
+    # HTTPS 自签证书（core/remote_cert.py，PowerShell 当前用户级生成，免管理员）。
+    # W 2026-10-11 定"直接做 https"；PowerShell 被策略禁用时服务端回退明文 HTTP
+    # 并说明，不开死开关。
+    "remote_https": True,
+    # 历史产物开关（二期，W 2026-10-11 拍板并入）：默认关 = 产物取回只认
+    # "本设备自己的任务"；开启后台账（remote_jobs.json）里的历史远程产物
+    # 对任何已配对设备可见（16 §4 第 3 条预留的口径：放宽判据、形状不动）。
+    "remote_history": False,
     # ---- 云端 API（v31 一期：OpenAI 兼容文本；密钥存 secrets.json，不进备份）----
     # 每项：{id, name, base_url, kind:"text", models:[...], enabled, timeout, extra_headers}
     "cloud_providers": [],
@@ -258,7 +279,8 @@ DEFAULT_CONFIG = {
 INT_KEYS = ("port", "ngl", "ctx", "threads", "reasoning_budget",
             "dpi_aware",
             "max_tokens", "top_k", "seed", "img_steps", "img_seed",
-            "proxy_port", "vid_frames", "vid_fps", "vid_steps", "vid_seed",
+            "proxy_port", "remote_port", "vid_frames", "vid_fps", "vid_steps",
+            "vid_seed",
             "cloud_video_duration", "cloud_poll_seconds", "cloud_wait_minutes",
             "cloud_image_wait_seconds", "cloud_submit_timeout",
             "cloud_download_seconds", "cloud_keep_days")

@@ -411,8 +411,96 @@ def edit_strength(cfg, prompt, tier=""):
     return tier, strength_value(cfg, tier), "手动指定·%s" % TIER_LABEL[tier]
 
 
-def build_img_cmd(cfg, prompt, out_path, steps, size, diffusion_path, cfg_scale, seed,
-                  init_img=None, vae=None, llm=None, family=None, files=None,
+def mask_hint(tier, auto=True, has_mask=False):
+    """回显尾部那半句「只改局部：点图片涂遮罩」的**唯一判据**（W 2026-10-12 拍板）。
+
+    只在"提示词自动判到小改档（0.4）、这次又没带遮罩"时给：那一档按实测基本不执行
+    编辑指令（`10` §5.0.3），用户最容易觉得"出图几乎没变"——这时候指路去涂遮罩
+    最有价值。手动指定档 / 固定档 / 已带遮罩 / 其他档位一律不加（主界面只留一句，
+    坑 213 的口径）。GUI（`ui/image_gen`）与手机网页（`connection/remote` 的 echo）
+    都问这一处，两边不各写一份条件。返回 "" 或"｜"开头的半句。
+    """
+    if has_mask or str(tier or "") != "light" or not auto:
+        return ""
+    return "｜只改局部：点图片涂遮罩"
+
+
+# ------------------------------------------------- EXIF 方向：交给引擎前拍平一份
+#
+# 手机照片的像素常常是横向存的，靠 EXIF Orientation 说明"转 90° 才是正的"。界面
+# 这一侧（`ui/imgdecode` 的缩略图、涂抹遮罩页的画布）一律 `exif_transpose` 摆正后
+# 显示，而 **sd-cli 走 stbi_load，不认 EXIF** —— 同一张手机照片于是分成两张：
+# 用户看到的是竖的、引擎收到的是横的；涂在"竖图左上角"的遮罩落到引擎那份像素上
+# 既转向又被拉伸（实测 orientation=6 的 800x600 JPEG：遮罩存成 600x800）。
+# 所以在**交给引擎前一处**把方向烧进像素（与坑 218"新生产端与旧生产端落盘口径
+# 不一致时，在消费点前一处归一"同一条纪律）：GUI 的 `-i`/`-r` 与远程网页上传的
+# 参考图都经 `build_img_cmd`，改这一处两条路一起对上。
+_FLAT_DIR = ""
+
+
+def _flat_dir():
+    """拍平副本的落点：会话内临时目录（不碰用户的图片目录，也不进产物目录）。"""
+    global _FLAT_DIR
+    if not _FLAT_DIR:
+        import tempfile
+        _FLAT_DIR = tempfile.mkdtemp(prefix="llm_console_img_")
+    return _FLAT_DIR
+
+
+def exif_orientation(path):
+    """这张图的 EXIF Orientation（1 = 不用转）。读不出 / 没有 Pillow 一律按 1。"""
+    try:
+        from PIL import Image
+        with Image.open(str(path)) as im:
+            return int(im.getexif().get(0x0112) or 1)
+    except Exception:
+        return 1
+
+
+def flatten_exif(path):
+    """方向不是"正的"就拍平一份，返回**该交给引擎的路径**；其余情况原样返回入参。
+
+    拍平是修正不是必经步骤：没有 Pillow / 读不出方向 / 写不进临时目录，一律保持
+    旧行为（原路径交出去），绝不因为这条修正拦住发送。带 alpha 的存 PNG（不丢
+    透明），其余存 JPEG q95（12MP 的 PNG 要二十来 MB，而这份副本马上要进 VAE）。
+    """
+    p = str(path or "")
+    if not p or not os.path.isfile(p) or exif_orientation(p) in (0, 1):
+        return p
+    try:
+        from PIL import Image, ImageOps
+        with Image.open(p) as im:
+            im = ImageOps.exif_transpose(im)
+            alpha = (im.mode in ("RGBA", "LA", "PA") or "transparency" in im.info)
+            im = im.convert("RGBA" if alpha else "RGB")
+            stem = os.path.splitext(os.path.basename(p))[0] or "img"
+            keep = "".join(c if (c.isalnum() or c in "-_") else "_" for c in stem)[:40]
+            out = os.path.join(_flat_dir(), "%s_%08x.%s"
+                               % (keep, abs(hash(os.path.abspath(p))) & 0xFFFFFFFF,
+                                  "png" if alpha else "jpg"))
+            if alpha:
+                im.save(out, "PNG")
+            else:
+                im.save(out, "JPEG", quality=95)
+        return out if os.path.isfile(out) else p
+    except Exception:
+        return p
+
+
+def cleanup_temp():
+    """删掉本进程拍平出来的那些副本（关窗时调；删不掉就算了，%TEMP% 自己会清）。"""
+    global _FLAT_DIR
+    d, _FLAT_DIR = _FLAT_DIR, ""
+    if not d:
+        return
+    try:
+        import shutil
+        shutil.rmtree(d, ignore_errors=True)
+    except Exception:
+        pass
+
+
+def build_img_cmd(cfg, prompt, out_path, steps, size, diffusion_path, cfg_scale, seed,                  init_img=None, vae=None, llm=None, family=None, files=None,
                   ref_mode="", ref_images=None, strength=None, mask=None):
     """组装 sd-cli 生图命令行（形状由模型族决定，参数值仍来自配置）。
 
@@ -482,6 +570,10 @@ def build_img_cmd(cfg, prompt, out_path, steps, size, diffusion_path, cfg_scale,
     if _refs:
         _mode = str(ref_mode or "").strip() or prof.get("edit", sdprofile.EDIT_MODE_INIT)
         _used, _dropped, _note = plan_ref_images(_refs, _mode)
+        # 交给引擎前把 EXIF 方向拍平（见 flatten_exif 的实测依据）：界面显示的是
+        # 摆正后的那张、引擎读的是磁盘上的原始像素，不拍平则手机照片的底图与
+        # 遮罩双双错位。放在取舍之后 —— 只拍平真要发出去的那几张。
+        _used = [flatten_exif(p) for p in _used]
         # 视觉投影器：**两档共用，别只挂在 -i 那条路上**。qwen-image 这类 LLM 编码器家族
         # 不配 mmproj 就"读不懂图" —— 实测（2026-10-06，qwen_image_2.1-Q5_0 + Qwen3VL-8B）：
         # `-r` 不给 --llm_vision → 引擎报 "no vision weights detected" 并在 5.2s 内 rc=1；
@@ -672,10 +764,14 @@ def build_video_cmd(cfg, prompt, out_path, files, frames, fps, size, steps,
         # -r/--ref-image 是给 Ref2VA 变体的，用错引擎不认（实测踩中）。
         # 首帧由引擎自己 crop/resize 到 -W/-H（实测 1024x1024 → 512x512），
         # 且 fl2va 只要首帧就能跑，不需要 --end-img（那是 flf2v 的尾帧）。
+        # 与生图同一件事：交给引擎前把 EXIF 方向拍平（坑 223）—— 附件条与聊天回显
+        # 显示的是摆正后那张，而 sd-cli 走 stbi_load 不认 EXIF，不拍平就是
+        # "你看着竖的发的、引擎拿的横的"。方向正常的图原样返回，argv 逐字不变。
+        _first = flatten_exif(ref_img)
         if prof.get("edit") == sdprofile.EDIT_MODE_REF:
-            args += ["-r", ref_img]
+            args += ["-r", _first]
         else:
-            args += ["-i", ref_img]
+            args += ["-i", _first]
     if str(cfg.get("vid_extra_args", "")).strip():
         # 同 img_extra_args：走 split_extra_args，反斜杠路径不被吃（R-22）
         args += config.split_extra_args(cfg["vid_extra_args"])

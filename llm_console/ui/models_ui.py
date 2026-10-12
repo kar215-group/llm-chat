@@ -592,13 +592,13 @@ class ModelsMixin:
                 if s.get("no_chat"):
                     txt += "（不可对话）"
                 row_no = plain(parent, "○ " + txt,
-                               "#a15c00" if s.get("no_chat") else "#6a6a6a", row_no)
+                               theme.c("warndeep") if s.get("no_chat") else theme.c("softgray"), row_no)
             # 可选件缺失 = 不影响出图出片、只是少个功能：弱提示，不进主页面拦截
             for o in e.get("optional_missing") or []:
-                row_no = plain(parent, "○ 可选：%s" % o["label"], "#8a8a8a", row_no)
+                row_no = plain(parent, "○ 可选：%s" % o["label"], theme.c("faintgray"), row_no)
             # 必需件缺失 = 现在就用不了：主页面发提示词时也会拦下并点名，这里同步列出来
             for miss in e["missing"][:3]:
-                row_no = plain(parent, "○ 缺：%s" % miss, "#c01c28", row_no)
+                row_no = plain(parent, "○ 缺：%s" % miss, theme.c("errlit"), row_no)
             return row_no
 
         def section(title, entries, kind):

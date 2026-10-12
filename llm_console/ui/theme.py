@@ -99,6 +99,14 @@ _APP_PALETTE = {
     "flash": ("#fff3c4", "#4a4326"),   # 高级模式跳转黄底
     "panel": ("SystemButtonFace", "#3b4252"),  # 填写类弹窗面板（浅=系统灰）
     "warndim": ("#b06000", "#d08770"), # 源码运行提示的暗琥珀
+    # ---- 2026-10-12（16 §26 第 3 条）清扫硬编码浅色时补的四个键：浅色值 = 原字面色
+    # **逐位保持**（改这里 = 改浅色观感），深色值取同族 nord 色（与 errlit / warndim
+    # 深色同源）。softgray / faintgray 与 dim / hint 视觉上接近，但浅色各差一档、
+    # 角色不同（models_ui 零件行 vs 通用摘要灰），要合并得先问 W。
+    "errdeep": ("#b00020", "#bf616a"),    # 更新 / 引擎 / 开发页的失败与「未就位」
+    "warndeep": ("#a15c00", "#d08770"),   # models_ui 零件行「不可对话」的暗琥珀
+    "softgray": ("#6a6a6a", "#7d8899"),   # models_ui 零件行普通灰
+    "faintgray": ("#8a8a8a", "#9aa4b5"),  # models_ui「可选：」弱提示灰
     "accentlit": ("#0b57d0", "#88c0d0"),  # 页面内嵌强调文字（浅=原字面）
     "hdr": ("#111111", "#e5e9f0"),     # 窗内大标题/区块头
 }
@@ -366,18 +374,65 @@ def set_window_frame(win):
     覆盖，标题栏保持浅色；窗口映射后再挂一次立刻变深）——所以这里挂完再排一次
     after 延迟重挂；窗口在延迟到点前销毁就跳过。hwnd 取法：winfo_id() 是内层
     客户窗，顶层的真 hwnd 是父窗（GetParent）。任何 Toplevel 建完都可以调。
+
+    **重挂前先撤旧的**（坑 208②）：`set_mode` 每次切主题都对 root 再调一次这里，
+    `add="+"` 不 unbind 就无界累积 —— 实测切 4 次主题后 root 的 `<Map>` 脚本从
+    48 条涨到 144 条，之后每次映射都白跑 N 次 DWM 调用。after 句柄同样记下来，
+    `<Destroy>` 时取消（否则窗口关了计时器还在，靠 winfo_exists 空跑）。
     """
     _dwm_frame_now(win)
-    try:
-        win.after(250, lambda: _dwm_frame_now(win)
-                  if win.winfo_exists() else None)
-    except Exception:
-        pass
     # 真正的兜底是映射事件：窗口**显示那一下**会把映射前挂的属性覆盖掉，而 250ms
     # 的延迟在启动路径里可能仍早于映射（实测截图回浅）。Map 事件是"已显示"的硬
     # 信号，挂在这里必中；重复触发（最小化还原等）重挂也无害。
     try:
-        win.bind("<Map>", lambda _e, w=win: _dwm_frame_now(w), add="+")
+        old = getattr(win, "_dwm_map_id", "")
+        if old:
+            win.unbind("<Map>", old)
+        win._dwm_map_id = win.bind(
+            "<Map>", lambda _e, w=win: _dwm_frame_now(w), add="+")
+    except Exception:
+        pass
+    try:
+        prev = getattr(win, "_dwm_after_id", "")
+        if prev:
+            win.after_cancel(prev)
+        win._dwm_after_id = win.after(250, lambda w=win: _dwm_frame_later(w))
+    except Exception:
+        pass
+    if not getattr(win, "_dwm_destroy_bound", False):
+        try:
+            win.bind("<Destroy>", lambda e, w=win: _dwm_on_destroy(e, w), add="+")
+            win._dwm_destroy_bound = True
+        except Exception:
+            pass
+
+
+def _dwm_frame_later(win):
+    """250ms 那次延迟重挂：窗口已经不在了就什么都不做。"""
+    try:
+        win._dwm_after_id = ""
+    except Exception:
+        pass
+    try:
+        if win.winfo_exists():
+            _dwm_frame_now(win)
+    except Exception:
+        pass
+
+
+def _dwm_on_destroy(e, win):
+    """取消挂起的延迟重挂。
+
+    `<Destroy>` 对**每个子控件**都会派发一次（Toplevel 是它所有子件的 bindtag），
+    所以只认窗口自己那一次（`e.widget is win`）。
+    """
+    if getattr(e, "widget", None) is not win:
+        return
+    try:
+        aid = getattr(win, "_dwm_after_id", "")
+        if aid:
+            win.after_cancel(aid)
+            win._dwm_after_id = ""
     except Exception:
         pass
 
