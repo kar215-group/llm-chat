@@ -90,9 +90,9 @@ class ImageGenMixin:
         if not self._confirm_fatal_perf(diffusion, "image", files=files):
             return
         try:
-            steps = max(1, int(self.cfg.get("img_steps", 12) or 12))
+            steps = max(1, int(self.cfg.get("img_steps", 20) or 20))
         except Exception:
-            steps = 12
+            steps = 20
         size = str(self.cfg.get("img_size", "1024x1024"))
         try:
             cfg_scale = float(self.cfg.get("img_cfg", 2.5) or 2.5)
@@ -420,7 +420,7 @@ class ImageGenMixin:
         if "generating image" in line:
             return      # 采样开始行：没有进度数字可报，原样跳过（进度靠下面的 n/m 行）
         m = re.search(r"(\d+)/(\d+) - ", line)
-        steps = max(1, int(self.cfg.get("img_steps", 12) or 12))
+        steps = max(1, int(self.cfg.get("img_steps", 20) or 20))
         if m:
             cur, total = int(m.group(1)), int(m.group(2))
             if (not getattr(self, "_saw_decode", False)

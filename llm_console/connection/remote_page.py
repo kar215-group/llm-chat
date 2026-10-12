@@ -66,7 +66,7 @@ a.dl{display:inline-block;margin-top:.4em}
         user-select:none;-webkit-user-select:none;-webkit-touch-callout:none;
         touch-action:manipulation}
 #cvarea{flex:1;display:flex;align-items:center;justify-content:center;
-        min-height:0;padding:6px}
+        min-height:0;padding:6px;overflow:hidden}
 #cvwrap{position:relative;line-height:0;border:1px solid #ccc;
         border-radius:8px;overflow:hidden}
 #cvover{position:absolute;left:0;top:0;touch-action:none}
@@ -135,6 +135,7 @@ a.dl{display:inline-block;margin-top:.4em}
 <div id="cvarea"><div id="cvwrap"><canvas id="cvbase"></canvas><canvas id="cvover"></canvas></div></div>
 <div id="maskbar">
 <p class="hint">涂过的地方交给模型重绘，没涂的地方保持不变；一点不涂 = 不用遮罩。</p>
+<p class="hint">双指捏合缩放图片，双指拖动移动画面。</p>
 <div class="mrow">笔刷 <input type="range" id="brush" min="4" max="160" value="40">
   <label><input type="checkbox" id="erase">橡皮擦</label></div>
 <div class="mrow"><button id="mclear" type="button">清空</button>
@@ -425,7 +426,9 @@ function renderTiles(){
    双层画布：底图画一次不再动、红色叠加层整层重画——与 GUI maskedit 同一条
    "盖一层红色，别实时合成"口径。笔画坐标与笔宽**归一化**存（0~1），渲染时
    乘当前画布尺寸：转屏 / 窗口缩放 / 手机键盘弹出时原地重铺、笔画不丢；
-   画布两维适配视口（只按宽度算会被 body 的 max-width 裁掉，坑 219）。---- */
+   画布两维适配视口（只按宽度算会被 body 的 max-width 裁掉，坑 219）。
+   双指手势（2026-10-12，W 点名"照手机修图的路子来"）：捏合改缩放、双指
+   拖动改平移，视图经 cvwrap 的 CSS transform 叠加在适配尺寸之上。---- */
 var maskImg = null;
 function maskStroke(c, s, W, H, color){
   c.globalCompositeOperation = s.er ? "destination-out" : "source-over";
@@ -444,6 +447,27 @@ function maskStroke(c, s, W, H, color){
   }
 }
 var MASK_RED = "rgba(255,70,70,0.55)";
+/* 视图变换：叠在"适配视口"的底图之上（transform-origin 默认为中心）。
+   z = 倍率（1 = 刚适配好，双指捏合改它，封顶 MAXZ）；x/y = 屏幕像素平移
+   （双指拖动改它，夹紧到图片任何一边不过视口）。笔画仍按**全图** 0~1 归一化
+   存：getBoundingClientRect 带回变换后的几何，屏幕坐标除回去照样落在全图上，
+   缩放 / 平移不扭曲已涂笔画、导出也不用知道当前视图。*/
+var view = {z: 1, x: 0, y: 0};
+var MAXZ = 8;
+function applyView(){
+  $("cvwrap").style.transform =
+      (view.z === 1 && !view.x && !view.y) ? ""
+      : "translate(" + view.x + "px," + view.y + "px) scale(" + view.z + ")";
+}
+function clampView(){
+  var over = $("cvover");
+  var barH = $("maskbar").offsetHeight || 0;
+  var mx = Math.max(0, over.width * view.z / 2 - window.innerWidth / 2);
+  var my = Math.max(0, over.height * view.z / 2
+                        - Math.max(80, window.innerHeight - barH) / 2);
+  view.x = Math.max(-mx, Math.min(mx, view.x));
+  view.y = Math.max(-my, Math.min(my, view.y));
+}
 function maskRedraw(){
   var over = $("cvover"), c = over.getContext("2d");
   c.clearRect(0, 0, over.width, over.height);
@@ -464,6 +488,7 @@ function fitMask(){
   base.width = dw; base.height = dh; over.width = dw; over.height = dh;
   base.getContext("2d").drawImage(maskImg, 0, 0, dw, dh);
   maskNat = [natW, natH];
+  clampView(); applyView();          /* 转屏 / 缩放后按新尺寸重夹紧、重贴变换 */
   maskRedraw();
 }
 function openMask(rf){
@@ -483,6 +508,7 @@ function openMask(rf){
   var img = new Image();
   img.onload = function(){
     maskImg = img;
+    view.z = 1; view.x = 0; view.y = 0;      /* 每次进涂抹页都从"适配好"开始 */
     $("home").style.display = "none";
     $("maskui").style.display = "flex";
     document.body.style.overflow = "hidden";       /* 全屏页期间锁页面滚动 */
@@ -493,15 +519,48 @@ function openMask(rf){
 }
 (function(){
   var drawing = false, last = null;
+  var live = {};              /* cvover 上按着的指针 pointerId -> {x,y} */
+  var gest = null;            /* 双指手势快照：起始间距 / 中点 / 起始视图 */
   function posN(e){
     var over = $("cvover"), r = over.getBoundingClientRect();
     return [(e.clientX - r.left) / (r.width || 1),
             (e.clientY - r.top) / (r.height || 1)];
   }
+  function gestStart(){
+    var ids = Object.keys(live);
+    if (ids.length < 2) return;
+    var a = live[ids[0]], b = live[ids[1]];
+    gest = {d: Math.max(1, Math.hypot(a.x - b.x, a.y - b.y)),
+            mx: (a.x + b.x) / 2, my: (a.y + b.y) / 2,
+            z: view.z, x: view.x, y: view.y};
+  }
+  function gestMove(){
+    if (!gest) return;
+    var ids = Object.keys(live);
+    if (ids.length < 2) return;
+    var a = live[ids[0]], b = live[ids[1]];
+    var d = Math.max(1, Math.hypot(a.x - b.x, a.y - b.y));
+    view.z = Math.max(1, Math.min(MAXZ, gest.z * d / gest.d));
+    view.x = gest.x + (a.x + b.x) / 2 - gest.mx;
+    view.y = gest.y + (a.y + b.y) / 2 - gest.my;
+    clampView(); applyView();
+  }
   $("cvover").addEventListener("pointerdown", function(e){
     e.preventDefault();
     if (this.setPointerCapture && e.pointerId !== undefined) {
       try { this.setPointerCapture(e.pointerId); } catch (x) {}
+    }
+    live[e.pointerId] = {x: e.clientX, y: e.clientY};
+    if (Object.keys(live).length >= 2) {
+      /* 第二根手指落下 = 双指手势开始，手里那笔就此收笔：只有一个点的
+         是落指误留的点，撤掉；已拖出线的保留。*/
+      if (drawing && strokes.length
+          && strokes[strokes.length - 1].pts.length === 1) {
+        strokes.pop(); maskRedraw();
+      }
+      drawing = false;
+      gestStart();
+      return;
     }
     var over = $("cvover");
     drawing = true; last = posN(e);
@@ -513,7 +572,10 @@ function openMask(rf){
                s.er ? "rgba(0,0,0,1)" : MASK_RED);
   });
   $("cvover").addEventListener("pointermove", function(e){
-    if (!drawing) return;
+    if (live[e.pointerId]) live[e.pointerId] = {x: e.clientX, y: e.clientY};
+    if (gest) { e.preventDefault(); gestMove(); return; }
+    /* 只认正在涂改的那根指针：触摸涂改时鼠标悬停的 move 不该拐进笔画 */
+    if (!drawing || !live[e.pointerId]) return;
     e.preventDefault();
     var over = $("cvover"), c = over.getContext("2d");
     var p = posN(e);
@@ -532,9 +594,15 @@ function openMask(rf){
   });
   /* pointercancel 也要收笔：手机上系统手势（下拉通知栏 / 返回滑动 / 手掌误触）
      打断触摸时浏览器发的是 cancel 而不是 up，只留 drawing=true 的话下一次落笔
-     会从上一笔的终点连一条飞线过来。*/
-  window.addEventListener("pointerup", function(){ drawing = false; });
-  window.addEventListener("pointercancel", function(){ drawing = false; });
+     会从上一笔的终点连一条飞线过来。双指手势同理：按着的指针少于两根就落幕，
+     剩下那根手指不接续涂改（抬手后再落笔才算新一笔）。*/
+  function endPtr(e){
+    delete live[e.pointerId];
+    if (gest && Object.keys(live).length < 2) gest = null;
+    if (drawing && !Object.keys(live).length) drawing = false;
+  }
+  window.addEventListener("pointerup", endPtr);
+  window.addEventListener("pointercancel", endPtr);
   window.addEventListener("resize", function(){
     if ($("maskui").style.display === "flex") fitMask();
   });
@@ -551,6 +619,7 @@ function closeMask(){
   document.body.style.overflow = "";
   document.title = "LLM Chat 远程";
   maskImg = null; maskRef = null; strokes = [];
+  view.z = 1; view.x = 0; view.y = 0; applyView();
 }
 $("mok").onclick = function(){
   if (!maskRef) { closeMask(); return; }

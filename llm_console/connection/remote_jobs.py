@@ -167,9 +167,15 @@ class RemoteJobs:
                                    "｜遮罩：只重绘涂抹区" if mask_path else "",
                                    _hint))
             try:
-                steps = max(1, int(snap.get("img_steps", 12) or 12))
+                # 兜底 20 = DEFAULT_CONFIG["img_steps"]（与 GUI 两端读法逐字同源；
+                # 原先写 12，与默认值和 _probe_* 的口径都不一致）
+                steps = max(1, int(snap.get("img_steps", 20) or 20))
             except Exception:
-                steps = 12
+                steps = 20
+            # 步数控件只存在于电脑端设置页，网页端没有、也不该有（能覆盖 = 第二来源）。
+            # 这值随下次提交生效（与 GUI 同读一份 cfg，2026-10-12 实测 20→8 后
+            # 远程 argv 同步变）；W 2026-10-12 裁定回显里不显示步数（K10 的解撤回），
+            # 这里只留着喂 build_img_cmd。
             size = str(snap.get("img_size", "1024x1024"))
             try:
                 cfg_scale = float(snap.get("img_cfg", 2.5) or 2.5)
