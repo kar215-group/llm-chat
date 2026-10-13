@@ -10,7 +10,8 @@ from tkinter import ttk, messagebox
 
 from ..core import cloudjobs, config, providers, sdprofile
 from . import theme
-from ..core.media import build_video_cmd, resolve_video_files, vid_out_dir
+from ..core.media import (build_video_cmd, resolve_video_files, salvage_products,
+                          vid_out_dir)
 from ..connection import cloud_media
 
 
@@ -135,7 +136,8 @@ class VideoGenMixin:
             self._append("[错误] 启动生视频引擎失败: %s\n" % e, "error")
             return
         threading.Thread(target=self._vid_reader,
-                         args=(self._vid_proc, mygen, self._vid_log, self._vid_t0),
+                         args=(self._vid_proc, mygen, self._vid_log, self._vid_t0,
+                               [out]),
                          daemon=True).start()
 
     # ---- 云端生视频（三期：异步任务 提交 → 轮询 → 下载）----
@@ -278,7 +280,7 @@ class VideoGenMixin:
                 pass
             q.put(("exit", 1, gen))
 
-    def _vid_reader(self, proc, gen, log_path, t0):
+    def _vid_reader(self, proc, gen, log_path, t0, expected=None):
         # 完整引擎输出落盘：内存里的 _vid_tail 只有 12 行，够回答"为什么失败"，
         # 不够回答"引擎说自己成功了却没写出文件"这类问题（开发机踩过，见 §11 第 2 条）。
         # 日志路径走参数而不是 self._vid_log：取消后立刻重开一次任务时，旧线程会把
@@ -307,9 +309,19 @@ class VideoGenMixin:
             rc = proc.wait()
         except Exception:
             rc = -1
+        # 乱码镜像搬回（判据与生图链路共用一处：core/media.salvage_products）——
+        # 必须赶在 ("exit", …) 入队之前，主线程拿 os.path.isfile 判成功
+        try:
+            moved = salvage_products(self.cfg, expected)
+        except Exception:
+            moved = []
         if log is not None:
             try:
-                log.write("\n=== 退出码 %s ｜ 耗时 %.1fs ===\n" % (rc, time.time() - self._vid_t0))
+                for _src, _dst in moved:
+                    log.write("=== 产物不在指定位置，已从乱码镜像目录搬回：%s → %s ===\n"
+                              % (_src, _dst))
+                log.write("\n=== 退出码 %s ｜ 耗时 %.1fs ===\n"
+                          % (rc, time.time() - t_start))
                 log.close()
             except Exception:
                 pass

@@ -19,7 +19,7 @@ import subprocess
 import threading
 import time
 
-from ..core import config
+from ..core import config, media
 from .remote_audit import audit
 from .remote_ledger import ledger_add, ledger_load, ledger_update
 from .remote_uploads import upload_paths
@@ -306,6 +306,21 @@ class RemoteJobs:
             audit("image.read", task.get("device_id", "?"), False,
                   "%s: %s" % (type(e).__name__, e))
             task["error"] = READ_FAIL_MSG
+        # 系统码页把中文路径读歪时（引擎 MinGW 窄 argv = UTF-8 × 文件 API 按 ACP
+        # 解释，判据见 core/media.salvage_products），产物落在乱码镜像目录里 ——
+        # 必须在算 found 之前搬回来，否则手机端看到的是"引擎没有交付文件"，
+        # 而文件其实躺在镜像里（与 GUI 两条链路同一处判据、同一条顺序纪律）。
+        try:
+            moved = media.salvage_products(self.cfg, task.get("expected") or [task["out"]])
+        except Exception:
+            moved = []
+        for _src, _dst in moved:
+            try:
+                with open(log, "a", encoding="utf-8", errors="replace") as lf:
+                    lf.write("=== 产物不在指定位置，已从乱码镜像目录搬回：%s → %s ===\n"
+                             % (_src, _dst))
+            except Exception:
+                pass
         # 终态与审计先算先写，再翻任务态：`/api/task` 走**无锁快路径**读 task
         # （B3），客户端一看到 state 离开 running 就会来读审计 —— 顺序反了会有
         # 一瞬"任务已失败、审计里还没有 image.exit"（2026-10-13 `test_remote`

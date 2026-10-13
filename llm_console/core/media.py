@@ -18,6 +18,7 @@ docs/flux.md、docs/wan.md 与 `sd-cli --help` 的原文（开发机没实测过
 
 import os
 import re
+import shutil
 
 from . import config, sdprofile
 from .models import (IMAGE_SUBDIR, _is_mmproj, find_vl_pairs, scan_models,
@@ -538,6 +539,149 @@ def batch_out_paths(out_path, count):
         return [str(out_path)]
     root, ext = os.path.splitext(str(out_path))
     return ["%s_%d%s" % (root, i, ext) for i in range(1, n + 1)]
+
+
+# ------------------------------------------------------------ 乱码镜像产物搬回
+# 2026-10-13 用户现场（诊断版日志钉死）：sd-cli 是 MinGW 构建，**窄 argv 是 UTF-8**
+# （零成本探针实测：未知参数回显的就是 UTF-8 字节），而它的文件 API 按**系统 ANSI
+# 代码页**解释这串字节 ⇒ 中文机器（ACP=936）上整条中文路径被改写成"乱码镜像"
+# （`产物` → `浜х墿`、`本地` → `鏈`+U+E100+`湴`），文件落在镜像目录里；引擎自己
+# stdout 打印的却是正确路径（UTF-8 字节直出），所以症状是"引擎说 success、文件不在、
+# 旁边多了个乱码文件夹"。开发机 ACP=65001（系统开了「Beta: 使用 UTF-8 提供全球语言
+# 支持」）时两者恰好一致 —— 这就是开发机从来复现不了的原因（同一份引擎、同一份代码）。
+#
+# 修法：**不动 argv**（实测过的两族 argv 逐字回归要继续成立），在引擎退出后按"本次
+# 任务该有哪些产物"把文件从镜像目录搬回指定位置。判据顺序 = ① 精确镜像名换算
+# （走 Windows 自己的表）② 候选根里按文件名搜（深度 / 条数封顶）。
+
+def _acp_mirror_name(path, acp=0):
+    """这条路径被"按系统 ANSI 代码页读它的 UTF-8 字节"会变成什么名字（现场镜像名）。
+
+    换算**必须走 Windows 自己的表**（`MultiByteToWideChar`）：GBK 的"用户定义区"
+    在 Windows 映到 PUA（现场路径里那个 U+E100 就是），Python 的 cp936 严格解码遇到
+    这些字节直接 UnicodeDecodeError —— 自己按表算必错，别改成 Python 编解码。
+    `acp=0` = 取本机 `GetACP()`。算不出（非 Windows / 调用失败）返回空串，
+    调用方走"按文件名搜"那条兜底，绝不拿半个结果糊弄。
+    """
+    try:
+        if os.name != "nt":
+            return ""
+        import ctypes
+        k32 = ctypes.windll.kernel32
+        b = os.fspath(path).encode("utf-8")
+        cp = int(acp) or int(k32.GetACP())
+        k32.MultiByteToWideChar.restype = ctypes.c_int
+        n = int(k32.MultiByteToWideChar(cp, 0, b, len(b), None, 0))
+        if n <= 0:
+            return ""
+        buf = ctypes.create_unicode_buffer(n)
+        if int(k32.MultiByteToWideChar(cp, 0, b, len(b), buf, n)) != n:
+            return ""
+        return buf[:n]
+    except Exception:
+        return ""
+
+
+def _find_in_roots(name, roots, max_depth=4, cap=6000):
+    """在候选根里按**文件名**找（深度与条数双封顶，只走 not-visited 的浅层）。"""
+    hits = []
+    low = os.path.basename(name).lower()
+    seen = 0
+    for r in roots:
+        if not r or not os.path.isdir(r):
+            continue
+        for dirpath, dirnames, filenames in os.walk(r):
+            rel = os.path.relpath(dirpath, r)
+            if rel != "." and (rel.count(os.sep) + 1) >= max_depth:
+                dirnames[:] = []
+            for fn in filenames:
+                seen += 1
+                if fn.lower() == low:
+                    hits.append(os.path.join(dirpath, fn))
+                if seen >= cap:
+                    return hits
+    return hits
+
+
+def _prune_empty_up(d, stops):
+    """从 d 往上收空目录（只为搬回后收掉镜像的空壳），遇到 stops 或非空目录即停。"""
+    stop = set()
+    for s in stops or ():
+        try:
+            stop.add(os.path.abspath(s))
+        except Exception:
+            pass
+    try:
+        cur = os.path.abspath(d)
+    except Exception:
+        return
+    while True:
+        if cur in stop or os.path.dirname(cur) == cur:
+            return
+        try:
+            if os.listdir(cur):
+                return
+            os.rmdir(cur)
+        except Exception:
+            return
+        cur = os.path.dirname(cur)
+
+
+def salvage_products(cfg, expected, extra_roots=()):
+    """引擎把产物写进「乱码镜像目录」时，把文件搬回该在的位置 → `[(src, dst), …]`。
+
+    调用点 = 三条**本地**链路的 reader，且必须在 `("exit", rc)` 入队**之前** ——
+    主线程是拿 `os.path.isfile(expected)` 判成功的，搬晚了"出了图"会被报成
+    "引擎没有交付文件"（这条链路刚在 2026-10-13 用它自己的日志钉过一次）。
+
+    三条纪律：
+      · 只搬**本次期望的那几个文件名**：先试精确镜像名，再按文件名搜；镜像目录里
+        别的文件（历史遗留的旧图）一律不碰，所在目录非空就不删；
+      · 搬回后顺手收掉因这次搬迁变空的镜像空壳（`_prune_empty_up`，边界到根为止）；
+      · 全程吞异常：这是补救手段，失败要让调用方照旧走"没有交付文件"那条老路，
+        不能把补救自己的异常当成任务失败。
+    """
+    out = []
+    try:
+        missing = [os.fspath(p) for p in (expected or [])
+                   if p and not os.path.isfile(p)]
+        if not missing:
+            return out
+        roots = []
+        try:
+            roots.append(config.output_root(cfg))
+        except Exception:
+            pass
+        roots.append(os.path.dirname(missing[0]))
+        try:
+            roots.append(config.APP_DIR)
+        except Exception:
+            pass
+        roots.extend(os.fspath(r) for r in (extra_roots or ()))
+        dedup = []
+        for r in roots:
+            if r and r not in dedup:
+                dedup.append(r)
+        for p in missing:
+            src = ""
+            cand = _acp_mirror_name(p)
+            if cand and cand != p and os.path.isfile(cand):
+                src = cand
+            if not src:
+                hits = _find_in_roots(os.path.basename(p), dedup)
+                src = hits[0] if hits else ""
+            if not src:
+                continue
+            try:
+                os.makedirs(os.path.dirname(p), exist_ok=True)
+                shutil.move(src, p)        # 同盘 = 改名；跨盘 = 复制后删
+            except Exception:
+                continue
+            _prune_empty_up(os.path.dirname(src), dedup + [os.path.dirname(p)])
+            out.append((src, p))
+    except Exception:
+        pass
+    return out
 
 
 def build_img_cmd(cfg, prompt, out_path, steps, size, diffusion_path, cfg_scale, seed,                  init_img=None, vae=None, llm=None, family=None, files=None,

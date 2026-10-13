@@ -25,6 +25,10 @@
 *.spec
 
 # ---- 即使以后放开某个目录，下面这些也永远不进仓库 ----
+# 目录诊断版（现场排障工具；W 2026-10-13 定：本地留着可复用、不上 GitHub）
+/llm_console/core/dirdiag.py
+/llama_gui_dirdiag.py
+
 # Python 缓存
 __pycache__/
 *.py[cod]

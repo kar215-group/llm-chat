@@ -14,7 +14,7 @@ from . import theme
 from ..core.media import (batch_count_of, batch_out_paths, build_img_cmd,
                           edit_strength, img_out_dir, mask_hint,
                           plan_ref_images, resolve_img_files,
-                          resolve_img_model_path)
+                          resolve_img_model_path, salvage_products)
 from ..connection import cloud_media
 from . import imgdecode
 
@@ -202,7 +202,8 @@ class ImageGenMixin:
         # 日志路径走参数而不是 self._img_log：取消后立刻重开一次任务时，
         # 旧线程会把自己的输出追加进新任务的日志里（与生视频同一处理）
         threading.Thread(target=self._img_reader,
-                         args=(self._img_proc, mygen, self._img_log, self._t0),
+                         args=(self._img_proc, mygen, self._img_log, self._t0,
+                               expected),
                          daemon=True).start()
 
     # ---- 云端生图（二期：服务商原生接口，按 providers.media_api 分派）----
@@ -372,7 +373,7 @@ class ImageGenMixin:
                 pass
             q.put(("exit", 1, gen))
 
-    def _img_reader(self, proc, gen, log_path="", t0=None):
+    def _img_reader(self, proc, gen, log_path="", t0=None, expected=None):
         # 完整引擎输出落盘（与 _vid_reader 同形）：内存里的 _img_tail 只有 12 行，
         # 够回答"为什么失败"，不够回答"引擎说自己成功了却没写出文件"。
         log = None
@@ -398,8 +399,19 @@ class ImageGenMixin:
             rc = proc.wait()
         except Exception:
             rc = -1
+        # 系统码页把中文路径读歪时（引擎 MinGW 窄 argv = UTF-8 × 文件 API 按 ACP
+        # 解释，判据见 core/media.salvage_products），产物会落在乱码镜像目录里 ——
+        # 这里是"搬回来"的位置：**必须在 ("exit", …) 入队之前**，主线程是拿
+        # os.path.isfile(expected) 判成功的，搬晚了会报成"引擎没有交付文件"。
+        try:
+            moved = salvage_products(self.cfg, expected)
+        except Exception:
+            moved = []
         if log is not None:
             try:
+                for _src, _dst in moved:
+                    log.write("=== 产物不在指定位置，已从乱码镜像目录搬回：%s → %s ===\n"
+                              % (_src, _dst))
                 log.write("=== 退出码 %s ｜ 用时 %.1fs ===\n"
                           % (rc, time.time() - (t0 or time.time())))
                 log.close()
