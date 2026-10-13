@@ -860,6 +860,7 @@ class ChatMixin:
         # 请求体里的消息一律经 core/history 拼（system 在最前、历史全量携带、最后是这一条）：
         # 那是"哪些消息进请求体"的唯一出口，上下文压缩将来就插在那儿，别在别处再拼一份
         msgs = history.request_messages(self.cfg, self.history, user_msg)
+        self._log_turn_start = len(self.history)   # 本轮在 history 里的起点（收尾时按它判要不要记）
         self.history.append(user_msg)
         # 先把"问题"落盘再开线程：连点发送、生成中途强杀 / 断电，用户那句都不会丢。
         # 静默保存 —— "存在哪儿"那句话留到轮末再说，免得回答还没出来先刷一行日志
@@ -911,22 +912,57 @@ class ChatMixin:
             self.stop_gen_btn.configure(state="disabled", text="正在停止…")
 
     # ---- 对话记录落盘（仅文本模型；本期只存不读，形状见 core/chatlog.py）----
-    def _save_chat_log(self, quiet=False):
-        """把当前会话整份写盘 → (是否已保存, 给用户看的一句话)。
+    def _log_records(self):
+        """对话记录要写的那份消息 = `history` 去掉"模型没答上来"的整轮。
 
-        四条约束：
+        `history` 本身一个字都不动：它是下一轮请求的上下文，用户重发时那条提问照旧带着。
+        被收窄的只有落盘那一份 —— 记录的含义是"与文本模型正常完成的交互"（W 2026-10-13）。
+        没排除过任何轮次时直接返回原列表，不另拷一份。
+        """
+        if not self._log_drop:
+            return self.history
+        return [m for i, m in enumerate(self.history) if i not in self._log_drop]
+
+    def _drop_log_file(self):
+        """收回本会话已经落盘、但现在没内容可存的那份记录（只删自己写的那个文件）。
+
+        要删的理由很具体：提问在**发出那一刻**就先存了一份（保住断电 / 强杀时不丢问题），
+        如果这一轮最终没换来模型一个字，那份"只有提问、没有回答"的文件就成了错误记录——
+        正是 W 这次要清掉的东西（开发机 chat_logs 里躺着的那几份 `["user"]` 全是它）。
+        删不掉就多留一份旧文件，不抛异常：这条挂在每轮收尾与关窗路径上（约束②）。
+        """
+        p = self._sess_path
+        self._sess_path = ""
+        self._sess_saved = False
+        self._announced_path = ""
+        self._log_key = None
+        if not p:
+            return
+        try:
+            os.remove(p)
+        except Exception:
+            pass
+
+    def _save_chat_log(self, quiet=False):
+        """把当前会话写成一整份 JSON（只含有模型回复的轮次）→ (是否已保存, 给用户看的一句话)。
+
+        五条约束：
           ① 生图 / 生视频不存（成果本来就是文件）；
           ② **永不抛异常** —— 它挂在每轮结束与关窗路径上，存不进去只少一份记录，
              不能把发送或退出带崩；
           ③ 整份覆盖重写而不是追加，天然幂等，也不需要"崩溃截断恢复"那套；
           ④ 内容没变就直接返回（`_log_key` 是 (条数, 末条长度) 的廉价签名）。
              连点发送时同一份内容会被三个触发点各敲一次，省掉重复写盘。
+             签名按**收窄后**的那份算，否则"只删掉一条被排除的提问"这种变化不会被写盘。
+          ⑤ 收窄后一条都不剩 → 把先前那份收掉（见 `_drop_log_file`）。
         """
         if self.cfg.get("model_kind") != "chat" or not chatlog.enabled(self.cfg):
             return False, ""
-        if not self.history:
+        recs = self._log_records()
+        if not recs:
+            self._drop_log_file()
             return False, ""
-        key = (len(self.history), len(str(self.history[-1].get("content") or "")))
+        key = (len(recs), len(str(recs[-1].get("content") or "")))
         if self._sess_saved and key == self._log_key:
             # 内容没变：不重复写盘，但"说一次保存在哪儿"的账还是要结（可能上次是静默那次）
             if quiet or self._announced_path == self._sess_path:
@@ -935,7 +971,7 @@ class ChatMixin:
             return True, "对话记录已存：%s" % self._sess_path
         if not self._sess_id:
             self._sess_id = chatlog.new_id()
-        p, err = chatlog.save(self.cfg, self._sess_id, self.history,
+        p, err = chatlog.save(self.cfg, self._sess_id, recs,
                               model=self.cfg.get("model", ""),
                               provider=self.cfg.get("model_provider", "local"))
         if err:
@@ -959,6 +995,12 @@ class ChatMixin:
         content = "".join(self._cur_content).strip()
         if content:
             self.history.append({"role": "assistant", "content": content})
+        else:
+            # 对话记录只收"模型答过话"的轮次（W 2026-10-13 定）：模型一个字都没吐
+            # （请求失败、连不上、异常、空回答）就把这一整轮——连那条提问——从记录里排除，
+            # 免得落一份"只有提问没有回答"的假记录。收尾原因不是判据：主动停止、流被中断、
+            # max_tokens 截断都算"模型回复过"，那半截照样进记录（真实输出，不是错误文本）。
+            self._log_drop.add(self._log_turn_start)
         usage, self._last_usage = self._last_usage, None
         if usage and not error and self.cfg.get("show_usage", True):
             # 云端文本填过单价（设置 → 云端文本模型 → 成本估算）就在用量行尾附一句
@@ -996,6 +1038,8 @@ class ChatMixin:
         self._sess_path = ""
         self._announced_path = ""
         self._log_key = None
+        self._log_drop = set()        # 排除清单跟着新会话清零（下标是从 0 数的）
+        self._log_turn_start = 0
         self.clear_attachment()
         self.chat.configure(state="normal")
         self.chat.delete("1.0", "end")

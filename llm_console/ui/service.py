@@ -7,9 +7,24 @@ import time
 from tkinter import messagebox
 
 from ..core import modelreq
-from ..core.models import display_name
+from ..core.models import BLOCK_ENGINE, BLOCK_MODEL, BLOCK_STALE, chat_start_block, display_name
 from ..core.params import ctx_for, current_ngl, estimate_kv_gb
 from ..core.server import _reset_alive_cache, server_alive, server_process_alive, server_ready, start_server, stop_server
+
+
+# 「启动服务」被闸门挡住时的两行话：同一个原因，按钮的悬停气泡说一句、动作路径被
+# 别的入口踩到时在输出栏说一句。判据只有一处（`core.models.chat_start_block`），
+# 措辞也只有一处，免得两个入口各念一套（坑 128）。
+START_BLOCK_TIP = {
+    BLOCK_ENGINE: "llama 引擎还没就位：在 设置 → 模型文件与引擎 → 引擎管理 里定向或下载。",
+    BLOCK_MODEL: "这台机器上还没有可用的本地文本模型：在 设置 → 模型文件与引擎 里补全或手动定向模型。",
+    BLOCK_STALE: "当前选中的模型文件已经不在了：点顶部模型名重选一个可用的本地文本模型。",
+}
+START_BLOCK_NOTE = {
+    BLOCK_ENGINE: "llama 引擎还没就位（在 设置 → 模型文件与引擎 → 引擎管理 里定向或下载）。",
+    BLOCK_MODEL: "这台机器上还没有可用的本地文本模型（引擎与能聊天的 .gguf 都要就位）。",
+    BLOCK_STALE: "当前选中的模型文件已经不在了（点顶部模型名重选一个可用的本地文本模型）。",
+}
 
 
 class ServiceMixin:
@@ -88,6 +103,24 @@ class ServiceMixin:
             % (modelreq.LEVEL_TEXT[lvl], need["detail"]))
 
     # ---- 服务控制 ----
+    def _start_gate_block(self, action="启动"):
+        """启动引擎前的闸门：这台机器现在能不能把 llama-server 拉起来。
+
+        判据只有一处（`core.models.chat_start_block` = 有可用的本地文本模型 + 选中的那个
+        文件还在），顶栏按钮的置灰与悬停气泡问的是同一条。动作路径也要问：坑 128 例②
+        就是"入口查了、启动那条没查"——代理照常在 8081 空跑。这里兜住的是按钮置灰之外
+        的入口（设置页那个 agent 按钮、竞态、以后新加的调用点）。
+        `action` 只影响那句话说的是"未启动"还是"未重启"：重启同样要把服务拉起来，
+        拦下来才不会把本来在跑的服务停成一个空档。
+        """
+        blk = chat_start_block(self.cfg)
+        if not blk:
+            return False
+        self._append("\n[服务] 未%s：%s\n"
+                     % (action, START_BLOCK_NOTE.get(blk, START_BLOCK_NOTE[BLOCK_MODEL])),
+                     "error")
+        return True
+
     def _begin_svc(self):
         """进入服务操作状态：相关按钮禁用，防止重入。"""
         self._svc_busy = True
@@ -145,6 +178,8 @@ class ServiceMixin:
         # 生图模型：按钮已置灰，此处静默返回（不弹窗）
         if self._svc_busy or self.cfg.get("model_kind") == "image":
             return
+        if self._start_gate_block("重启" if self._server_alive_flag else "启动"):
+            return
         if self._server_alive_flag:
             self.restart_server()
         else:
@@ -152,6 +187,8 @@ class ServiceMixin:
 
     def start_server_async(self, agent=False):
         if self._svc_busy or self._server_alive_flag:
+            return
+        if self._start_gate_block():
             return
         if not self._confirm_fatal_perf(self.cfg.get("model", "")):
             return
@@ -240,6 +277,8 @@ class ServiceMixin:
     def on_start_restart_agent(self):
         """本地模型 API 页的服务按钮：以 agent 场景的 context 启动/重启。"""
         if self._svc_busy or self.cfg.get("model_kind") == "image":
+            return
+        if self._start_gate_block("重启" if self._server_alive_flag else "启动"):
             return
         if self._server_alive_flag:
             self.restart_server(agent=True)

@@ -16,8 +16,8 @@ from ..core.config import (load_config, DEFAULT_CONFIG, APP_DIR, APP_VERSION,
 from ..core import (capability, cloudjobs, codesign, config, crashlog, diagnose,
                     engine_install, keepawake, media, providers, secrets,
                     selfupdate, throttle, updater)
-from ..core.models import (auto_locate_models_dir, dir_has_any_gguf, display_name,
-                          extra_sources, first_usable, has_local_chat,
+from ..core.models import (auto_locate_models_dir, chat_start_block, dir_has_any_gguf,
+                          display_name, extra_sources, first_usable, has_local_chat,
                           selected_usable)
 from ..core.server import _query_serving_model, server_process_alive, server_state, stop_server
 from ..connection import cloud_media, remote as remote_mod
@@ -27,7 +27,7 @@ from . import guide, theme, widgets
 from .chat import ChatMixin
 from .image_gen import ImageGenMixin
 from .video_gen import VideoGenMixin
-from .service import ServiceMixin
+from .service import ServiceMixin, START_BLOCK_TIP
 from .models_ui import ModelsMixin, NO_MODEL_LABEL, model_missing
 from .settings import SettingsMixin
 from .subwindows import SubWindowMixin
@@ -37,6 +37,11 @@ from .promptopt_ui import PromptOptMixin
 # 输出栏那条「[环境] 三条路都还没通」提示的文字标签：首个可用模型一出现，
 # `_dismiss_env_hint` 按它把整块（连嵌进来的两个按钮）删掉（W 2026-10-08）。
 ENV_HINT_TAG = "env_hint"
+
+# 「启动服务」闸门判据的缓存时长：顶栏每 3 秒被状态队列叫一次，而这条判据里最坏
+# 有一趟目录扫描（`has_local_chat`）。选中项/引擎指路/类型没变时 10 秒内不重扫
+# （坑 4 的通用纪律："判据要扫盘就带冷却"，与自动选中那条安全网同一个量级）。
+START_GATE_TTL_S = 10.0
 
 
 class App(ChatMixin, ImageGenMixin, VideoGenMixin, ServiceMixin, ModelsMixin, SettingsMixin,
@@ -64,6 +69,12 @@ class App(ChatMixin, ImageGenMixin, VideoGenMixin, ServiceMixin, ModelsMixin, Se
         self._sess_saved = False
         self._announced_path = ""
         self._log_key = None
+        # 对话记录的范围 = 只收"模型真的答过话"的轮次（W 2026-10-13 定）。
+        # `_log_turn_start` = 本轮在 history 里的起点下标（_do_send 里记），
+        # `_log_drop` = 模型一个字都没答上来的那些轮的起点下标（落盘时按它筛掉整轮）。
+        # history 本身不动：它还是下一轮请求的上下文，用户重发时那条提问仍在。
+        self._log_turn_start = 0
+        self._log_drop = set()
         self._busy = False           # 正在生成回复
         self._svc_busy = False       # 服务启动/停止操作进行中（防重入）
         self._closing = False
@@ -101,6 +112,11 @@ class App(ChatMixin, ImageGenMixin, VideoGenMixin, ServiceMixin, ModelsMixin, Se
         # 状态队列每 3 秒叫一次 `_render_status`，而"整排重放"要 6~12 ms —— 状态没变
         # 就直接跳过（W 2026-10-08，见 `_layout_topbar`）。
         self._topbar_state = None
+        # 「启动服务」闸门的缓存：_start_block = 当前阻塞原因（""=能启动），
+        # _start_block_key / _start_block_at = 上一判时的输入快照与时刻（见 `START_GATE_TTL_S`）
+        self._start_block = ""
+        self._start_block_key = None
+        self._start_block_at = 0.0
         # 主题实时切换：状态灯要按"最后状态"重涂（retint 用）；跟随系统模式
         # 每 30 秒对一次系统深浅偏好（ui_theme=auto 才动手）
         self._last_status = None
@@ -563,6 +579,9 @@ class App(ChatMixin, ImageGenMixin, VideoGenMixin, ServiceMixin, ModelsMixin, Se
         self.stop_svc_btn.pack(side="right", padx=3)
         self.start_btn = theme.button(top, text="启动服务", command=self.on_start_restart)
         self.start_btn.pack(side="right", padx=3)
+        # 置灰时悬停给一句"为什么不行、去哪儿修"（与附件条置灰档同一套做法，坑 213 的
+        # 口径：置灰不隐藏 + 说清依据）。判据没挡住时返回空串，bind_tip 就不弹层。
+        widgets.bind_tip(self.start_btn, self._start_tip)
         self.stop_gen_btn = theme.button(top, text="停止生成",
                                          command=self.stop_generate, state="disabled")
         self.stop_gen_btn.pack(side="right", padx=3)
@@ -1668,6 +1687,34 @@ class App(ChatMixin, ImageGenMixin, VideoGenMixin, ServiceMixin, ModelsMixin, Se
         except Exception:
             pass
 
+    def _start_block_reason(self):
+        """「启动服务」现在被什么挡住："" = 能启动（判据只有一处 = core.models.chat_start_block）。
+
+        带 10 秒缓存（`START_GATE_TTL_S`）：选中项不可信时这条判据要扫一遍模型目录，
+        而顶栏每 3 秒被状态队列叫一次（坑 4 的通用纪律）。缓存的键是判据读的那四项配置，
+        所以"刚指好引擎""刚配好模型并自动选中"都会**立刻**换结论；用户在程序外面悄悄放
+        进一个模型，最迟 10 秒后按钮自己亮 —— 与自动选中那条安全网同一个节奏。
+        """
+        key = (str(self.cfg.get("model") or ""),
+               str(self.cfg.get("model_kind") or ""),
+               str(self.cfg.get("model_provider") or ""),
+               str(self.cfg.get("exe") or ""))
+        now = time.monotonic()
+        if key == self._start_block_key and now - self._start_block_at < START_GATE_TTL_S:
+            return self._start_block
+        self._start_block_key = key
+        self._start_block_at = now
+        self._start_block = chat_start_block(self.cfg)
+        return self._start_block
+
+    def _start_tip(self):
+        """置灰的「启动服务」悬停给一句"为什么不行、去哪儿修"。
+
+        能启动时返回空串 —— `widgets.bind_tip` 拿到空串不弹层，所以这条绑定常驻，
+        不用在每次显隐时换绑（与附件条置灰档同一套做法）。
+        """
+        return START_BLOCK_TIP.get(self._start_block, "")
+
     def _render_status(self, alive, ready):
         self._last_status = (bool(alive), bool(ready))
         """渲染状态灯 + 状态驱动的按钮样式与显隐。
@@ -1710,6 +1757,13 @@ class App(ChatMixin, ImageGenMixin, VideoGenMixin, ServiceMixin, ModelsMixin, Se
         elif cloud or media_local:
             # 云端 / 生图 / 生视频都不需要聊天服务：启动按钮即使可见（引导期）也置灰；
             # 停止按钮仍按实际服务状态（若旧聊天服务还在运行可停掉）
+            self._start_block = ""
+            self.start_btn.configure(text="启动服务", state="disabled")
+            self.stop_svc_btn.configure(state="normal" if alive else "disabled")
+        elif self._start_block_reason():
+            # 闸门（W 2026-10-13 定）：没有可用的本地文本模型时，哪怕 llama 引擎已经
+            # 下载到位，也不许启动——按钮置灰 + 悬停说清缺什么（悬停文案见 START_BLOCK_TIP）。
+            # 判据与「未启动」那句拦截同源（`chat_start_block`），动作路径另有守卫（坑 128）。
             self.start_btn.configure(text="启动服务", state="disabled")
             self.stop_svc_btn.configure(state="normal" if alive else "disabled")
         else:

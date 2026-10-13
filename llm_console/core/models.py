@@ -436,6 +436,41 @@ def has_local_chat(cfg):
         return False
 
 
+# 「启动服务」被挡住的三种原因（界面按它选悬停文案，启停动作按它拦下）。
+# 用字符串常量而不是异常：调用点要么置灰、要么说一句人话，都不需要控制流抛来抛去。
+BLOCK_ENGINE = "engine"     # llama 引擎没就位
+BLOCK_MODEL = "model"      # 引擎有了，但这台机器上没有可用的本地文本模型
+BLOCK_STALE = "stale"      # 有可用模型，但当前选中的那个文件已经不在了（或压根没选中）
+
+
+def chat_start_block(cfg):
+    """点「启动服务」现在为什么做不了：`""` = 可以启动。
+
+    判据两半（W 2026-10-13 定，口径 = "按钮的含义是点了就能起来"）：
+      ① 这台机器上有可用的本地文本模型 —— llama 引擎就位 **且** 目录里至少一个能聊天的
+         gguf。这一半直接复用 `has_local_chat`：它与 8081 代理闸门问的是**同一件事**，
+         写第二处迟早各说各话（坑 128 / 坑 150）。
+      ② 当前选中的那个本地文本模型文件真的在。指着一条已被删掉或搬走的路径去启动，
+         换来的只是一句「启动失败」，等于让按钮承诺一件做不到的事。
+    选中的是云端 / 生图 / 生视频时这里一律答 `""`：那条链路根本不经过服务，界面已经
+    按 `model_kind` / `is_cloud` 把按钮收起来了，两套规则不该互相覆盖。
+
+    成本：②成立时一个盘都不必扫（引擎判据 = 一次 isfile）。只有"选中项本身不可信"
+    才走到 `has_local_chat` 那一次目录扫描，界面那一侧还另带 10 秒缓存。
+    """
+    c = cfg or {}
+    if providers.is_cloud(c) or str(c.get("model_kind") or "chat") != "chat":
+        return ""
+    if not engine_ready(c, "chat"):
+        return BLOCK_ENGINE
+    cur = str(c.get("model") or "")
+    if cur and os.path.isfile(cur):
+        return ""
+    if cur:
+        return BLOCK_STALE
+    return "" if has_local_chat(c) else BLOCK_MODEL
+
+
 # ---------------------------------------------------------------------------
 # 「现在就能用」—— 引擎存在 × 模型存在（坑 150）
 # ---------------------------------------------------------------------------

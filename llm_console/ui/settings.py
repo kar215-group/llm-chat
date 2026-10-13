@@ -15,13 +15,15 @@ from ..core import (capability, codesign, cloudjobs, engine_install, hardware,
 from ..core.config import (APP_DIR, APP_VERSION, CFG_VERSION, DEFAULT_CONFIG,
                            FLOAT_KEYS, INT_KEYS, STR_KEYS, cloud_media_dir,
                            gen_api_key, save_config)
-from ..core.models import has_local_chat, scan_models, scan_video_models, usable_local
+from ..core.models import (chat_start_block, has_local_chat, scan_models,
+                           scan_video_models, usable_local)
 from ..core.params import ctx_for, current_ngl
 from ..core.server import _query_serving_model, server_alive, server_process_alive
 from ..connection import cloud
 from ..connection import remote as remote_mod
 from . import theme
 from . import widgets
+from .service import START_BLOCK_TIP
 
 # 分辨率写法警示（坑 183，W 2026-10-09 定）：不合格值**不拦发送**（发送侧照旧回退
 # 默认档 / 不送该参数），红字只负责把「静默回退」变成看得见。文案是 W 原话
@@ -1437,8 +1439,15 @@ class SettingsMixin:
                 r4["i"] += 1
 
             fr = ttk.Frame(t4)
-            theme.button(fr, text="启动 / 重启服务（给 agent 用）", width=22,
-                       command=self.on_start_restart_agent).pack(side="left", padx=(0, 6))
+            # 启动引擎的闸门与主页面同一条判据（core.models.chat_start_block；坑 128：
+            # 一个事实只写一处，两个入口各查各的迟早走偏）。这一页的 usable 本来就是
+            # has_local_chat，置灰只是把它也落到这个按钮上；悬停文案与顶栏共用一份表。
+            blk = chat_start_block(self.cfg)
+            svc_btn = theme.button(fr, text="启动 / 重启服务（给 agent 用）", width=22,
+                       command=self.on_start_restart_agent,
+                       state="disabled" if blk else "normal")
+            widgets.bind_tip(svc_btn, lambda: START_BLOCK_TIP.get(blk, ""))
+            svc_btn.pack(side="left", padx=(0, 6))
             theme.button(fr, text="停止服务", width=10,
                        command=self.stop_server_async).pack(side="left", padx=(0, 6))
             theme.button(fr, text="重启代理", width=10,
