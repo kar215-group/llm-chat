@@ -553,7 +553,10 @@ class RemoteServer:
             refs=refs,
             ref_mode=str(payload.get("ref_mode", "") or ""),
             strength_tier=str(payload.get("strength_tier", "") or ""),
-            mask=str(payload.get("mask", "") or ""))
+            mask=str(payload.get("mask", "") or ""),
+            # 一次出几张（网页「远程生图」旁的小控件；夹取在 submit 一处做，
+            # 越界 / 非数字一律当 1 —— 引擎只对生图支持批量）
+            count=payload.get("count", 1))
         if err:
             busy = ("忙" in err or "进行" in err)
             return h._json(409 if busy else 400, {"error": err})

@@ -124,6 +124,8 @@ class ModelsMixin:
         # 放在所有分支之前 —— 从生图切回聊天时也必须把那块区域收起来
         # （方法内部有 getattr 守卫，顶栏先于输入区构建时调用是空操作）。
         self._refresh_ref_mode_zone()
+        # 输入框右下角的「×n」多次生成控件同一条纪律（只给本地生图模型显示）
+        self._refresh_count_zone()
         cur = str(self.cfg.get("model") or "")
         if model_missing(self.cfg):
             # 「（纯文本）」是**能力**标注，只有真选上了模型才谈得上能力：一个 .gguf 都没有

@@ -11,7 +11,8 @@ from tkinter import ttk
 
 from ..core import capability, cloudjobs, config, providers, sdprofile
 from . import theme
-from ..core.media import (build_img_cmd, edit_strength, img_out_dir, mask_hint,
+from ..core.media import (batch_count_of, batch_out_paths, build_img_cmd,
+                          edit_strength, img_out_dir, mask_hint,
                           plan_ref_images, resolve_img_files,
                           resolve_img_model_path)
 from ..connection import cloud_media
@@ -107,6 +108,15 @@ class ImageGenMixin:
         outdir = img_out_dir(self.cfg)   # <产物文件夹>/本地/image（2026-10-06 起）
         os.makedirs(outdir, exist_ok=True)
         out = os.path.join(outdir, time.strftime("img_%Y%m%d_%H%M%S") + ".png")
+        # 多次生成（×n，W 2026-10-13）：只在本地生图链路生效（云端在上面已分流 ——
+        # n 次请求 = n 次真实计费，"省一次加载"在云端也不成立）。归一与夹取都在
+        # App._normalize_count → media.batch_count_of 一处；归一的生效值回写框。
+        try:
+            count = max(1, int(self._normalize_count() or 1))
+        except Exception:
+            count = 1
+        # 期望产物：n=1 = [out]（逐字不变）；n>1 = 主干_1.._n（与引擎命名同源）
+        expected = batch_out_paths(out, count)
 
         # 预检都过了才消费输入框与附件：清空摆在调用方（send_message）的话，
         # "没找到引擎 / 缺配套件"这类失败会把提示词与参考图一起吃掉（坑 133）
@@ -150,6 +160,9 @@ class ImageGenMixin:
         # 每次任务重新开始：末尾缓冲、日志与"这一次是不是云端"都要归零
         self._img_tail = []
         self._img_extra_paths = []
+        self._img_expected = expected        # 批量产出枚举（退出判据与"同批"行都读它）
+        self._img_batch_i = 0                # 引擎还没报批号
+        self._img_batch_n = count
         self._img_log = config.media_log_path(self.cfg, out)   # media_logs，不在产物目录（W 2026-10-11）
         self._cloud_img = False
         self._t0 = time.time()
@@ -162,7 +175,7 @@ class ImageGenMixin:
             # 任何一步抛错都必须复位，否则发送/切模型永久被"任务进行中"拦住
             cmd = build_img_cmd(self.cfg, prompt, out, steps, size, diffusion, cfg_scale,
                                 seed, ref_mode=mode, ref_images=used, files=files,
-                                strength=st_value, mask=mask_path)
+                                strength=st_value, mask=mask_path, batch=count)
             # 完整引擎日志（命令行 + 引擎原话 + 退出码），与生视频链路同形：界面只回显末几行，
             # "引擎说完成了文件在哪"这类问题只能靠这份文件回答（`10` §2 一直是这么写的，
             # 但生图这条链路的落盘此前根本没接上 —— 2026-10-11 补）。
@@ -417,8 +430,20 @@ class ImageGenMixin:
             return
         elapsed = int(time.time() - self._t0) if getattr(self, "_t0", None) else 0
         low = line.lower()
+        mb = re.search(r"generating image: (\d+)/(\d+) - seed ", line)
+        if mb:
+            # 批量（-b n>1）时每张开头这一行（源码里的 LOG_INFO："generating image:
+            # i/n - seed s"）：记批号并把「第 i/n 张」先报出来。n=1 时这一行与
+            # 改造前一样原样跳过（文案逐字不变）。
+            self._img_batch_i = int(mb.group(1))
+            self._img_batch_n = int(mb.group(2))
+            if self._img_batch_n > 1:
+                self._update_img_progress_line(
+                    "🎨 生成中… 第 %d/%d 张 · %ds"
+                    % (self._img_batch_i, self._img_batch_n, elapsed))
+            return
         if "generating image" in line:
-            return      # 采样开始行：没有进度数字可报，原样跳过（进度靠下面的 n/m 行）
+            return      # 采样开始行（其它形状）：没有进度数字可报，原样跳过
         m = re.search(r"(\d+)/(\d+) - ", line)
         steps = max(1, int(self.cfg.get("img_steps", 20) or 20))
         if m:
@@ -426,12 +451,22 @@ class ImageGenMixin:
             if (not getattr(self, "_saw_decode", False)
                     and total == steps and cur <= total):
                 # 只认与设定步数一致的进度（区分模型加载段与 VAE 分块）
-                self._update_img_progress_line(
-                    "🎨 生成中… %d/%d 步 · %ds" % (cur, total, elapsed))
+                if (getattr(self, "_img_batch_n", 1) or 1) > 1:
+                    # 批量：带批号（W 2026-10-13 逐字批准）
+                    self._update_img_progress_line(
+                        "🎨 生成中… 第 %d/%d 张 · %d/%d 步 · %ds"
+                        % (max(1, self._img_batch_i), self._img_batch_n,
+                           cur, total, elapsed))
+                else:
+                    self._update_img_progress_line(
+                        "🎨 生成中… %d/%d 步 · %ds" % (cur, total, elapsed))
             return
         if "decoding" in line and "latent" in line:
             self._saw_decode = True
-            self._update_img_progress_line("🎨 解码图片… %ds" % elapsed)
+            _n = getattr(self, "_img_batch_n", 1) or 1
+            self._update_img_progress_line(
+                ("🎨 解码 %d 张图片… %ds" % (_n, elapsed)) if _n > 1
+                else ("🎨 解码图片… %ds" % elapsed))
         elif "error" in low or "failed" in low or "out of memory" in low:
             # 报错当场固化在进度行上，别等它被进度行一起删掉
             self._update_img_progress_line("🎨 %s" % line.strip()[:160])
@@ -448,6 +483,14 @@ class ImageGenMixin:
         self._cloud_reset("image")
         self._set_busy_ui(False)
         out = getattr(self, "_img_out", "")
+        # 批量（×n）判据：按 `_img_expected` 逐条核（n=1 时它就等于 [out]，与改造前
+        # 逐字等价；云端不设 expected，走 worker 现场回写的 _img_out 旧判据）。
+        # 成功 = rc==0 且**至少有一张**落地；第一张当主图、其余走"同批还有"那行
+        # （与云端同款回显，W 2026-10-13 选定）。
+        exp = [p for p in (getattr(self, "_img_expected", []) or []) if p]
+        found = [p for p in exp if os.path.isfile(p)]
+        if not exp:
+            found = [out] if (out and os.path.isfile(out)) else []
         cancelled = self._stop_flag is not None and self._stop_flag.is_set()
         # 清除进度行（mark 到末尾；行结构由进度文字的前导换行维持）
         mark = getattr(self, "_img_mark", None)
@@ -463,7 +506,11 @@ class ImageGenMixin:
             self._append("🎨 [已取消生成]\n", "meta")
             self._append("────────────────\n", "meta")
             return
-        if rc == 0 and out and os.path.isfile(out):
+        if rc == 0 and found:
+            # 主图 = 第一张落地产物；其余进"同批还有 N 张"（n=1 时 extras 为空，
+            # 与改造前逐字一致）
+            self._img_out, self._img_extra_paths = found[0], found[1:]
+            out = found[0]
             # 关键：回显必须处于 normal 状态——disabled 的 Text 会静默丢弃
             # image_create/insert/window_create（此前图片不显示的根因）。
             # 布局：提示词行 → 进度行（原位替换）→ 图片独立成行，按钮在图片右侧同行

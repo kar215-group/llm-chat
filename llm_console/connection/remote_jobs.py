@@ -70,7 +70,7 @@ class RemoteJobs:
     # ---- 提交 ----
 
     def submit(self, prompt, device_id, refs=None, ref_mode="",
-               strength_tier="", mask=""):
+               strength_tier="", mask="", count=1):
         """提交一个生图任务 → (task_id, 错误文案)。错误非空 = 没提交。
 
         二期入参（2026-10-11，W 拍板）：`refs` = 已上传附件的登记名列表、
@@ -80,6 +80,9 @@ class RemoteJobs:
         GUI 链路**（ui/image_gen._start_chat_image：resolve_modes → 手选档
         校验 → default_ref_mode → plan_ref_images → edit_strength），回显行
         与命令行同源（同一条"说出去的强度就是引擎收到的强度"纪律）。
+        `count` = 一次出几张（2026-10-13 加，网页端「远程生图」旁的小控件）：
+        夹到 1..BATCH_MAX，>1 时一次进程出 n 张（判据与命名见 core/media 的
+        batch_* 三个函数；引擎只对生图支持批量）。
         """
         prompt = str(prompt or "").strip()
         if not prompt:
@@ -93,7 +96,8 @@ class RemoteJobs:
                 return None, "本机正在忙（生成 / 生视频 / 服务操作），稍后再试。"
             from ..core.config import cfg_lock
             from ..core import capability, modelreq, providers, sdprofile
-            from ..core.media import (build_img_cmd, edit_strength, img_out_dir,
+            from ..core.media import (batch_count_of, batch_out_paths,
+                                      build_img_cmd, edit_strength, img_out_dir,
                                       mask_hint, plan_ref_images,
                                       resolve_img_files, resolve_img_model_path)
             with cfg_lock():
@@ -200,11 +204,13 @@ class RemoteJobs:
             out = os.path.join(outdir, "img_r%s_%s_%s.png" % (
                 tid, time.strftime("%Y%m%d_%H%M%S"),
                 _datetime.datetime.now().strftime("%f")))
+            n = batch_count_of(count)
+            expected = batch_out_paths(out, n)   # n>1 → 主干_1.._n（与引擎命名同源）
             log_path = config.media_log_path(snap, out)
             cmd = build_img_cmd(snap, prompt, out, steps, size, diffusion,
                                 cfg_scale, seed, files=files,
                                 ref_mode=mode, ref_images=used,
-                                strength=st_value, mask=mask_path)
+                                strength=st_value, mask=mask_path, batch=n)
             try:
                 with open(log_path, "w", encoding="utf-8", errors="replace") as lf:
                     lf.write("=== argv（远程 %s）===\n" % device_id)
@@ -232,9 +238,14 @@ class RemoteJobs:
                           "prompt": prompt[:200], "state": "running",
                           "progress": None, "tail": [], "files": [],
                           "error": "", "out": out, "t0": time.time(),
-                          "echo": echo}
+                          "echo": echo, "count": n, "steps": steps,
+                          "expected": expected}
+            # 台账落点取 expected[0]：n=1 时它就是 out（与改造前逐字一致）；
+            # n>1 时指向 _1 那张（取回/历史都只按 dirname(path) + files[] 算，
+            # 形状不动 —— 台账条目形状是接口，见 remote_ledger 头注）。
             ledger_add({"id": tid, "device_id": device_id,
-                         "name": os.path.basename(out), "path": out,
+                         "name": os.path.basename(expected[0]),
+                         "path": expected[0],
                          "done": False, "ok": False,
                          "submitted": time.strftime("%Y-%m-%d %H:%M:%S")})
             threading.Thread(target=self._reader, daemon=True,
@@ -250,6 +261,9 @@ class RemoteJobs:
         task = self._task
         stop = self._stop_flag
         prog_rx = re.compile(r"(\d+)/(\d+) - ")
+        # 批量（-b n>1）时引擎每张开头印 "generating image: i/n - seed s"，
+        # 它也会命中 prog_rx（1/3 - …）——先认它，避免把批号当采样进度。
+        batch_rx = re.compile(r"generating image: (\d+)/(\d+) - ")
         tail = []
         log = config.media_log_path(self.cfg, task["out"])
         try:
@@ -259,9 +273,22 @@ class RemoteJobs:
                     continue
                 tail.append(line)
                 del tail[:-40]                       # 保尾 40 行（失败原因在这）
-                m = prog_rx.search(line)
-                if m:
-                    task["progress"] = [int(m.group(1)), int(m.group(2))]
+                mb = batch_rx.search(line)
+                if mb:
+                    task["batch"] = [int(mb.group(1)), int(mb.group(2))]
+                else:
+                    m = prog_rx.search(line)
+                    if m:
+                        cur, total = int(m.group(1)), int(m.group(2))
+                        n = int(task.get("count") or 1)
+                        if n > 1 and total == int(task.get("steps") or 0):
+                            # 批量：跨批**累计**进度（手机上的进度条单调推进，
+                            # 不每张从 0 回跳）；n=1 时与改造前逐字等价。
+                            b = task.get("batch") or [1, n]
+                            task["progress"] = [(max(1, b[0]) - 1) * total + cur,
+                                                n * total]
+                        else:
+                            task["progress"] = [cur, total]
                 if log:
                     try:
                         with open(log, "a", encoding="utf-8",
@@ -279,26 +306,38 @@ class RemoteJobs:
             audit("image.read", task.get("device_id", "?"), False,
                   "%s: %s" % (type(e).__name__, e))
             task["error"] = READ_FAIL_MSG
+        # 终态与审计先算先写，再翻任务态：`/api/task` 走**无锁快路径**读 task
+        # （B3），客户端一看到 state 离开 running 就会来读审计 —— 顺序反了会有
+        # 一瞬"任务已失败、审计里还没有 image.exit"（2026-10-13 `test_remote`
+        # [17] 偶发红，同 K10⑤ "响应先于审计落盘" 家族）。
+        # 批量（n>1）时产物是 out 主干派生的 _1.._n：成功判据 = rc==0 且**至少
+        # 有一张**落地（引擎是最后一次统一落盘，中途被杀不会留半批）；files 记
+        # 实际落地的那些（取回 / 历史清单按它列）。n=1 时 expected == [out]，
+        # 与改造前逐字等价。
+        found = [p for p in (task.get("expected") or [task["out"]])
+                 if os.path.isfile(p)]
+        ok = (rc == 0 and bool(found)
+              and not stop.is_set())
+        # 引擎末尾行进审计（本机的痕迹），手机端只留下面那句人话
+        audit("image.exit", task.get("device_id", "?"), ok,
+              "rc=%s%s" % (rc, "" if ok else "｜" + " ｜ ".join(tail[-3:])))
         with self._lock:
-            ok = (rc == 0 and os.path.isfile(task["out"])
-                  and not stop.is_set())
-            task["state"] = "done" if ok else (
+            final = "done" if ok else (
                 "cancelled" if stop.is_set() else "failed")
             if not ok and rc != 0 and not task["error"]:
                 task["error"] = FATAL_MSG % rc
             task["tail"] = tail[-6:]      # 只给本机看（status() 不外发，见 P0-2）
-            task["files"] = ([os.path.basename(task["out"])]
-                             if os.path.isfile(task["out"]) else [])
+            task["files"] = [os.path.basename(p) for p in found]
             # state 一起进台账（P1-7）：原先只能从 done/ok 反推，于是"已停止"
             # 在手机端被报成"失败"。台账加键不动形状，旧条目照读。
-            ledger_update(task["id"], done=True, ok=ok, state=task["state"],
+            # **台账先落、再翻 task["state"]**：客户端经无锁快路径看到终态时，
+            # 台账必须已经是终态（[21] 取消状态保真同族竞态）。
+            ledger_update(task["id"], done=True, ok=ok, state=final,
                           files=task["files"])
+            task["state"] = final
             # 收尾写完**再**释放单槽：反过来的话会有一瞬"槽已空、台账还是
             # done=False"（busy() 不抢锁，手机端就在这一瞬提交下一条）
             self._proc = None
-        # 引擎末尾行进审计（本机的痕迹），手机端只留上面那句人话
-        audit("image.exit", task.get("device_id", "?"), ok,
-              "rc=%s%s" % (rc, "" if ok else "｜" + " ｜ ".join(tail[-3:])))
 
     def cancel(self, task_id=None, device_id=None):
         with self._lock:
@@ -386,12 +425,33 @@ class RemoteJobs:
                 "progress": cur.get("progress"), "files": cur.get("files") or [],
                 "error": cur.get("error", ""), "echo": cur.get("echo") or []}
 
+    @staticmethod
+    def _entry_path(t, name):
+        """台账条目 + 产物名 → 该取回的白名单路径；不在 / 校验不过 = None。
+
+        判据**唯一一处**：`artifact_path`（能不能取回）与 `history`（列不列出来）
+        共用 —— 文件在电脑上被删掉后两边同时消失，不会一边列着碎图、一边点开说
+        不存在（坑 128 同族：同一件事的判据分叉在两个入口）。双层校验口径与
+        改造前逐字一致：纯 basename + 落点就在台账登记的那个目录里。
+        """
+        if not name or os.path.basename(name) != name or name in (".", ".."):
+            return None
+        p = os.path.join(os.path.dirname(str(t.get("path", ""))), name)
+        base = os.path.realpath(os.path.dirname(str(t.get("path", ""))))
+        real = os.path.realpath(p)
+        if real == p and os.path.dirname(real) == base and os.path.isfile(p):
+            return p
+        return None
+
     def history(self, device_id, limit=20):
         """「之前的成果」：台账里**成功产物**的清单（新→旧）。
 
         只回"能不能取 + 取回要的参数"，**绝不回 path**（那是本机盘符与目录结构，
         坑 209⑥）。开关的用处到这里才真正落地：`remote_history` 关 = 这台设备
         自己的历史，开 = 台账全量。
+
+        只列**文件还在**的条目（W 2026-10-13）：产物在电脑上被删掉后，页面刷新
+        就不再出现那一格碎图 —— 判据与 `/api/artifact` 同一条（`_entry_path`）。
         """
         out = []
         for t2 in reversed(ledger_load()):
@@ -399,6 +459,8 @@ class RemoteJobs:
                 continue
             if not self._may_see(t2.get("device_id"), device_id):
                 continue
+            if self._entry_path(t2, t2["files"][0]) is None:
+                continue          # 取不回来（被删 / 被移走）→ 不列出来
             out.append({"task": t2.get("id"), "name": t2["files"][0],
                         "submitted": t2.get("submitted", "")})
             if len(out) >= limit:
@@ -425,11 +487,5 @@ class RemoteJobs:
                 if not self._may_see(t.get("device_id"), device_id):
                     return None
                 if name in (t.get("files") or []):
-                    p = os.path.join(os.path.dirname(str(t.get("path", ""))), name)
-                    base = os.path.realpath(os.path.dirname(str(t.get("path", ""))))
-                    real = os.path.realpath(p)
-                    if real == p and os.path.dirname(real) == base \
-                            and os.path.isfile(p):
-                        return p
-                    return None
+                    return self._entry_path(t, name)
         return None

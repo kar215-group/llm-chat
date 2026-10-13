@@ -111,6 +111,11 @@ class ChatMixin:
         文件框**默认放开所有文件类型**（W 2026-10-08）：选完之后才按扩展名分派 ——
         图片走图片通路，其余走文档通路；系统读不了的格式（PDF / 老 .doc / 不认识的
         扩展名）由 `textfile.read_document` 在挂附件那一刻弹出对应提示，不在挑选时拦。
+
+        **Ctrl 多选（W 2026-10-13）**：文件框换成 askopenfilenames，逐份走同一条
+        分派 —— 语义与"连着单选多次"逐字等价（多选返回的是文件框显示顺序，不是
+        点选顺序；参考图"第一张"以显示序为准）。聊天 / 生视频仍只发送最后一张
+        （现状规则），状态行会照实说（见 _refresh_attach_note）。
         """
         kind = self.cfg.get("model_kind")
         cloud = providers.is_cloud(self.cfg)
@@ -131,43 +136,43 @@ class ChatMixin:
             # （providers.ref_image_mode），具体语义在发送后的回显里说。
             # 文件框默认档 = 「所有文件」（W 2026-10-08）：任何类型都允许选，
             # 读不了的在挂附件那一刻给提示（走 _attach_picked → read_document）。
-            p = filedialog.askopenfilename(
+            picked = filedialog.askopenfilenames(
                 title=("选择首帧图片或文本附件（图片作为图生视频的第一帧）"
                        if kind == "video" else "选择参考图或文本附件"),
                 filetypes=(list(textfile.file_dialog_types())
                            + [_IMG_FILTER]))
-            if p:
+            for p in picked or ():
                 self._attach_picked(p)
             return
-        p = filedialog.askopenfilename(
+        picked = filedialog.askopenfilenames(
             title="选择附件（图片或文本文件）",
             filetypes=(list(textfile.file_dialog_types())
                        + ([_IMG_FILTER] if not cloud else [])))
-        if not p:
-            return
-        k = textfile.kind_of(p)
-        if k == "image":
-            res = capability.resolve(self.cfg)
-            if res["verdict"] != capability.YES:
-                # 判据说"不行/没确认"时不硬拦到底：给一次人工放开的机会。
-                # 自动判据会有假阴性（投影器放在别处、文件名不规范、云端根本没能力字段），
-                # 这种时候让用户说了算，比让他去设置页绕一圈快。
-                if messagebox.askyesno(
-                        "图片输入",
-                        self._no_image_hint(res) +
-                        "\n\n仍要按「支持图片输入」处理这个模型吗？\n"
-                        "（选「是」= 记为该模型支持，之后不再拦；"
-                        "可在 设置 → 云端模型 → 服务商与密钥 →「选择模型…」里改回「自动判断」）"):
+        for p in picked or ():
+            k = textfile.kind_of(p)
+            if k == "image":
+                res = capability.resolve(self.cfg)
+                if res["verdict"] != capability.YES:
+                    # 判据说"不行/没确认"时不硬拦到底：给一次人工放开的机会。
+                    # 自动判据会有假阴性（投影器放在别处、文件名不规范、云端根本没能力字段），
+                    # 这种时候让用户说了算，比让他去设置页绕一圈快。
+                    # 多选口径：说"不"就这一批都不再问（同单选时的 return）；说"是"
+                    # 记为该模型支持后，后面几张走上面的快路不再弹。
+                    if not messagebox.askyesno(
+                            "图片输入",
+                            self._no_image_hint(res) +
+                            "\n\n仍要按「支持图片输入」处理这个模型吗？\n"
+                            "（选「是」= 记为该模型支持，之后不再拦；"
+                            "可在 设置 → 云端模型 → 服务商与密钥 →「选择模型…」里改回「自动判断」）"):
+                        return
                     capability.set_choice(self.cfg, capability.YES)
                     save_config(self.cfg)
                     self._append("\n[模型] 已把「%s」标记为支持图片输入。\n"
                                  % capability.model_key(self.cfg), "meta")
                     self._update_model_label()
-                    self.set_attachment(p)
-                return
-            self.set_attachment(p)
-        else:
-            self.set_file_attachment(p)
+                self.set_attachment(p)
+            else:
+                self.set_file_attachment(p)
 
     def _attach_picked(self, p):
         """📎 选果的统一路由：图片进参考图列表，其余走文档附件（全模式同一规则）。
@@ -557,6 +562,17 @@ class ChatMixin:
             # 与发送侧共用同一份取舍判断（media.plan_ref_images），说的和发的不会对不上
             note = media.plan_ref_images(self._attached_images,
                                          capability.MODE_EDIT)[2]
+        elif len(self._attached_images or []) > 1:
+            # 多选之后"挂了却只用一张"的两处要照实说（W 2026-10-13 逐字批准）：
+            # 聊天同一条消息只带最后一张、图生视频只用最后一张作首帧。
+            # 生图模式（本地 / 云端）的多图取舍在上一支或发送侧说，不在这里重复。
+            _kind = str(self.cfg.get("model_kind") or "")
+            if _kind == "video":
+                note = ("图生视频只用最后一张作首帧（已挂 %d 张）"
+                        % len(self._attached_images))
+            elif _kind == "chat":
+                note = ("聊天一次只发送最后一张（已挂 %d 张）"
+                        % len(self._attached_images))
         if self._attached_images and img_edit and not providers.is_cloud(self.cfg):
             # 已涂遮罩要看得见（遮罩是"看不见的输入"，不显示就成了静默行为）。
             # 状态行是"当前状态"不是"说明"，所以留在行内（ADR §5.2 判据④）。

@@ -91,7 +91,10 @@ a.dl{display:inline-block;margin-top:.4em}
 <div id="tabs"><button id="tab_img" type="button">生图</button>
   <button id="tab_chat" type="button">聊天</button></div>
 <div id="imgzone">
-<h2>远程生图</h2>
+<h2>远程生图 <span class="hint" style="font-size:.8em">×</span><input
+   id="cnt" type="number" min="1" max="8" value="1" inputmode="numeric"
+   style="width:2.4em;font-size:.8em;padding:.15em .25em;border:1px solid #ccc;
+   border-radius:6px;vertical-align:middle"></h2>
 <textarea id="prompt" placeholder="描述想要的画面…"></textarea>
 <p><button id="pick" type="button">📎 参考图</button>
    <span class="hint" id="uphint">支持 PNG / JPG / WEBP / BMP，单张不超过 20MB</span></p>
@@ -352,6 +355,9 @@ function loadHistory(){
         var d = document.createElement("div"); d.className = "tile";
         var a = document.createElement("a"); a.href = u; a.target = "_blank";
         var im = new Image(); im.src = u; im.alt = it.name;
+        /* 渲染兜底（不是判据：能不能取回的判据在服务端 /api/history 一处）：
+           列出来到加载之间文件刚被删掉时，别留一格碎图 */
+        im.onerror = function(){ d.remove(); };
         a.appendChild(im); d.appendChild(a); box.appendChild(d);
       });
     })
@@ -416,6 +422,8 @@ function renderTiles(){
       delete MASKS[rf.name];
       renderTiles(); syncZones();
     };
+    d.appendChild(x);            /* 2026-10-13 补：原先创建了却忘了挂上 DOM —— 按钮
+                                    从 beta2 起就"存在但看不见"，删除入口实际不可用 */
     d.onclick = function(){ openMask(rf); };
     box.appendChild(d);
   });
@@ -717,6 +725,23 @@ function tickTask(id){
           $("art").appendChild(im);
           $("art").appendChild(document.createElement("br"));
           $("art").appendChild(a);
+          /* 一次多张（×n）：第一张内嵌大图照旧，其余列下载链接（W 2026-10-13 批准）*/
+          if (j.files.length > 1) {
+            var line = document.createElement("div");
+            line.className = "hint";
+            line.textContent = "另 " + (j.files.length - 1) + " 张：";
+            for (var k = 1; k < j.files.length; k++) {
+              var a2 = document.createElement("a");
+              a2.href = "/api/artifact?task=" + id + "&name=" +
+                        encodeURIComponent(j.files[k]);
+              a2.download = j.files[k];
+              a2.textContent = j.files[k];
+              line.appendChild(a2);
+              if (k < j.files.length - 1)
+                line.appendChild(document.createTextNode(" · "));
+            }
+            $("art").appendChild(line);
+          }
         } else if (j.state === "cancelled") {
           $("msg").textContent = "已停止。";
         } else {
@@ -747,7 +772,12 @@ $("go").onclick = function(){
   if (!p) { $("msg").textContent = "先写点提示词。"; return; }
   $("msg").textContent = "提交中…"; $("art").innerHTML = "";
   $("echo").textContent = "";
-  var body = {prompt:p};
+  /* 一次出几张（标题旁的小控件）：夹到 1..8 并把生效值回写框；服务端仍会再夹一次 */
+  var cnt = parseInt($("cnt").value, 10);
+  if (!(cnt >= 1)) cnt = 1;
+  if (cnt > 8) cnt = 8;
+  $("cnt").value = cnt;
+  var body = {prompt:p, count:cnt};
   if (REFS.length) {
     body.refs = REFS.map(function(x){ return x.name; });
     body.ref_mode = MODE;

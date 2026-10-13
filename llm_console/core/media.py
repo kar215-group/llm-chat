@@ -500,8 +500,48 @@ def cleanup_temp():
         pass
 
 
+# ------------------------------------------------- 多次生成（-b / --batch-count）
+#
+# 引擎语义（按部署引擎 commit 228c707 源码 + 本机 `--help` 双核）：`-b` 只对
+# **img_gen** 生效 —— 一次进程里循环采样 n 次（权重装载、提示词编码、参考图编码
+# 只做一次），`cur_seed = 基种 + b`（`-s -1` 时基种在进程内随机一次）⇒ n 张互不
+# 相同。生视频（vid_gen）的参数结构里没有 batch 字段，一次多片做不了（W 2026-10-13
+# 裁定：不对生视频做改动）。命名 = 输出主干 + `_<idx>` + 扩展名，idx 起点由
+# `--output-begin-idx` 定：**help 说默认 1、源码未指定时落 0**（两边不一致），
+# 所以我们显式传 `1`，不赌默认值、也不依赖它的哪个版本。
+BATCH_MAX = 8          # UI 侧上限（与引擎 strict 档自身的 1..8 同口径）
+
+
+def batch_count_of(value, default=1):
+    """用户输入 → 生效张数（夹到 1..BATCH_MAX）。
+
+    空 / 非数字 / 0 / 负数 / 越界一律夹到合法值（0 是明确非法值，不做"falsy 当默认"
+    那类判断）；界面上写回的是**生效值**，用户看到的就是真会发生的张数。
+    走 float 中转：HTTP 那头 JSON 数字可能是 3.0（一些客户端不省小数点），
+    直接 int("3.0") 会当非数字吞成 1 —— 张数这种"少给一次"最容易被误读成功能坏了。
+    """
+    try:
+        n = int(float(str(value).strip()))
+    except Exception:
+        n = int(default)
+    return max(1, min(BATCH_MAX, n))
+
+
+def batch_out_paths(out_path, count):
+    """批量产物路径：n<=1 → `[原路径]`（逐字不变）；n>1 → 主干_1 .. 主干_n。
+
+    与引擎落盘命名逐字同源（`--output-begin-idx 1`），GUI 回显、远程台账、
+    真机探针都读这一份，不各写一遍。
+    """
+    n = batch_count_of(count)
+    if n <= 1:
+        return [str(out_path)]
+    root, ext = os.path.splitext(str(out_path))
+    return ["%s_%d%s" % (root, i, ext) for i in range(1, n + 1)]
+
+
 def build_img_cmd(cfg, prompt, out_path, steps, size, diffusion_path, cfg_scale, seed,                  init_img=None, vae=None, llm=None, family=None, files=None,
-                  ref_mode="", ref_images=None, strength=None, mask=None):
+                  ref_mode="", ref_images=None, strength=None, mask=None, batch=None):
     """组装 sd-cli 生图命令行（形状由模型族决定，参数值仍来自配置）。
 
     Qwen-Image 这条链路保持改造前的逐字顺序：
@@ -513,6 +553,9 @@ def build_img_cmd(cfg, prompt, out_path, steps, size, diffusion_path, cfg_scale,
 
     `strength` = 底图重绘档这次要发的 `--strength`；留 None = 在这里按提示词自动分档
     （`edit_strength`）。界面侧（`ui/image_gen.py`）先算好再传进来，回显与命令行同源。
+
+    `batch` = 这次要出几张（1..BATCH_MAX，`batch_count_of` 夹取）；>1 才追加
+    `-b n --output-begin-idx 1`，产物名见 `batch_out_paths`。n=1（默认）argv 逐字不变。
     """
     sd = cfg.get("sd_dir", "")
     if files is None:
@@ -562,6 +605,12 @@ def build_img_cmd(cfg, prompt, out_path, steps, size, diffusion_path, cfg_scale,
         args += ["-n", neg]
     args += ["--steps", str(steps), "-W", w, "-H", h,
              "-s", str(seed), "-p", prompt, "-o", out_path]
+    n_batch = batch_count_of(batch)
+    if n_batch > 1:
+        # 多次生成（xn）：n=1 一个参数都不加 —— 实测过的两条链路 argv 逐字不变；
+        # `--output-begin-idx 1` 显式钉住 _1.._n 的命名起点（见上面那段为什么不敢
+        # 用默认值）。位置语义与 --steps 同段，跟在 -o 之后不影响解析。
+        args += ["-b", str(n_batch), "--output-begin-idx", "1"]
 
     # 带图的两档模式：`edit` 底图重绘走 -i（单张），`subject` 主体参考走 -r（可重复给）。
     # `ref_mode` 留空 = 按这一族的默认档（`edit` 字段），所以实测链路的 argv 逐字不变。

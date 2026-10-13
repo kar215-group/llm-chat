@@ -173,6 +173,15 @@ class App(ChatMixin, ImageGenMixin, VideoGenMixin, ServiceMixin, ModelsMixin, Se
         self._img_tail = []          # 生图侧的输出末尾：以前只有视频链路有，失败就只剩一个退出码（坑 40）
         self._img_log = ""           # 本次云端生图的请求/回包日志路径
         self._img_extra_paths = []   # 一次回多张时，除主图之外的落地路径
+        # ---- 多次生成（×n，2026-10-13 W 定）----
+        # 输入框右下角的小控件（控件在 _build_inputbar → _build_count_box 建，
+        # 这里先把字段出生点留好 —— 铁律 3：漏初始化是响亮的 AttributeError）
+        self._img_count_var = None   # tk.StringVar（控件建好才非 None）
+        self._img_count = 1          # 本次生效张数（1..media.BATCH_MAX）
+        self._img_count_visible = False   # 控件显隐去重（place / place_forget）
+        self._img_expected = []      # 本次任务预计落地的产物（批量 _1.._n；云端 = []）
+        self._img_batch_i = 0        # 批量进度：引擎正在出的第几张（0 = 还没报）
+        self._img_batch_n = 1        # 批量进度：本次一共几张
         self._q = queue.Queue()      # 流式输出队列
         self._sq = queue.Queue()     # 状态队列
         self._ui_q = queue.Queue()   # "请在主线程执行"的回调队列（子线程调 root.after 会炸）
@@ -794,6 +803,82 @@ class App(ChatMixin, ImageGenMixin, VideoGenMixin, ServiceMixin, ModelsMixin, Se
 
         # 提示词优化的星星入口（字段出生点；交互形态见 ui/promptopt_ui.py 头注）
         self._build_opt_star()
+        # 输入框右下角的「×n」多次生成控件（只给本地生图模型；见 _build_count_box）
+        self._build_count_box()
+
+    # ---- 多次生成（×n）控件：输入框右下角 ----
+    def _build_count_box(self):
+        """「×n」控件：输入框的孩子 + place 悬挂（同右上角 ★ 的形态，坑 177 先例），
+        钉右下角。W 2026-10-13 定：很小、**不加提示信息**（无悬停气泡、无说明行）。
+
+        只给**本地生图模型**显示（云端 n 次 = n 次真实计费，"省一次加载"也不成立；
+        生视频引擎不支持一次多片 —— W 同日裁定不对生视频做改动）。显隐刷新跟着
+        模型切换走（models_ui._update_model_label → _refresh_count_zone）。
+        按次生效、**不落配置文件**（与 _img_ref_mode / _img_strength_tier 同口径）。
+        """
+        self._img_count_var = tk.StringVar(value="1")
+        self._img_count_lab = tk.Label(self.input, text="×", cursor="xterm",
+                                       font=("Microsoft YaHei UI", 9),
+                                       foreground=theme.c("muted"),
+                                       background=theme.c("bg"))
+        theme.tint(self._img_count_lab, fg="muted", bg="bg")
+        self._img_count_entry = tk.Entry(
+            self.input, textvariable=self._img_count_var, width=2, justify="center",
+            relief="flat", highlightthickness=1,
+            highlightbackground=theme.c("border"), highlightcolor=theme.c("accent"),
+            font=("Microsoft YaHei UI", 9),
+            background=theme.c("bg"), foreground=theme.c("label"),
+            insertbackground=theme.c("label"))
+        theme.tint(self._img_count_entry, fg="label", bg="bg")
+        self._img_count_entry.bind("<FocusOut>", lambda _e: self._normalize_count())
+        self._img_count_entry.bind("<Return>", self._on_count_return)
+        # 建好就按当前模型定一次显隐：顶栏那次 `_update_model_label` 跑在输入区
+        # 建好**之前**（getattr 守卫当空操作），不在这里补一次的话，开机时选着
+        # 本地生图模型也看不到控件、要切一次模型才冒出来（2026-10-13 截图轮抓到）
+        self._refresh_count_zone()
+
+    def _refresh_count_zone(self):
+        """×n 控件的显隐：只给本地生图模型（判据与附件条右侧「带图方式」同一条）。"""
+        entry = getattr(self, "_img_count_entry", None)
+        if entry is None:
+            return                      # 顶栏先于输入区构建（_update_model_label 那时还没有它）
+        show = (str(self.cfg.get("model_kind") or "") == "image"
+                and not providers.is_cloud(self.cfg))
+        if show == self._img_count_visible:
+            return                      # 没变就别动布局（坑 172 纪律）
+        self._img_count_visible = show
+        if show:
+            w = max(12, int(entry.winfo_reqwidth()))
+            # rely=1.0 不能漏：少了它就是钉在输入框**上**边缘（y=-3 → 整件挂到框外，
+            # 看着像"没做出来"）。2026-10-13 截图轮抓到，自检里补了位置断言。
+            self._img_count_lab.place(in_=self.input, relx=1.0, rely=1.0,
+                                      x=-6 - w, y=-3, anchor="se")
+            entry.place(in_=self.input, relx=1.0, rely=1.0,
+                        x=-4, y=-3, anchor="se")
+        else:
+            self._img_count_lab.place_forget()
+            entry.place_forget()
+
+    def _normalize_count(self):
+        """把框里写的归一成生效值（空 / 非数字 / 0 / 越界都夹到 1..BATCH_MAX）并回写。
+
+        回写的是**生效值**：用户看到 8 就知道按 8 张跑（不改写的话按了发送、
+        回显却是别的张数 —— "回显一个值、发另一个值"同族）。
+        """
+        var = getattr(self, "_img_count_var", None)
+        if var is None:
+            return self._img_count
+        self._img_count = media.batch_count_of(var.get())
+        try:
+            var.set(str(self._img_count))
+        except Exception:
+            pass
+        return self._img_count
+
+    def _on_count_return(self, _event=None):
+        """在 ×n 框里敲回车 = 发送（与输入框里的回车同一条路）。"""
+        self.send_message()
+        return "break"
 
     # ---- 对话 ----
     def _set_busy_ui(self, busy):
@@ -920,6 +1005,8 @@ class App(ChatMixin, ImageGenMixin, VideoGenMixin, ServiceMixin, ModelsMixin, Se
             self._img_mark = mark
             self._img_busy, self._cloud_img = True, True
             self._img_tail, self._img_extra_paths = [], []
+            self._img_expected = []      # 云端不走批量：退出判据回 _img_out 旧路
+            self._img_batch_i, self._img_batch_n = 0, 1
             self._img_log = ""
             self._t0 = time.time()
         else:
@@ -1480,6 +1567,13 @@ class App(ChatMixin, ImageGenMixin, VideoGenMixin, ServiceMixin, ModelsMixin, Se
                 pass
         try:
             self.input.configure(highlightbackground=theme.c("border"))
+        except Exception:
+            pass
+        # ×n 控件的悬停/边框两色同样是"建件时烘焙"的（与输入框同款）——一起重涂
+        try:
+            self._img_count_entry.configure(
+                highlightbackground=theme.c("border"),
+                highlightcolor=theme.c("accent"))
         except Exception:
             pass
         # theme_use 的重涂会顺手改掉经典 Text 的**几何与选区色**（实测切一次主题：
