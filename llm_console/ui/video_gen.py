@@ -302,7 +302,8 @@ class VideoGenMixin:
                         log.write(line if line.endswith("\n") else line + "\n")
                     except Exception:
                         pass
-                self._vid_q.put(("line", line.rstrip()))
+                # 带世代号（坑 264，与生图 reader 同款）：旧任务迟到的引擎行不污染新任务
+                self._vid_q.put(("line", line.rstrip(), gen))
         except Exception:
             pass
         try:
@@ -312,7 +313,7 @@ class VideoGenMixin:
         # 乱码镜像搬回（判据与生图链路共用一处：core/media.salvage_products）——
         # 必须赶在 ("exit", …) 入队之前，主线程拿 os.path.isfile 判成功
         try:
-            moved = salvage_products(self.cfg, expected)
+            moved = salvage_products(self.cfg, expected, rc=rc)
         except Exception:
             moved = []
         if log is not None:

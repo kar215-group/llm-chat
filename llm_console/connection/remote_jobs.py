@@ -51,17 +51,20 @@ class RemoteJobs:
         self.note = note_fn or (lambda msg: None)
         self._lock = threading.RLock()
         self._proc = None
+        self._starting = False       # 已占槽、但 Popen 还没返回（预检 / 扫盘 / 拼命令窗口，坑 260）
         self._stop_flag = None
-        self._task = None            # 运行中任务的内存态（进度 / tail）
+        self._task = None            # 运行中任务的内存态（进度 / 尾）
 
     # ---- 状态 ----
 
     def busy(self):
-        # **不抢锁**：`submit` 全程持 `_lock`（预检 + 拼命令 + Popen），而电脑端主线程
+        # **不抢锁**：`submit` 全程持 `_LOCK`（预检 + 拼命令 + Popen），而电脑端主线程
         # 经 `App._any_busy()` 问的正是这个函数 —— 抢同一把锁就变成"手机一提交、
-        # 电脑界面卡到 Popen 返回"（磁盘慢时是秒级）。读一个引用是原子的，这里要的
+        # 电脑界面卡到 Popen 返回"（磁盘慢时是秒级）。读一个 bool 是原子的，这里要的
         # 只是个提示位；真正串行化的占槽判定仍在 submit 的锁内。
-        return self._proc is not None
+        # `_starting` 必须算进来：锁内预检到 `_proc` 赋值之间（慢盘可达秒级）GUI
+        # 侧轮询若只看 `_proc` 会答"空闲"，第二份 sd-cli 就能启动抢显存（坑 260）。
+        return self._proc is not None or bool(self._starting)
 
     def running_task(self):
         with self._lock:
@@ -94,164 +97,183 @@ class RemoteJobs:
                 return None, "已有一个远程生图在进行（本机同一时间只跑一个）。"
             if self._local_busy():
                 return None, "本机正在忙（生成 / 生视频 / 服务操作），稍后再试。"
-            from ..core.config import cfg_lock
-            from ..core import capability, modelreq, providers, sdprofile
-            from ..core.media import (batch_count_of, batch_out_paths,
-                                      build_img_cmd, edit_strength, img_out_dir,
-                                      mask_hint, plan_ref_images,
-                                      resolve_img_files, resolve_img_model_path)
-            with cfg_lock():
-                snap = dict(self.cfg)          # 提交点做一次快照（坑 194 口径）
-            # 远程只走本地链路：GUI 停在云端模型上时 resolve_modes 会拐进云端
-            # 分支（判成服务商的档）——快照里钉回 local，判据才是本机 sd-cli 的。
-            snap["model_provider"] = providers.LOCAL
-            sd = str(snap.get("sd_dir", "") or "")
-            cli = os.path.join(sd, "sd-cli.exe")
-            if not os.path.isfile(cli):
-                # 不把引擎的绝对路径回给手机端（坑 209⑥：那是本机用户名与目录结构）；
-                # 路径进审计，手机那头只留"去哪儿修"。
-                audit("image.submit", device_id, False, "no sd-cli: %s" % (cli or "(空)"))
-                return None, ("电脑端还没配好生图引擎：在 设置 → 本地模型 → "
-                              "生图（sd.cpp） 里指向 sd.cpp 目录。")
-            diffusion = resolve_img_model_path(snap)
-            if not diffusion:
-                return None, ("未找到生图模型：电脑端还没配好扩散权重。")
-            files = resolve_img_files(snap, diffusion)
-            missing = sdprofile.missing_slots(files["family"], files)
-            if missing:
-                return None, ("这个生图模型（识别为 %s）缺配套文件：%s——在电脑端"
-                              "设置里补齐。" % (sdprofile.label_of(files["family"]),
-                                               "、".join(missing)))
+            # 立刻占槽（坑 260）：从这里到 _proc 赋值之间有扫盘 / 读 GGUF 头 /
+            # 建目录 / Popen，慢盘上可达秒级；不占槽 GUI 侧 _any_busy 轮询会在这个
+            # 窗口放行第二份 sd-cli。任何失败返回都经 finally 释放；成功后由 _proc
+            # 接力（busy 看两者的或）。
+            self._starting = True
             try:
-                need = modelreq.assess(snap, diffusion, "image", files=files)
-                lvl = modelreq.grade(need, snap.get("vram_gb") or 0,
-                                     snap.get("ram_gb") or 0) if need else 0
-            except Exception:
-                lvl = 0
-            if lvl >= modelreq.LEVEL_FATAL:
-                return None, ("这台机器带不动这个模型（%s）——远程没人能按"
-                              "「仍要继续」，请在电脑端确认后再来。"
-                              % modelreq.LEVEL_TEXT[lvl])
-            # ---- 二期：附件 → 带图两档 → 强度 → 遮罩（判据与 GUI 逐字同源）----
-            ref_paths, err = upload_paths(device_id, refs or [], "ref")
+                return self._submit_locked(prompt, device_id, refs=refs,
+                                           ref_mode=ref_mode,
+                                           strength_tier=strength_tier,
+                                           mask=mask, count=count)
+            finally:
+                self._starting = False
+
+    def _submit_locked(self, prompt, device_id, refs=None, ref_mode="",
+                       strength_tier="", mask="", count=1):
+        """submit 的主体（调用方已持 `_lock` 且已置 `_starting`）。
+
+        单独成方法只为用 try/finally 保证占槽一定释放（坑 260），判据与顺序一字未动。
+        """
+        from ..core.config import cfg_lock
+        from ..core import capability, modelreq, providers, sdprofile
+        from ..core.media import (batch_count_of, batch_out_paths,
+                                  build_img_cmd, edit_strength, img_out_dir,
+                                  mask_hint, plan_ref_images,
+                                  resolve_img_files, resolve_img_model_path)
+        with cfg_lock():
+            snap = dict(self.cfg)          # 提交点做一次快照（坑 194 口径）
+        # 远程只走本地链路：GUI 停在云端模型上时 resolve_modes 会拐进云端
+        # 分支（判成服务商的档）——快照里钉回 local，判据才是本机 sd-cli 的。
+        snap["model_provider"] = providers.LOCAL
+        sd = str(snap.get("sd_dir", "") or "")
+        cli = os.path.join(sd, "sd-cli.exe")
+        if not os.path.isfile(cli):
+            # 不把引擎的绝对路径回给手机端（坑 209⑥：那是本机用户名与目录结构）；
+            # 路径进审计，手机那头只留"去哪儿修"。
+            audit("image.submit", device_id, False, "no sd-cli: %s" % (cli or "(空)"))
+            return None, ("电脑端还没配好生图引擎：在 设置 → 本地模型 → "
+                          "生图（sd.cpp） 里指向 sd.cpp 目录。")
+        diffusion = resolve_img_model_path(snap)
+        if not diffusion:
+            return None, ("未找到生图模型：电脑端还没配好扩散权重。")
+        files = resolve_img_files(snap, diffusion)
+        missing = sdprofile.missing_slots(files["family"], files)
+        if missing:
+            return None, ("这个生图模型（识别为 %s）缺配套文件：%s——在电脑端"
+                          "设置里补齐。" % (sdprofile.label_of(files["family"]),
+                                           "、".join(missing)))
+        try:
+            need = modelreq.assess(snap, diffusion, "image", files=files)
+            lvl = modelreq.grade(need, snap.get("vram_gb") or 0,
+                                 snap.get("ram_gb") or 0) if need else 0
+        except Exception:
+            lvl = 0
+        if lvl >= modelreq.LEVEL_FATAL:
+            return None, ("这台机器带不动这个模型（%s）——远程没人能按"
+                          "「仍要继续」，请在电脑端确认后再来。"
+                          % modelreq.LEVEL_TEXT[lvl])
+        # ---- 二期：附件 → 带图两档 → 强度 → 遮罩（判据与 GUI 逐字同源）----
+        ref_paths, err = upload_paths(device_id, refs or [], "ref")
+        if err:
+            return None, err
+        mask_path = ""
+        if str(mask or ""):
+            mp, err = upload_paths(device_id, [mask], "mask")
             if err:
                 return None, err
+            mask_path = mp[0] if mp else ""
+        modes = capability.resolve_modes(snap, files["family"])
+        mode = str(ref_mode or "").strip()
+        if ref_paths and mode and not modes.get(mode, {}).get("ok"):
+            return None, str(modes[mode]["why"])   # 不支持的档就地拦，一个字都不丢
+        mode = mode or capability.default_ref_mode(snap, files["family"])
+        used, dropped, drop_note = plan_ref_images(ref_paths, mode)
+        if mode and mode != capability.MODE_EDIT:
+            mask_path = ""           # 主体参考档（-r）不吃遮罩（10 §5.0.4）
+        if not used:
+            mode = ""                # 纯文生图不带模式（GUI 同口径）
             mask_path = ""
-            if str(mask or ""):
-                mp, err = upload_paths(device_id, [mask], "mask")
-                if err:
-                    return None, err
-                mask_path = mp[0] if mp else ""
-            modes = capability.resolve_modes(snap, files["family"])
-            mode = str(ref_mode or "").strip()
-            if ref_paths and mode and not modes.get(mode, {}).get("ok"):
-                return None, str(modes[mode]["why"])   # 不支持的档就地拦，一个字都不丢
-            mode = mode or capability.default_ref_mode(snap, files["family"])
-            used, dropped, drop_note = plan_ref_images(ref_paths, mode)
-            if mode and mode != capability.MODE_EDIT:
-                mask_path = ""           # 主体参考档（-r）不吃遮罩（10 §5.0.4）
-            if not used:
-                mode = ""                # 纯文生图不带模式（GUI 同口径）
-                mask_path = ""
-            st_value = None              # 底图重绘档才算强度；None = build_img_cmd 自己判
-            echo = []
-            if used:
-                echo.append("[%s] 参考图 %d 张%s"
-                            % (capability.MODE_LABEL.get(mode, "带图"), len(used),
-                               "" if not drop_note else "（%s）" % drop_note))
-                if mode == capability.MODE_EDIT:
-                    # 回显与命令行同源：这里算一次，数值显式交给 build_img_cmd
-                    _t, st_value, st_why = edit_strength(
-                        snap, prompt, tier=str(strength_tier or ""))
-                    # 小改档 + 没带遮罩 → 半句指路（判据在 media.mask_hint，与 GUI 同源）
-                    _hint = mask_hint(_t, auto=not str(strength_tier or "").strip(),
-                                      has_mask=bool(mask_path))
-                    echo.append("重绘强度 %s（%s）%s%s"
-                                % (st_value, st_why,
-                                   "｜遮罩：只重绘涂抹区" if mask_path else "",
-                                   _hint))
-            try:
-                # 兜底 20 = DEFAULT_CONFIG["img_steps"]（与 GUI 两端读法逐字同源；
-                # 原先写 12，与默认值和 _probe_* 的口径都不一致）
-                steps = max(1, int(snap.get("img_steps", 20) or 20))
-            except Exception:
-                steps = 20
-            # 步数控件只存在于电脑端设置页，网页端没有、也不该有（能覆盖 = 第二来源）。
-            # 这值随下次提交生效（与 GUI 同读一份 cfg，2026-10-12 实测 20→8 后
-            # 远程 argv 同步变）；W 2026-10-12 裁定回显里不显示步数（K10 的解撤回），
-            # 这里只留着喂 build_img_cmd。
-            size = str(snap.get("img_size", "1024x1024"))
-            try:
-                cfg_scale = float(snap.get("img_cfg", 2.5) or 2.5)
-            except Exception:
-                cfg_scale = 2.5
-            try:
-                seed = int(snap.get("img_seed", -1))
-            except Exception:
-                seed = -1
-            outdir = img_out_dir(snap)
-            try:
-                os.makedirs(outdir, exist_ok=True)
-            except Exception as e:
-                audit("image.submit", device_id, False, "outdir failed: %s (%s: %s)"
-                      % (outdir, type(e).__name__, e))
-                return None, ("电脑端的产物目录建不出来：检查那个目录的磁盘与权限"
-                              "（位置在 设置 → 云端模型 → 生图 / 生视频 的「修改产物位置」）。")
-            tid = _pysecrets.token_hex(4)
-            # 微秒防同秒碰撞：**不能**走 time.strftime("%f") —— Windows 的 C 运行时
-            # strftime 不认 %f（glibc 扩展），当场 ValueError；datetime 是 Python
-            # 自己实现的，各平台都行。
-            out = os.path.join(outdir, "img_r%s_%s_%s.png" % (
-                tid, time.strftime("%Y%m%d_%H%M%S"),
-                _datetime.datetime.now().strftime("%f")))
-            n = batch_count_of(count)
-            expected = batch_out_paths(out, n)   # n>1 → 主干_1.._n（与引擎命名同源）
-            log_path = config.media_log_path(snap, out)
-            cmd = build_img_cmd(snap, prompt, out, steps, size, diffusion,
-                                cfg_scale, seed, files=files,
-                                ref_mode=mode, ref_images=used,
-                                strength=st_value, mask=mask_path, batch=n)
-            try:
-                with open(log_path, "w", encoding="utf-8", errors="replace") as lf:
-                    lf.write("=== argv（远程 %s）===\n" % device_id)
-                    for i, a in enumerate(cmd):
-                        lf.write("[%2d] %s\n" % (i, a))
-                    lf.write("=== cwd=%s ｜ out=%s ｜ 提交于 %s ===\n\n"
-                             % (sd, out, time.strftime("%Y-%m-%d %H:%M:%S")))
-            except Exception:
-                log_path = ""
-            flags = 0x08000000 if os.name == "nt" else 0     # CREATE_NO_WINDOW
-            try:
-                proc = subprocess.Popen(cmd, stdout=subprocess.PIPE,
-                                        stderr=subprocess.STDOUT, text=True,
-                                        encoding="utf-8", errors="replace",
-                                        creationflags=flags if os.name == "nt" else 0,
-                                        cwd=sd)
-            except Exception as e:
-                # 异常文本里带着 sd-cli 的绝对路径：原话进审计，手机端留人话
-                audit("image.submit", device_id, False,
-                      "spawn failed: %s: %s" % (type(e).__name__, e))
-                return None, SPAWN_FAIL_MSG
-            self._proc = proc
-            self._stop_flag = threading.Event()
-            self._task = {"id": tid, "device_id": device_id,
-                          "prompt": prompt[:200], "state": "running",
-                          "progress": None, "tail": [], "files": [],
-                          "error": "", "out": out, "t0": time.time(),
-                          "echo": echo, "count": n, "steps": steps,
-                          "expected": expected}
-            # 台账落点取 expected[0]：n=1 时它就是 out（与改造前逐字一致）；
-            # n>1 时指向 _1 那张（取回/历史都只按 dirname(path) + files[] 算，
-            # 形状不动 —— 台账条目形状是接口，见 remote_ledger 头注）。
-            ledger_add({"id": tid, "device_id": device_id,
-                         "name": os.path.basename(expected[0]),
-                         "path": expected[0],
-                         "done": False, "ok": False,
-                         "submitted": time.strftime("%Y-%m-%d %H:%M:%S")})
-            threading.Thread(target=self._reader, daemon=True,
-                             name="remote-img").start()
-            audit("image.submit", device_id, True, tid)
-            return tid, ""
+        st_value = None              # 底图重绘档才算强度；None = build_img_cmd 自己判
+        echo = []
+        if used:
+            echo.append("[%s] 参考图 %d 张%s"
+                        % (capability.MODE_LABEL.get(mode, "带图"), len(used),
+                           "" if not drop_note else "（%s）" % drop_note))
+            if mode == capability.MODE_EDIT:
+                # 回显与命令行同源：这里算一次，数值显式交给 build_img_cmd
+                _t, st_value, st_why = edit_strength(
+                    snap, prompt, tier=str(strength_tier or ""))
+                # 小改档 + 没带遮罩 → 半句指路（判据在 media.mask_hint，与 GUI 同源）
+                _hint = mask_hint(_t, auto=not str(strength_tier or "").strip(),
+                                  has_mask=bool(mask_path))
+                echo.append("重绘强度 %s（%s）%s%s"
+                            % (st_value, st_why,
+                               "｜遮罩：只重绘涂抹区" if mask_path else "",
+                               _hint))
+        try:
+            # 兜底 20 = DEFAULT_CONFIG["img_steps"]（与 GUI 两端读法逐字同源；
+            # 原先写 12，与默认值和 _probe_* 的口径都不一致）
+            steps = max(1, int(snap.get("img_steps", 20) or 20))
+        except Exception:
+            steps = 20
+        # 步数控件只存在于电脑端设置页，网页端没有、也不该有（能覆盖 = 第二来源）。
+        # 这值随下次提交生效（与 GUI 同读一份 cfg，2026-10-12 实测 20→8 后
+        # 远程 argv 同步变）；W 2026-10-12 裁定回显里不显示步数（K10 的解撤回），
+        # 这里只留着喂 build_img_cmd。
+        size = str(snap.get("img_size", "1024x1024"))
+        try:
+            cfg_scale = float(snap.get("img_cfg", 2.5) or 2.5)
+        except Exception:
+            cfg_scale = 2.5
+        try:
+            seed = int(snap.get("img_seed", -1))
+        except Exception:
+            seed = -1
+        outdir = img_out_dir(snap)
+        try:
+            os.makedirs(outdir, exist_ok=True)
+        except Exception as e:
+            audit("image.submit", device_id, False, "outdir failed: %s (%s: %s)"
+                  % (outdir, type(e).__name__, e))
+            return None, ("电脑端的产物目录建不出来：检查那个目录的磁盘与权限"
+                          "（位置在 设置 → 云端模型 → 生图 / 生视频 的「修改产物位置」）。")
+        tid = _pysecrets.token_hex(4)
+        # 微秒防同秒碰撞：**不能**走 time.strftime("%f") —— Windows 的 C 运行时
+        # strftime 不认 %f（glibc 扩展），当场 ValueError；datetime 是 Python
+        # 自己实现的，各平台都行。
+        out = os.path.join(outdir, "img_r%s_%s_%s.png" % (
+            tid, time.strftime("%Y%m%d_%H%M%S"),
+            _datetime.datetime.now().strftime("%f")))
+        n = batch_count_of(count)
+        expected = batch_out_paths(out, n)   # n>1 → 主干_1.._n（与引擎命名同源）
+        log_path = config.media_log_path(snap, out)
+        cmd = build_img_cmd(snap, prompt, out, steps, size, diffusion,
+                            cfg_scale, seed, files=files,
+                            ref_mode=mode, ref_images=used,
+                            strength=st_value, mask=mask_path, batch=n)
+        try:
+            with open(log_path, "w", encoding="utf-8", errors="replace") as lf:
+                lf.write("=== argv（远程 %s）===\n" % device_id)
+                for i, a in enumerate(cmd):
+                    lf.write("[%2d] %s\n" % (i, a))
+                lf.write("=== cwd=%s ｜ out=%s ｜ 提交于 %s ===\n\n"
+                         % (sd, out, time.strftime("%Y-%m-%d %H:%M:%S")))
+        except Exception:
+            log_path = ""
+        flags = 0x08000000 if os.name == "nt" else 0     # CREATE_NO_WINDOW
+        try:
+            proc = subprocess.Popen(cmd, stdout=subprocess.PIPE,
+                                    stderr=subprocess.STDOUT, text=True,
+                                    encoding="utf-8", errors="replace",
+                                    creationflags=flags if os.name == "nt" else 0,
+                                    cwd=sd)
+        except Exception as e:
+            # 异常文本里带着 sd-cli 的绝对路径：原话进审计，手机端留人话
+            audit("image.submit", device_id, False,
+                  "spawn failed: %s: %s" % (type(e).__name__, e))
+            return None, SPAWN_FAIL_MSG
+        self._proc = proc
+        self._stop_flag = threading.Event()
+        self._task = {"id": tid, "device_id": device_id,
+                      "prompt": prompt[:200], "state": "running",
+                      "progress": None, "tail": [], "files": [],
+                      "error": "", "out": out, "t0": time.time(),
+                      "echo": echo, "count": n, "steps": steps,
+                      "expected": expected}
+        # 台账落点取 expected[0]：n=1 时它就是 out（与改造前逐字一致）；
+        # n>1 时指向 _1 那张（取回/历史都只按 dirname(path) + files[] 算，
+        # 形状不动 —— 台账条目形状是接口，见 remote_ledger 头注）。
+        ledger_add({"id": tid, "device_id": device_id,
+                     "name": os.path.basename(expected[0]),
+                     "path": expected[0],
+                     "done": False, "ok": False,
+                     "submitted": time.strftime("%Y-%m-%d %H:%M:%S")})
+        threading.Thread(target=self._reader, daemon=True,
+                         name="remote-img").start()
+        audit("image.submit", device_id, True, tid)
+        return tid, ""
 
     # ---- 执行（无 GUI 版 reader，判据与 ui/image_gen 同源）----
 
@@ -311,7 +333,8 @@ class RemoteJobs:
         # 必须在算 found 之前搬回来，否则手机端看到的是"引擎没有交付文件"，
         # 而文件其实躺在镜像里（与 GUI 两条链路同一处判据、同一条顺序纪律）。
         try:
-            moved = media.salvage_products(self.cfg, task.get("expected") or [task["out"]])
+            moved = media.salvage_products(
+                self.cfg, task.get("expected") or [task["out"]], rc=rc)
         except Exception:
             moved = []
         for _src, _dst in moved:

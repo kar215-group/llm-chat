@@ -61,8 +61,9 @@ from . import remote_chat
 from .remote_chat import RemoteChat
 from .remote_chat import ready as chat_ready
 from .remote_jobs import RemoteJobs
+from . import remote_wfd
 from .remote_net import (BIND_ALL, BIND_FALLBACK_MSG, BIND_LABELS, BIND_TAILSCALE,
-                         BIND_V4,
+                         BIND_V4, BIND_WFD, BIND_WFD_REFUSE_MSG,
                          CROSS_ORIGIN_MSG, HANDSHAKE_TIMEOUT_S, IDLE_TIMEOUT_S,
                          MAX_CONCURRENT, POST_CTYPES, host_allowed, ip_label,
                          is_loopback, local_ips, make_httpd, normalize_ip,
@@ -82,6 +83,11 @@ class RemoteStartError(Exception):
 
 # 鉴权用的 Cookie 名（长效设备 token 就装在这里）；监听面本身不知道它
 COOKIE_NAME = "remote_token"
+
+# 直连组的组名 / 密码（设置页「网址」次级窗显示、复制给手机用；改字面
+# 一律先过 W——铁律 14）。定义在 remote_wfd，脚本默认值与它是同一份来源。
+WFD_SSID = remote_wfd.GO_SSID
+WFD_PASS = remote_wfd.GO_PASS
 
 # 心跳类端点：审计里按窗口聚合，不逐条落（P0-3，聚合口径见 remote_audit.audit_poll）
 POLL_PATHS = ("/api/task", "/api/caps", "/api/chat")
@@ -193,6 +199,14 @@ class _RemoteHandler(http.server.BaseHTTPRequestHandler):
             # keep-alive 下"不读又不关"会让这条连接上的后续请求全错位，所以直接关。
             self.close_connection = True
             return _OVERSIZE
+        if n < 0:
+            # 负数长度同样不能放：BufferedReader.read(-1) 一直读到 EOF ——
+            # 慢速喂字节可借空闲超时续命把连接永久挂住（凑满并发闸门即拒死服务），
+            # 快速灌数则吞内存。/api/pair 免鉴权，这条是未授权可达面（坑 254）。
+            # body 一字节都不读、直接关连接（不读不关会毒化 keep-alive 流）；
+            # 返回 None 后各端点按自身的空请求逻辑回 400/404。
+            self.close_connection = True
+            return None
         try:
             payload = json.loads(self.rfile.read(n).decode("utf-8")) if n else {}
         except Exception:
@@ -365,6 +379,8 @@ class RemoteServer:
         self.cert_fp = ""
         self.bind = ""                # 实际绑到的地址（"" = 全部网卡，现行为）
         self.bind_note = ""           # 收窄没收成时的回退说明（设置页状态行可见）
+        self.bind_kind = ""           # 设备直连档的链路种类："wfd"（电脑直连组
+                                      # ）/ "wifi"（手机热点）；其他档 = ""
         self.jobs = None              # RemoteJobs（App 侧装配；批次 3）
         self.chat = None              # RemoteChat（同上；没装配就没有聊天端点）
         # 配对码状态机（一次性 + 按码限次）整套不变量与它自己的锁在 remote_pairing
@@ -393,12 +409,42 @@ class RemoteServer:
             # App.start_remote_async 直接展示（RemoteStartError 不套类型前缀）。
             raise RemoteStartError("端口应在1024~65535范围内")
         want_https = bool(self.cfg.get("remote_https", True))
-        # 对外开放范围（P0-5）：默认 `all` = 全部网卡，与一期行为逐字一致
-        bind, note = resolve_bind(self.cfg)
+        # 对外开放范围（P0-5）：默认 `all` = 全部网卡，与一期行为逐字一致；
+        # `wfd` = 仅设备直连（2026-10-13，99 K16）
+        want_bind = str(self.cfg.get("remote_bind", BIND_ALL) or BIND_ALL)
+        self.bind_kind = ""
+        if want_bind == BIND_WFD:
+            # 设备直连档：现成链路优先（手机热点已接入 / 组已在跑）——没有就
+            # 把电脑侧的无线直连组开起来（约几秒）。**拿不到直连地址就拒绝
+            # 启动**：绝不回退 all（回退等于把公网口打开，K16 的硬要求）。
+            bind, note = resolve_bind(self.cfg)
+            if bind and not remote_wfd.running():
+                # 地址在、组却不是本进程起的——多半是上一个实例关窗时的
+                # 快速收组还没散净。等它散掉再按"没链路"重新起，别绑一个
+                # 正在死的地址（2026-10-13 关窗提速轮）
+                remote_wfd.settle_stale()
+                bind, note = resolve_bind(self.cfg)
+            if not bind:
+                try:
+                    remote_wfd.start_go()
+                except remote_wfd.WfdGoError as e:
+                    raise RemoteStartError(str(e))
+                bind, note = resolve_bind(self.cfg)
+                if not bind:
+                    remote_wfd.stop_go()
+                    raise RemoteStartError(BIND_WFD_REFUSE_MSG)
+            self.bind_kind = "wfd" if remote_wfd.running() else "wifi"
+        else:
+            bind, note = resolve_bind(self.cfg)
         self.bind_note = note
         try:
             httpd = make_httpd(port, _RemoteHandler, bind)
         except OSError:
+            if want_bind == BIND_WFD:
+                # 直连档绑的是具体地址，绑不上基本就是端口被占——同样不回退
+                remote_wfd.stop_go()
+                raise RemoteStartError("端口 %d 被别的程序占用：换一个端口"
+                                       "再拨一次开关" % port)
             # 选了 Tailscale 档、但那一刻那个地址没了（客户端刚断）：退回全部
             # 网卡并**如实说出来**——静默不监听会让用户以为远程开着（坑 128）
             httpd = make_httpd(port, _RemoteHandler, "")
@@ -406,6 +452,8 @@ class RemoteServer:
             audit("bind.fallback", "", False, BIND_FALLBACK_MSG)
         else:
             self.bind = bind
+            if want_bind == BIND_WFD:
+                audit("wfd.bind", "", True, "bind=%s" % bind)
         poll_reset()                # 聚合窗口随服务重启清零
         # 上传登记是内存态、重启即空：目录里比 TTL 还老的文件必然没人再引用
         # （新文件留着：可能是并行实例刚收的）。**无条件清**——不挂在 jobs /
@@ -466,7 +514,10 @@ class RemoteServer:
         # 若再发就是主页两条，且设置页「拨开关即生效」路径同样会触发。
         return True
 
-    def stop(self):
+    def stop(self, quick=False):
+        """停远程面。`quick=True`（关窗路径）：直连组**不等收尾**——写完
+        STOP 就把控制权交回，组由脚本自己散净（关窗不再被那两秒拖住，
+        2026-10-13 关窗提速轮；父进程看护兜底）。其他路径照旧等组退干净。"""
         if self.httpd is not None:
             try:
                 self.httpd.shutdown()
@@ -475,6 +526,13 @@ class RemoteServer:
                 pass
             self.httpd = None
         self.https_on = False
+        # 直连组跟着收（没开过 = 空操作）：组只在本档有，服务停了留一个
+        # 开着的小组没有意义，还占着电台。
+        try:
+            remote_wfd.stop_go(wait=not quick)
+        except Exception:
+            pass
+        self.bind_kind = ""
 
     def running(self):
         return self.httpd is not None
@@ -695,11 +753,17 @@ class RemoteServer:
         return h._json(200, out)
 
     def _h_chat_stop(self, h):
+        # 网页固定 POST body:"{}"：不读它，残留字节会被 keep-alive 连接上的
+        # 下一条请求当请求行解析（与 401/404 路径同一条纪律，坑 258）
+        if h._read_json() is None and h.close_connection:
+            return h._json(400, {"error": "请求体读不了。"})
         if self.chat.cancel(self._caller_id(h)):
             return h._json(200, {"ok": True})
         return h._json(404, {"error": "没有可停止的远程会话。"})
 
     def _h_chat_clear(self, h):
+        if h._read_json() is None and h.close_connection:
+            return h._json(400, {"error": "请求体读不了。"})
         return h._json(200, {"ok": True,
                              "cleared": self.chat.clear(self._caller_id(h))})
 

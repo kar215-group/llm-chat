@@ -30,7 +30,7 @@ CONFIG_PATH = os.path.join(APP_DIR, "gui_config.json")
 
 # 版本号：发版时改这一处（--selfcheck / --version 会打印它）。
 # GitHub Release 的 tag 要与它一致（tag 去掉开头的 v），Actions 工作流会做一致性校验。
-APP_VERSION = "1.3.1"
+APP_VERSION = "1.3.2beta1"
 
 CFG_VERSION = 3
 
@@ -194,6 +194,10 @@ DEFAULT_CONFIG = {
     #   tailscale  = 只绑 Tailscale 虚拟网卡那个地址（把攻击面收到只有隧道能到的位置；
     #                本机没有那个地址时**回退 all 并在状态行如实说**）
     #   v4         = 收全部 IPv4 网卡、不收 IPv6
+    #   wfd        = 仅设备直连（2026-10-13，99 K16）：只绑热点 / 无线直连链路的
+    #                地址，公网口一个字节不监听；没有现成链路就先把电脑侧无线
+    #                直连组开起来（connection/remote_wfd）；**拿不到直连地址时
+    #                拒绝启动、不回退**（回退 all 等于把公网口打开）。
     # 默认 all = 现行为，所以不抬 cfg_version（proxy_enabled 那次抬闸是因为旧默认不安全）。
     "remote_bind": "all",
     # ---- 云端 API（v31 一期：OpenAI 兼容文本；密钥存 secrets.json，不进备份）----

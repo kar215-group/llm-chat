@@ -3051,16 +3051,34 @@ class SettingsMixin:
                 value=bool(self.cfg.get("remote_enabled", False)))
             v["remote_https"] = tk.BooleanVar(
                 value=True if simple else bool(self.cfg.get("remote_https", True)))
-            # 三档标签的唯一来源在 remote_net.BIND_LABELS（界面不写第二份字面量）
+            # 四档标签的唯一来源在 remote_net.BIND_LABELS（界面不写第二份字面量）
             _bind_labels = [remote_mod.BIND_LABELS[k]
                             for k in (remote_mod.BIND_ALL,
                                       remote_mod.BIND_TAILSCALE,
-                                      remote_mod.BIND_V4)]
+                                      remote_mod.BIND_V4,
+                                      remote_mod.BIND_WFD)]
             _bind_by_label = {remote_mod.BIND_LABELS[k]: k
                               for k in (remote_mod.BIND_ALL,
                                         remote_mod.BIND_TAILSCALE,
-                                        remote_mod.BIND_V4)}
+                                        remote_mod.BIND_V4,
+                                        remote_mod.BIND_WFD)}
             bind_cb = None
+            # 建页时的生效值快照（enabled/https/bind/port）：底部「保存」会跑
+            # **所有已建页**的钩子，值没变就不该重启监听（坑 262）——否则进过
+            # 一次远程页，之后在外观/通用页保存都会断一次手机连接、WFD 档还收组。
+            _remote_snap = [None]
+
+            def _cur_remote_vals():
+                bind_val = (str(self.cfg.get("remote_bind") or remote_mod.BIND_ALL)
+                            if bind_cb is None else
+                            _bind_by_label.get(str(bind_cb.get()),
+                                              remote_mod.BIND_ALL))
+                port_val = (str(v["remote_port"].get()).strip()
+                            if v.get("remote_port") is not None
+                            else str(self.cfg.get("remote_port", 8443)))
+                return (bool(v["remote_enabled"].get()),
+                        True if simple else bool(v["remote_https"].get()),
+                        bind_val, port_val)
 
             def _apply_remote():
                 """读本页开关与档位 → 写 cfg → 重启监听 → 回显。
@@ -3073,10 +3091,13 @@ class SettingsMixin:
                 （W 2026-10-11：普通用户不露这个选项，默认开启）。
 
                 `remote_bind` 不在 STR_KEYS 通用循环里：**改了必须重绑监听才成立**，
-                所以与两个布尔键同款走本页钩子（钩子自己落盘）。
+                所以与两个布尔键同款走本页钩子（钩子自己落盘）。四项与建页快照
+                逐字一致时整段 no-op（坑 262）：别的页点保存不断手机连接。
                 """
-                en = bool(v["remote_enabled"].get())
-                https = True if simple else bool(v["remote_https"].get())
+                cur = _cur_remote_vals()
+                if cur == _remote_snap[0] and self.remote.running() == cur[0]:
+                    return
+                en, https = cur[0], cur[1]
                 self.cfg["remote_enabled"] = en
                 self.cfg["remote_https"] = https
                 if bind_cb is not None:
@@ -3086,13 +3107,21 @@ class SettingsMixin:
                     save_config(self.cfg)
                 except Exception:
                     pass
+                # 值已落盘：快照推进到新值（"运行态与期望不一致"那条仍会让下次
+                # 保存重试启动——cur[0] 与 running() 比的就是这个，坑 262）
+                _remote_snap[0] = cur
                 if self.remote.running():
-                    self.remote.stop()
+                    # 快速收组（2026-10-13 关窗提速轮）：直连组在后台自行散净，
+                    # 不阻塞界面；立刻重开由 remote.start 的 settle_stale 兜住
+                    self.remote.stop(quick=True)
                 if en:
                     # 起监听那一步**首次要同步跑 PowerShell 造自签证书**（超时给到
                     # 60s）——挂主线程就是"拨一下开关、整个界面冻住"。挪后台线程，
                     # 状态行先说一句，起完再回显（跨线程一律经 _ui_q，铁律 7）。
-                    stat_var.set("正在启动（首次要生成一份自签证书，可能要几秒）…")
+                    stat_var.set(
+                        "正在启动（开启无线直连组，可能要几秒）…"
+                        if str(self.cfg.get("remote_bind") or "") == remote_mod.BIND_WFD
+                        else "正在启动（首次要生成一份自签证书，可能要几秒）…")
                     code_var.set("—")
 
                     def _started(err):
@@ -3102,9 +3131,14 @@ class SettingsMixin:
                         except Exception:
                             return
                         if err:
-                            stat_var.set(
-                                "启动失败：%s。常见原因是端口被别的程序占用——"
-                                "换一个端口再拨一次开关。" % err)
+                            if str(self.cfg.get("remote_bind") or "") == remote_mod.BIND_WFD:
+                                # 直连档的失败原因自带指路（组起不来 / 没链路 /
+                                # 端口），不套"端口被占用"那半句去误导
+                                stat_var.set("启动失败：%s。" % err)
+                            else:
+                                stat_var.set(
+                                    "启动失败：%s。常见原因是端口被别的程序占用——"
+                                    "换一个端口再拨一次开关。" % err)
                             code_var.set("—")
                             return
                         _remote_refresh()
@@ -3162,10 +3196,17 @@ class SettingsMixin:
                 widgets.HelpDot(trem,
                                 "默认对整个局域网开放。装了 Tailscale 可以只绑"
                                 "虚拟网卡那个地址（走了隧道才连得上）；选「仅局域网"
-                                "IPv4」就不收 IPv6 的连接。改这里会重启监听并立即"
-                                "生效；选 Tailscale 而本机没有那个地址时，会退回"
+                                "IPv4」就不收 IPv6 的连接。选「仅设备直连」时只开放"
+                                "热点 / 无线直连链路的地址——公网口完全不开放，"
+                                "电脑侧会自动把无线直连组开起来（手机像连普通 "
+                                "Wi-Fi 一样加入）；拿不到直连地址时会拒绝启动、"
+                                "不会退回全部网卡。改这里会重启监听并立即生效；"
+                                "选 Tailscale 而本机没有那个地址时，会退回"
                                 "全部网卡并在状态行说出来。").grid(
                     row=i, column=2, sticky="w", pady=5)
+            # 建页完成：钉初始快照（控件此时才全部建好；ent 的 remote_port
+            # 与档位下拉都在了）。之后别的页点保存，值没变就不重启监听（坑 262）
+            _remote_snap[0] = _cur_remote_vals()
 
             # ---- 状态行 + 网址(****) + 配对码 + 设备(次级窗) ----
             stat_var = tk.StringVar(value="")
@@ -3244,7 +3285,8 @@ class SettingsMixin:
 
             def _open_urls():
                 """网址次级窗：一个 IPv6 + 一个 IPv4（W 2026-10-11 定：不铺
-                全部），各带「复制」；证书指纹也收在这里。"""
+                全部），各带「复制」；证书指纹也收在这里。设备直连档只给
+                直连那一条地址（另加直连组的组名 / 密码给手机对）。"""
                 w, frm = _panel("远程访问 · 网址")
                 if w is None:
                     return                      # 已经开着：抬到前面就够了
@@ -3255,19 +3297,30 @@ class SettingsMixin:
                     return
                 scheme = self.remote.scheme()
                 port = self.cfg.get("remote_port", 8443)
-                ips = remote_mod.local_ips() or []
-                v6 = next((x for x in ips
-                           if remote_mod.ip_label(x) == "v6"), "")
-                v4 = next((x for x in ips
-                           if remote_mod.ip_label(x) in ("v4", "tailscale")), "")
                 rows = []
-                if v6:
-                    rows.append(("IPv6（手机用流量时用这个）",
-                                 "%s://[%s]:%s" % (scheme, v6, port)))
-                if v4:
-                    lab = ("（Tailscale）" if remote_mod.ip_label(v4) ==
-                           "tailscale" else "（同一 Wi-Fi / 热点时用这个）")
-                    rows.append(("IPv4" + lab, "%s://%s:%s" % (scheme, v4, port)))
+                if (str(self.cfg.get("remote_bind") or "")
+                        == remote_mod.BIND_WFD and self.remote.bind):
+                    # 设备直连档：只给这一条直连地址（其他网口本来就没监听，
+                    # 不列出来）；电脑侧直连组还给组名与密码
+                    rows.append(("设备直连（只在手机与电脑之间）",
+                                 "%s://%s:%s" % (scheme, self.remote.bind, port)))
+                    if getattr(self.remote, "bind_kind", "") == "wfd":
+                        rows.append(("直连组名（手机在 Wi-Fi 列表里选它）",
+                                     remote_mod.WFD_SSID))
+                        rows.append(("直连组密码", remote_mod.WFD_PASS))
+                else:
+                    ips = remote_mod.local_ips() or []
+                    v6 = next((x for x in ips
+                               if remote_mod.ip_label(x) == "v6"), "")
+                    v4 = next((x for x in ips
+                               if remote_mod.ip_label(x) in ("v4", "tailscale")), "")
+                    if v6:
+                        rows.append(("IPv6（手机用流量时用这个）",
+                                     "%s://[%s]:%s" % (scheme, v6, port)))
+                    if v4:
+                        lab = ("（Tailscale）" if remote_mod.ip_label(v4) ==
+                               "tailscale" else "（同一 Wi-Fi / 热点时用这个）")
+                        rows.append(("IPv4" + lab, "%s://%s:%s" % (scheme, v4, port)))
                 if not rows:
                     ttk.Label(frm, text="没有可用的本机地址。",
                               style="Dim.TLabel").pack(anchor="w", pady=4)
@@ -3335,6 +3388,9 @@ class SettingsMixin:
                     stat = "已启动"
                     if self.remote.scheme() != "https":
                         stat += "（当前是明文 HTTP，仅建议局域网内使用）"
+                    if (str(self.cfg.get("remote_bind") or "")
+                            == remote_mod.BIND_WFD and self.remote.bind):
+                        stat += "（设备直连：%s；公网口未监听）" % self.remote.bind
                     # 想只绑 Tailscale 但本机没那个地址 → 已退回全部网卡，如实说
                     if getattr(self.remote, "bind_note", ""):
                         stat += "（" + self.remote.bind_note + "）"

@@ -977,10 +977,27 @@ class App(ChatMixin, ImageGenMixin, VideoGenMixin, ServiceMixin, ModelsMixin, Se
                 self._remote_starting = False
                 if note_ok:
                     if err:
-                        self._sq.put(("note",
-                                      "远程访问启动失败（证书或端口问题），暂未开启——"
-                                      "到 设置 → 远程访问 重新拨一次开关可重试。"))
+                        if str(self.cfg.get("remote_bind") or "") == remote_mod.BIND_WFD:
+                            # 设备直连档的失败原因自带指路（组起不来 / 没链路），
+                            # 别套"证书或端口"那半句去误导
+                            self._sq.put(("note",
+                                          "远程访问启动失败：%s——到 设置 → 远程访问 "
+                                          "重新拨一次开关可重试。" % err))
+                        else:
+                            self._sq.put(("note",
+                                          "远程访问启动失败（证书或端口问题），暂未开启——"
+                                          "到 设置 → 远程访问 重新拨一次开关可重试。"))
                     elif self.remote.running():
+                        if not bool(self.cfg.get("remote_enabled", False)):
+                            # 造证书那几十秒里用户把开关关了（关的那一刻 running()
+                            # 还是 False、stop 空转）：迟到的启动此刻才成功，立刻收
+                            # 掉，状态必须与开关一致（坑 263；quick 不拖界面，
+                            # WFD 组后台自行散净）。
+                            try:
+                                self.remote.stop(quick=True)
+                            except Exception:
+                                pass
+                            return
                         # W 2026-10-11：主页只提醒一次、不带网址（地址在
                         # 设置 → 远程访问 的「网址 ****」里）。
                         self._sq.put(("note",
@@ -1930,7 +1947,8 @@ class App(ChatMixin, ImageGenMixin, VideoGenMixin, ServiceMixin, ModelsMixin, Se
                 self.remote.chat.cancel("local")
         except Exception:
             pass
-        self.remote.stop()            # 远程监听面一起收掉
+        self.remote.stop(quick=True)  # 远程监听面一起收掉；直连组不等收尾
+                                      # （关窗提速：组由脚本自己散净）
         # 会话内临时的两份材料（涂抹遮罩 PNG / 拍平 EXIF 后的底图副本）跟着收掉：
         # 都是原图分辨率级别的文件，留在 %TEMP% 里一次次累积没人清。
         self._mask_cleanup()

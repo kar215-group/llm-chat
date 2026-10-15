@@ -362,7 +362,7 @@ class ImageGenMixin:
                         new_tid, status=st if st in cloudjobs.OPEN_STATUS else "unknown",
                         error=str(res.get("error") or "")[:600])
             if not paths:
-                q.put(("line", "[ERROR] %s" % (res.get("error") or "云端生图失败")))
+                q.put(("line", "[ERROR] %s" % (res.get("error") or "云端生图失败"), gen))
             q.put(("exit", 0 if paths else 1, gen))
         except Exception as e:
             # 兜底（2026-10-11 排查报告）：worker 体内任何未捕获异常都不许吞掉 exit
@@ -392,7 +392,10 @@ class ImageGenMixin:
                         log.write(line if line.endswith("\n") else line + "\n")
                     except Exception:
                         pass
-                self._img_q.put(("line", line.rstrip()))
+                # 与 error/exit 同款带世代号（坑 264）：取消后立刻重发时，旧进程
+                # 缓冲里迟到的行会被 app._poll 的 stale 守卫整条丢掉，不进新任务
+                # 的进度行与 _img_tail
+                self._img_q.put(("line", line.rstrip(), gen))
         except Exception:
             pass
         try:
@@ -404,7 +407,7 @@ class ImageGenMixin:
         # 这里是"搬回来"的位置：**必须在 ("exit", …) 入队之前**，主线程是拿
         # os.path.isfile(expected) 判成功的，搬晚了会报成"引擎没有交付文件"。
         try:
-            moved = salvage_products(self.cfg, expected)
+            moved = salvage_products(self.cfg, expected, rc=rc)
         except Exception:
             moved = []
         if log is not None:

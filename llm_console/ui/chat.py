@@ -149,6 +149,10 @@ class ChatMixin:
             filetypes=(list(textfile.file_dialog_types())
                        + ([_IMG_FILTER] if not cloud else [])))
         for p in picked or ():
+            # 高危文件名确认与生图/生视频分支同一道（R-113；坑 255）：
+            # 聊天分支（尤其云端）原来直接挂附件，id_rsa/.env 一类文件无确认进上下文
+            if not self._confirm_sensitive(p):
+                return
             k = textfile.kind_of(p)
             if k == "image":
                 res = capability.resolve(self.cfg)
@@ -174,23 +178,33 @@ class ChatMixin:
             else:
                 self.set_file_attachment(p)
 
+    def _confirm_sensitive(self, p):
+        """高危文件名（疑似密钥/凭据）挂附件前确认一道；返回 False = 用户取消。
+
+        聊天与生图/生视频两个选果分支共用同一道（坑 255）：确认弹窗只认文件名、
+        与后续按图片/文档分派无关。多选时一张说"不"就取消整批（与既有口径一致）。
+        """
+        base = os.path.basename(str(p or ""))
+        if not _SENSITIVE_NAME_RE.search(base):
+            return True
+        return bool(messagebox.askyesno(
+            "这个文件可能含密钥",
+            "「%s」看起来可能包含密钥 / 凭据。\n"
+            "继续发送会把文件内容交给模型处理（云端模型还会上传到服务商）。\n\n"
+            "确定继续吗？" % base))
+
     def _attach_picked(self, p):
         """📎 选果的统一路由：图片进参考图列表，其余走文档附件（全模式同一规则）。
 
         以前生图/生视频模式把选果整个塞进图片列表：选到 .txt / .md 时瓷砖给
         "画不出"的占位样图、发送时当参考图喂给引擎/云端必然出错（坑 158）。
 
-        高危文件名先过一道确认（R-113，W 2026-10-10 批）：一次误点会把 API Key /
-        token 送进上下文（云端模型还会上传到服务商，不可撤回）。
+        高危文件名先过一道确认（R-113，W 2026-10-10 批；聊天分支同一道见
+        `_confirm_sensitive`，坑 255）：一次误点会把 API Key / token 送进上下文
+        （云端模型还会上传到服务商，不可撤回）。
         """
-        base = os.path.basename(str(p or ""))
-        if _SENSITIVE_NAME_RE.search(base):
-            if not messagebox.askyesno(
-                    "这个文件可能含密钥",
-                    "「%s」看起来可能包含密钥 / 凭据。\n"
-                    "继续发送会把文件内容交给模型处理（云端模型还会上传到服务商）。\n\n"
-                    "确定继续吗？" % base):
-                return
+        if not self._confirm_sensitive(p):
+            return
         if textfile.kind_of(p) == "image":
             self.set_attachment(p)
         else:
@@ -702,6 +716,16 @@ class ChatMixin:
                 self._start_chat_image(text, ref_imgs=refs, ref_mode=self._img_ref_mode or "",
                                        doc=self._attached_file)
             else:
+                # 云端生视频只做文生：选图入口在模型被判"支持看图"时会放行
+                # （同一份 capability 云端生图也要用），发送侧必须有这道闸——
+                # 原来图片被静默丢弃还照计全费（坑 256）。附件原样保留，
+                # 切回本地生视频模型即可直接重发。
+                if refs:
+                    self._append("\n[云端] 云端生视频目前只支持文生视频，"
+                                 "首帧图片不会被发送（图片已保留，不会丢）。\n"
+                                 "  要带首帧，请在模型菜单里切回本地的〔生视频〕模型。\n",
+                                 "error")
+                    return
                 self._start_chat_video(text, doc=self._attached_file)
             return
         if self.cfg.get("model_kind") == "image":
@@ -993,13 +1017,19 @@ class ChatMixin:
         self._stop_flag = None
         self._set_busy_ui(False)
         content = "".join(self._cur_content).strip()
+        reasoning = "".join(self._cur_reasoning).strip()
         if content:
             self.history.append({"role": "assistant", "content": content})
+        elif reasoning:
+            # 只有【思考】、没有正文（max_tokens 被思考链吃满 finish_reason=length、
+            # 流断在思考段、停在思考段）：模型同样吐过字，这一轮算正常交互、照进
+            # 记录——"收尾原因不是判据"也覆盖这种半截（W 2026-10-13 口径，坑 259）。
+            # history 是下一轮请求的上下文，落这份思考文本与"真实发生过的输出"一致。
+            self.history.append({"role": "assistant", "content": reasoning})
         else:
             # 对话记录只收"模型答过话"的轮次（W 2026-10-13 定）：模型一个字都没吐
-            # （请求失败、连不上、异常、空回答）就把这一整轮——连那条提问——从记录里排除，
-            # 免得落一份"只有提问没有回答"的假记录。收尾原因不是判据：主动停止、流被中断、
-            # max_tokens 截断都算"模型回复过"，那半截照样进记录（真实输出，不是错误文本）。
+            # （请求失败、连不上、异常、空回答）才把这一整轮——连那条提问——从记录里排除，
+            # 免得落一份"只有提问没有回答"的假记录。
             self._log_drop.add(self._log_turn_start)
         usage, self._last_usage = self._last_usage, None
         if usage and not error and self.cfg.get("show_usage", True):

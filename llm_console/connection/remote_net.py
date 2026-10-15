@@ -17,6 +17,7 @@
 铁律 1：connection 层不得 import tkinter。
 """
 
+import ctypes
 import http.server
 import ipaddress
 import os
@@ -55,10 +56,12 @@ def normalize_ip(raw):
 class ConnGateMixin:
     """并发闸门（P0-1）：占多少线程不能由对方决定。
 
-    计数配平在 `process_request_thread` 的**进 / 出**上（一条连接一次进、一次出，
-    握手失败提前返回也走同一条 finally）；`verify_request` 只在 accept 循环上读
-    一个提示位做拦截 —— 允许 ±1 条的竞态窗口，这里拦的是"挂着不写字节的一堆连接"，
-    不是精确配额。
+    **占槽在 `verify_request`（accept 循环线程）里当场 +1**（坑 261）：原来这里只读
+    计数、+1 放到工作线程 `process_request_thread` 才发生，一次性突发的全部连接都
+    在 +1 生效前通过校验 → 突发窗口无界（注释曾自认"允许 ±1"，实测是任意条）。
+    释放在工作线程的 finally（`_slot(-1)`）；verify 返回 False 时 socketserver 自己
+    关 socket、不起线程，所以那条**不占槽**。起线程本身失败由 `process_request`
+    兜底释放（见 TLSWorkerMixin）。
     """
 
     max_concurrent = MAX_CONCURRENT
@@ -75,6 +78,7 @@ class ConnGateMixin:
                     "conn.limit", normalize_ip(client_address[0]), False,
                     "live=%d" % self._live)
                 return False
+            self._live += 1            # 当场占槽：突发窗口里也算数（坑 261）
         return True
 
     def _slot(self, delta):
@@ -104,8 +108,18 @@ class TLSWorkerMixin(ConnGateMixin):
 
     ssl_ctx = None
 
+    def process_request(self, request, client_address):
+        # 槽位在 verify_request 已占；正常路径进线程由 process_request_thread 的
+        # finally 释放。只有"线程根本没起起来"（Thread.start 抛错，极罕见）会落到
+        # 这里——不释放就是永久少一个槽（坑 261 配套）。
+        try:
+            super().process_request(request, client_address)
+        except Exception:
+            self._slot(-1)
+            raise
+
     def process_request_thread(self, request, client_address):
-        self._slot(1)
+        # 不再 _slot(+1)：verify_request（accept 线程）已经占过，突发窗口里也算数。
         try:
             if self.ssl_ctx is not None:
                 try:
@@ -171,11 +185,21 @@ def make_httpd(port, handler, bind=""):
 BIND_ALL = "all"
 BIND_TAILSCALE = "tailscale"
 BIND_V4 = "v4"
-# 设置页下拉的三项标签（W 2026-10-12 批准的文案）
+# 设备直连（2026-10-13，99 K16）：只绑"直连链路"的地址——电脑侧无线直连组
+# （Wi-Fi Direct 自主 GO，见 `remote_wfd`）或手机热点接入那条链路；公网
+# IPv6 / 公网 IPv4 / 校园网口一个字节都不监听。评估与真机实测见工作区
+# 《设备直连-评估与方案.md》。
+BIND_WFD = "wfd"
+# 设置页下拉的标签（W 2026-10-12 批准的文案；第 4 档文案待 W 逐字过目）
 BIND_LABELS = {BIND_ALL: "本机所有网卡（默认）",
                BIND_TAILSCALE: "仅 Tailscale",
-               BIND_V4: "仅局域网 IPv4"}
+               BIND_V4: "仅局域网 IPv4",
+               BIND_WFD: "仅设备直连（无线直连 / 手机热点）"}
 BIND_FALLBACK_MSG = "没检测到 Tailscale 地址，已按本机所有网卡开放。"
+# 设备直连档拿不到直连地址时的说明：**拒绝启动、不回退**——回退 all 就等于
+# 把公网口打开（W 硬要求：绝不通过 ipv6 公网向手机提供服务）。
+BIND_WFD_REFUSE_MSG = ("没检测到设备直连链路（手机热点没连、无线直连组也没开）："
+                       "先在手机上开热点并把电脑连上，再拨一次开关")
 
 
 def tailscale_addr(ips=None):
@@ -208,6 +232,12 @@ def resolve_bind(cfg):
         if ip:
             return ip, ""
         return "", BIND_FALLBACK_MSG
+    if want == BIND_WFD:
+        ip, _kind = direct_addr()
+        if ip:
+            return ip, ""
+        # 不回退：由调用方（remote.start）按 BIND_WFD_REFUSE_MSG 拒绝启动
+        return "", BIND_WFD_REFUSE_MSG
     return "", ""
 
 
@@ -346,3 +376,208 @@ def tailscale_installed():
         except Exception:
             pass
     return False
+
+
+# ---- 设备直连链路的地址发现（2026-10-13，99 K16）----
+# 认两条链路（都只看本机流表里的适配器属性，零发包、不装任何东西）：
+#   wfd  = Wi-Fi Direct 虚拟适配器（Description 含 "Wi-Fi Direct"）上的非
+#          169.254 IPv4——电脑侧自主 GO 的**组主地址**（Windows 固定
+#          192.168.137.1，2026-10-13 真机三次实测一致）；
+#   wifi = 无线网卡（IfType 71）上的非 169.254 IPv4——手机热点接入那条链路。
+# 实现 = GetAdaptersAddresses（ctypes；项目里 Toolhelp / GetExtendedTcpTable
+# 已有同款先例）。**打桩钉定义处**（`_adapter_rows` / `direct_addr`），自检
+# 不碰真网卡（坑 34/234 纪律）。
+_IF_TYPE_IEEE80211 = 71
+_AF_UNSPEC = 0
+_GAA_SKIP = 0x0002 | 0x0004 | 0x0008   # SKIP_ANYCAST | SKIP_MULTICAST | SKIP_DNS
+
+
+class _SOCKET_ADDRESS(ctypes.Structure):
+    _fields_ = [("lpSockaddr", ctypes.c_void_p),
+                ("iSockaddrLength", ctypes.c_int)]
+
+
+class _IP_ADAPTER_UNICAST_ADDRESS(ctypes.Structure):
+    pass
+
+
+_IP_ADAPTER_UNICAST_ADDRESS._fields_ = [
+    ("Length", ctypes.c_ulong),
+    ("Flags", ctypes.c_ulong),
+    ("Next", ctypes.POINTER(_IP_ADAPTER_UNICAST_ADDRESS)),
+    ("Address", _SOCKET_ADDRESS),
+    ("PrefixOrigin", ctypes.c_int),
+    ("SuffixOrigin", ctypes.c_int),
+    ("DadState", ctypes.c_int),
+    ("ValidLifetime", ctypes.c_ulong),
+    ("PreferredLifetime", ctypes.c_ulong),
+    ("LeaseLifetime", ctypes.c_ulong),
+    ("OnLinkPrefixLength", ctypes.c_ubyte),
+]
+
+
+class _IP_ADAPTER_GW(ctypes.Structure):
+    pass
+
+
+_IP_ADAPTER_GW._fields_ = [
+    ("Length", ctypes.c_ulong),
+    ("Flags", ctypes.c_ulong),
+    ("Next", ctypes.POINTER(_IP_ADAPTER_GW)),
+    ("Address", _SOCKET_ADDRESS),
+]
+
+
+class _IP_ADAPTER_ADDRESSES(ctypes.Structure):
+    pass
+
+
+_IP_ADAPTER_ADDRESSES._fields_ = [
+    ("Length", ctypes.c_ulong),
+    ("IfIndex", ctypes.c_ulong),
+    ("Next", ctypes.POINTER(_IP_ADAPTER_ADDRESSES)),
+    ("AdapterName", ctypes.c_char_p),
+    ("FirstUnicastAddress", ctypes.POINTER(_IP_ADAPTER_UNICAST_ADDRESS)),
+    ("FirstAnycastAddress", ctypes.c_void_p),
+    ("FirstMulticastAddress", ctypes.c_void_p),
+    ("FirstDnsServerAddress", ctypes.c_void_p),
+    ("DnsSuffix", ctypes.c_wchar_p),
+    ("Description", ctypes.c_wchar_p),
+    ("FriendlyName", ctypes.c_wchar_p),
+    ("PhysicalAddress", ctypes.c_ubyte * 8),
+    ("PhysicalAddressLength", ctypes.c_ulong),
+    ("Flags", ctypes.c_ulong),
+    ("Mtu", ctypes.c_ulong),
+    ("IfType", ctypes.c_ulong),
+    ("OperStatus", ctypes.c_int),
+    ("Ipv6IfIndex", ctypes.c_ulong),
+    ("ZoneIndices", ctypes.c_ulong * 16),
+    ("FirstPrefix", ctypes.c_void_p),
+    ("TransmitLinkSpeed", ctypes.c_ulonglong),
+    ("ReceiveLinkSpeed", ctypes.c_ulonglong),
+    ("FirstWinsServerAddress", ctypes.c_void_p),
+    ("FirstGatewayAddress", ctypes.c_void_p),
+    ("Ipv4Metric", ctypes.c_ulong),
+    ("Ipv6Metric", ctypes.c_ulong),
+    ("Luid", ctypes.c_ulonglong),
+    ("Dhcpv4Server", _SOCKET_ADDRESS),
+    ("CompartmentId", ctypes.c_ulong),
+    ("NetworkGuid", ctypes.c_ubyte * 16),
+    ("ConnectionType", ctypes.c_int),
+    ("TunnelType", ctypes.c_int),
+    ("Dhcpv6Server", _SOCKET_ADDRESS),
+    ("Dhcpv6ClientDuid", ctypes.c_ubyte * 130),
+    ("Dhcpv6ClientDuidLength", ctypes.c_ulong),
+    ("Dhcpv6Iaid", ctypes.c_ulong),
+    ("FirstDnsSuffix", ctypes.c_void_p),
+]
+
+
+def _sa_v4(sa):
+    """SOCKET_ADDRESS → IPv4 点分串（不是 v4 = 空串）。"""
+    try:
+        fam = ctypes.cast(sa.lpSockaddr,
+                          ctypes.POINTER(ctypes.c_ushort)).contents.value
+        if fam == socket.AF_INET and sa.iSockaddrLength >= 8:
+            b = ctypes.string_at(sa.lpSockaddr + 4, 4)
+            return "%d.%d.%d.%d" % (b[0], b[1], b[2], b[3])
+    except Exception:
+        pass
+    return ""
+
+
+def _adapter_rows():
+    """本机适配器快照：[{desc, name, type, up, ips, gw}]（只看 v4、滤回环与
+    169.254；gw = 第一个 v4 默认网关，没有 = 空串）。**唯一读适配器的地方**
+    （自检打桩钉这里）；非 Windows / 读失败一律空表。"""
+    if os.name != "nt":
+        return []
+    try:
+        iphlp = ctypes.windll.iphlpapi
+        size = ctypes.c_ulong(16 * 1024)
+        ret = 1
+        buf = None
+        for _ in range(3):
+            buf = ctypes.create_string_buffer(size.value)
+            ret = iphlp.GetAdaptersAddresses(
+                ctypes.c_ulong(_AF_UNSPEC), ctypes.c_ulong(_GAA_SKIP),
+                None, buf, ctypes.byref(size))
+            if ret != 111:              # 111 = ERROR_BUFFER_OVERFLOW（拿够再问一次）
+                break
+        if ret != 0 or buf is None:
+            return []
+        rows = []
+        p = ctypes.cast(buf, ctypes.POINTER(_IP_ADAPTER_ADDRESSES))
+        while p:
+            a = p.contents
+            ips = []
+            q = a.FirstUnicastAddress
+            while q:
+                u = q.contents
+                ip = _sa_v4(u.Address)
+                if ip and not ip.startswith(("127.", "169.254.")):
+                    ips.append(ip)
+                q = u.Next
+            gw = ""
+            g = a.FirstGatewayAddress
+            while g:
+                gw = _sa_v4(g.contents.Address)
+                if gw:
+                    break
+                g = g.contents.Next
+            rows.append({"desc": a.Description or "",
+                         "name": a.FriendlyName or "",
+                         "type": int(a.IfType),
+                         "up": int(a.OperStatus) == 1,     # IfOperStatusUp
+                         "ips": ips, "gw": gw})
+            p = a.Next
+        return rows
+    except Exception:
+        return []
+
+
+# 手机热点的常见默认网关（2026-10-14，坑 257）：
+#   iPhone 个人热点         172.20.10.1
+#   Android 传统默认        192.168.43.1
+#   Android 新版 / 部分 ROM 192.168.150.1、192.168.137.1
+# 判据只能是"默认网关落在手机热点网段"这种**保守白名单**：适配器信息分不出
+# 连的是手机热点还是校园/家庭 AP（同样是基础设施 Wi-Fi），家里路由器也常用
+# 192.168.1.1/0.1，不能按"有私有地址"放行。认不出的自定义热点网段 → 答"没有
+# wifi 链路"，start() 随后去起电脑侧直连组（组起不来才拒绝）——宁可多走一步，
+# 绝不把普通局域网当成"设备直连"绑上去（K16：公网口一个字节都不监听）。
+HOTSPOT_GATEWAYS = frozenset(("172.20.10.1", "192.168.43.1",
+                              "192.168.137.1", "192.168.150.1"))
+
+
+def wfd_go_addr():
+    """电脑侧无线直连组的组主地址（拿不到 = 空串）。"""
+    for r in _adapter_rows():
+        if "wi-fi direct" in r["desc"].lower() and r["up"] and r["ips"]:
+            return r["ips"][0]
+    return ""
+
+
+def wifi_sta_addr():
+    """手机热点接入链路上的本机 IPv4——虚拟 Wi-Fi Direct 适配器不算（归
+    `wfd_go_addr`），且**默认网关必须是手机热点的已知网段**（坑 257）：普通
+    校园 / 家庭 Wi-Fi 也长在同一块无线网卡上，不看网关就分不清，而那一档
+    承诺的是"公网口一个字节都不监听"。拿不准 = 空串（交给 start 起直连组）。"""
+    for r in _adapter_rows():
+        if (r["type"] == _IF_TYPE_IEEE80211 and r["up"] and r["ips"]
+                and "wi-fi direct" not in r["desc"].lower()
+                and str(r.get("gw") or "") in HOTSPOT_GATEWAYS):
+            return r["ips"][0]
+    return ""
+
+
+def direct_addr():
+    """设备直连链路的地址 → `(ip, kind)`：kind = `"wfd"`（电脑侧直连组，优先）
+    / `"wifi"`（手机热点，网关须在 `HOTSPOT_GATEWAYS` 白名单里）；
+    都没有 = `("", "")`。"""
+    ip = wfd_go_addr()
+    if ip:
+        return ip, "wfd"
+    ip = wifi_sta_addr()
+    if ip:
+        return ip, "wifi"
+    return "", ""

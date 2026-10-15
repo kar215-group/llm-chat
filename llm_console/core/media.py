@@ -583,16 +583,21 @@ def _acp_mirror_name(path, acp=0):
 
 
 def _find_in_roots(name, roots, max_depth=4, cap=6000):
-    """在候选根里按**文件名**找（深度与条数双封顶，只走 not-visited 的浅层）。"""
+    """在候选根里按**文件名**找（深度与条数双封顶，只走 not-visited 的浅层）。
+
+    `roots` 元素是 `(路径, 最大深度)`：盘根那种大根给浅深度（镜像目录就在产物根
+    的同级，坑 265），常规根给深 4。也兼容直接传路径字符串（按 max_depth）。
+    """
     hits = []
     low = os.path.basename(name).lower()
     seen = 0
-    for r in roots:
+    for item in roots:
+        r, depth = (item if isinstance(item, (tuple, list)) else (item, max_depth))
         if not r or not os.path.isdir(r):
             continue
         for dirpath, dirnames, filenames in os.walk(r):
             rel = os.path.relpath(dirpath, r)
-            if rel != "." and (rel.count(os.sep) + 1) >= max_depth:
+            if rel != "." and (rel.count(os.sep) + 1) >= depth:
                 dirnames[:] = []
             for fn in filenames:
                 seen += 1
@@ -627,48 +632,73 @@ def _prune_empty_up(d, stops):
         cur = os.path.dirname(cur)
 
 
-def salvage_products(cfg, expected, extra_roots=()):
+def salvage_products(cfg, expected, extra_roots=(), rc=None):
     """引擎把产物写进「乱码镜像目录」时，把文件搬回该在的位置 → `[(src, dst), …]`。
 
     调用点 = 三条**本地**链路的 reader，且必须在 `("exit", rc)` 入队**之前** ——
     主线程是拿 `os.path.isfile(expected)` 判成功的，搬晚了"出了图"会被报成
     "引擎没有交付文件"（这条链路刚在 2026-10-13 用它自己的日志钉过一次）。
 
+    `rc`：引擎退出码。**显式非 0（任务失败）整段不做**（坑 265）：失败时产物不
+    存在，精确换算与 walk 都是纯浪费（旧版每次真失败都全量 walk 程序目录，深 4 /
+    6000 文件封顶，HDD 上白卡数秒）。`rc=None`（自检 / 老调用点）= 无条件执行。
+
     三条纪律：
       · 只搬**本次期望的那几个文件名**：先试精确镜像名，再按文件名搜；镜像目录里
         别的文件（历史遗留的旧图）一律不碰，所在目录非空就不删；
+      · 文件名搜索只在**期望路径含非 ASCII 段**时才做——UTF-8 与 GBK 对纯 ASCII
+        逐字相同，那种路径根本不可能产生镜像；默认产物目录（产物/本地）含中文，
+        真实现场都走得进来，开发机自检不受 ACP 影响；
       · 搬回后顺手收掉因这次搬迁变空的镜像空壳（`_prune_empty_up`，边界到根为止）；
       · 全程吞异常：这是补救手段，失败要让调用方照旧走"没有交付文件"那条老路，
         不能把补救自己的异常当成任务失败。
     """
     out = []
     try:
+        if rc is not None and rc != 0:
+            return out
         missing = [os.fspath(p) for p in (expected or [])
                    if p and not os.path.isfile(p)]
         if not missing:
             return out
         roots = []
         try:
-            roots.append(config.output_root(cfg))
+            roots.append((config.output_root(cfg), 4))
         except Exception:
             pass
-        roots.append(os.path.dirname(missing[0]))
+        roots.append((os.path.dirname(missing[0]), 4))
         try:
-            roots.append(config.APP_DIR)
+            roots.append((config.APP_DIR, 4))
         except Exception:
             pass
-        roots.extend(os.fspath(r) for r in (extra_roots or ()))
+        # extra_roots 契约就是路径字符串，str() 与 os.fspath 对其语义等价
+        roots.extend((str(r), 4) for r in (extra_roots or ()))
+        # 自定义产物目录在**独立盘符**时，镜像目录是它的**同级**（X:\图集 → X:\<乱码>），
+        # 上面几条根都够不到；只在产物盘与它们不同盘时补盘根浅搜两层（坑 265）——
+        # 同盘的镜像已被 output_root / dirname 覆盖，不必浅扫整块系统盘。
+        try:
+            drive = os.path.splitdrive(os.path.abspath(missing[0]))[0].lower()
+            known = []
+            for r, _d in roots:
+                known.append(os.path.splitdrive(os.path.abspath(r))[0].lower())
+            if drive and drive not in known:
+                roots.append((drive + os.sep, 2))
+        except Exception:
+            pass
         dedup = []
-        for r in roots:
+        for r, _d in roots:
             if r and r not in dedup:
                 dedup.append(r)
+        search_roots = [(r, d) for (r, d) in roots if r in dedup]
         for p in missing:
             src = ""
             cand = _acp_mirror_name(p)
             if cand and cand != p and os.path.isfile(cand):
                 src = cand
-            if not src:
-                hits = _find_in_roots(os.path.basename(p), dedup)
+            # 纯 ASCII 路径不可能被 ACP 改写（两种编码对 ASCII 逐字相同）：
+            # 不 walk，真失败的链路零额外成本（坑 265）
+            if not src and any(ord(ch) > 127 for ch in p):
+                hits = _find_in_roots(os.path.basename(p), search_roots)
                 src = hits[0] if hits else ""
             if not src:
                 continue
