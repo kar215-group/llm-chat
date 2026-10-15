@@ -21,6 +21,7 @@ from ..core.params import ctx_for, current_ngl
 from ..core.server import _query_serving_model, server_alive, server_process_alive
 from ..connection import cloud
 from ..connection import remote as remote_mod
+from . import dialogs
 from . import theme
 from . import widgets
 from .service import START_BLOCK_TIP
@@ -3352,30 +3353,61 @@ class SettingsMixin:
                 widgets.center_on(w, host=win)
 
             def _open_devices():
-                """已配对设备次级窗（吊销后列表就地重画）。"""
+                """已配对设备次级窗（吊销 / 改名后列表就地重画）。
+
+                2026-10-15 UI 走查：窗口给最小尺寸（空态不再缩成一小条）、
+                redraw 后按内容重算大小并重新居中；吊销 / 改名全走项目风格
+                dialogs（系统 messagebox / simpledialog 下线），入口级吊销
+                原来没二次确认，补一道危险操作确认。
+                """
                 w, frm = _panel("远程访问 · 已配对设备")
                 if w is None:
                     return                      # 已经开着：抬到前面就够了
+                DEV_MIN = (540, 260)           # 空态也保持设计规范的最小窗
+                w.minsize(*DEV_MIN)
+
+                def _fit():
+                    """内容多寡不一（空态 / 多设备 / 多入口）：按请求尺寸重算
+                    窗口（夹最小宽高）并重新居中到设置窗。"""
+                    w.update_idletasks()
+                    rw = max(DEV_MIN[0], frm.winfo_reqwidth() + 4)
+                    rh = max(DEV_MIN[1], frm.winfo_reqheight() + 4)
+                    w.geometry("%dx%d" % (rw, rh))
+                    widgets.center_on(w, host=win, size=(rw, rh))
 
                 def redraw():
                     from ..core.device_ua import os_label
-                    from tkinter import simpledialog
                     for c in frm.winfo_children():
                         c.destroy()
                     persons = self.remote.personas()
                     if not persons:
-                        ttk.Label(frm, text="还没有已配对的设备。",
-                                  style="Dim.TLabel").pack(anchor="w")
+                        empty = ttk.Frame(frm)
+                        empty.pack(anchor="w", pady=(26, 10))
+                        ttk.Label(empty, text="还没有已配对的设备",
+                                  font=("Microsoft YaHei UI", 10, "bold")).pack(
+                            anchor="w")
+                        ttk.Label(
+                            empty,
+                            text="手机打开远程访问网址、输入配对码并在电脑端允许后，"
+                                 "设备会出现在这里。",
+                            style="Dim.TLabel", wraplength=480,
+                            justify="left").pack(anchor="w", pady=(10, 2))
+                        ttk.Label(
+                            empty,
+                            text="同一台设备换 Wi-Fi / 热点 / 浏览器会自动认回；"
+                                 "不同设备的对话与历史产物互不可见。",
+                            style="Dim.TLabel", wraplength=480,
+                            justify="left").pack(anchor="w", pady=(2, 0))
                     else:
                         ttk.Label(
                             frm,
-                            text="按设备列出（同一台设备换 Wi-Fi / 直连 / 浏览器"
-                                 "配对会自动归在一起）。「吊销」会让这台设备的"
-                                 "所有连接方式全部失效：" if simple else
-                            "按设备列出；「吊销」= 这台设备所有连接方式全部失效，"
-                            "下方每个入口可单独吊销：",
+                            text="同一台设备换 Wi-Fi / 直连 / 浏览器配对会自动归在"
+                                 "一起。「吊销」会让这台设备的所有连接方式全部失效："
+                            if simple else
+                            "「吊销」= 这台设备所有连接方式全部失效；"
+                            "高级模式下每个入口可单独吊销：",
                             style="Dim.TLabel", wraplength=520, justify="left").pack(
-                            anchor="w", pady=(0, 4))
+                            anchor="w", pady=(0, 6))
                         for p in persons:
                             oses = "、".join(os_label(k) for k in (p.get("os_set") or []))
                             tag = oses or "未知设备"
@@ -3383,30 +3415,37 @@ class SettingsMixin:
                                 tag += "（多系统）"
                             pf = ttk.Frame(frm)
                             pf.pack(anchor="w", pady=3, fill="x")
+                            # 按钮组统一贴右缘成一列：设备名长短不一时「改名 / 吊销」
+                            # 不再跟着文字漂（2026-10-15 UI 走查）
+                            acts = ttk.Frame(pf)
+                            acts.pack(side="right")
                             ttk.Label(pf, text="%s · %s（最近活跃 %s）" % (
                                 tag, p.get("name", "?"),
                                 p.get("last_seen") or "—")).pack(side="left")
                             pid = p["id"]
 
                             def _rename(pid=pid, old=p.get("name", "")):
-                                nm = simpledialog.askstring(
-                                    "设备备注", "给这台设备起个名字：",
-                                    initialvalue=old, parent=w)
+                                nm = dialogs.ask_text(
+                                    w, "设备备注", "给这台设备起个名字：",
+                                    initial=old)
                                 if nm and nm.strip():
                                     self.remote.rename_persona(pid, nm.strip())
                                     redraw()
 
-                            theme.button(pf, text="改名", width=6,
+                            theme.button(acts, text="改名", width=6,
                                          command=_rename).pack(side="left", padx=(8, 0))
-                            theme.button(
-                                pf, text="吊销", width=6,
-                                command=lambda pid=pid:
-                                    messagebox.askyesno(
-                                        "吊销设备",
-                                        "吊销后，这台设备的所有连接方式都会失效，"
-                                        "需要重新配对。确定吊销吗？", parent=w)
-                                    and (self.remote.revoke_persona(pid), redraw())
-                            ).pack(side="left", padx=4)
+
+                            def _revoke(pid=pid, name=p.get("name", "?")):
+                                if dialogs.ask_confirm(
+                                        w, "吊销设备",
+                                        "吊销后，「%s」的所有连接方式都会立即失效，"
+                                        "再次访问需要重新配对。确定吊销吗？" % name,
+                                        ok_text="吊销设备", danger=True):
+                                    self.remote.revoke_persona(pid)
+                                    redraw()
+
+                            theme.button(acts, text="吊销", width=6,
+                                         command=_revoke).pack(side="left", padx=4)
                             # 入口级清单只在高级模式露出（W Q4②：普通用户容易把
                             # "换个入口重配"误当成数据被删，坑 284）
                             if not simple:
@@ -3423,15 +3462,26 @@ class SettingsMixin:
                                                 os_label(cd.get("os")),
                                                 cd.get("last_ip") or "—",
                                                 cd.get("added") or "—")).pack(side="left")
+
+                                        def _revoke_cred(did=cd.get("id", "")):
+                                            if dialogs.ask_confirm(
+                                                    w, "吊销连接入口",
+                                                    "只吊销入口 %s 这一个连接，"
+                                                    "这台设备的其他连接方式不受影响。"
+                                                    "确定吊销吗？" % did,
+                                                    ok_text="吊销此入口",
+                                                    danger=True):
+                                                self.remote.revoke(did)
+                                                redraw()
+
                                         theme.button(
                                             cf, text="吊销此入口", width=10,
-                                            command=lambda did=cd.get("id"):
-                                                (self.remote.revoke(did), redraw())
+                                            command=_revoke_cred
                                         ).pack(side="left", padx=6)
                     code_var.set(_pair_text())
+                    _fit()
 
                 redraw()
-                widgets.center_on(w, host=win)
 
             def _remote_refresh():
                 """状态行 / 配对码的回显（进页 + 保存后都调）。网址与设备
@@ -3517,7 +3567,9 @@ class SettingsMixin:
                     box.configure(state="disabled")
 
                 def _clear():
-                    if messagebox.askyesno("清空审计", "清空审计日志？", parent=w):
+                    if dialogs.ask_confirm(w, "清空审计",
+                                          "清空全部远程访问审计日志？此操作不可撤销。",
+                                          ok_text="清空", danger=True):
                         remote_mod.clear_audit()
                         redraw()
                 bar = ttk.Frame(frm)
