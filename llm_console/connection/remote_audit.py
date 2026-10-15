@@ -83,6 +83,17 @@ def audit_poll(action, ip, ok, detail="", ms=None):
     key = (str(action), str(ip), str(detail), bool(ok))
     now = time.time()
     with _audit_lock:
+        # 顺手清过期窗口（坑 270）：移动网 v6 前缀漂移 / 来源 IP 变化会让键无限
+        # 累积；活键每 60 秒只一条，过期项清掉成本极低，别让这个 dict 只增不减。
+        # 过期但攒过多次的窗口先补一条 ×N 聚合行进文件（原来靠"同源下次调用"带出，
+        # 源再也不来就永久丢了），再删。
+        stale_keys = [k for k, g in _poll_gate.items()
+                      if now - g[0] >= POLL_WINDOW_S]
+        for k in stale_keys:
+            g = _poll_gate.pop(k, None)
+            if g and g[1] > 1:
+                _write_line(k[0], k[1], k[3],
+                            "%s ×%d" % (k[2], g[1]), None)
         gate = _poll_gate.get(key)
         if gate and now - gate[0] < POLL_WINDOW_S:
             gate[1] += 1

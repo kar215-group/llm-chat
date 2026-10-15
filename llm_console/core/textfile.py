@@ -168,8 +168,21 @@ def read_document(path):
                 "error": "这个文件的真实格式是 Office 97-2003 老文档（扩展名被改过）："
                          "请用 Office 另存为 .docx 或 .txt 后再发。"}
     if head8.startswith(b"MZ"):
-        return {"ok": False, "name": name,
-                "error": "这看着是个可执行文件（扩展名被改过），不会被当文本发给模型。"}
+        # MZ 两字节合法文本也可能撞上（坑 276：以 "MZ" 开头的纯文本），加一道
+        # PE 结构复核：DOS 头偏移 0x3C 处的 e_lfanew 指向 PE 签名 "PE\0\0"。
+        _is_pe = False
+        try:
+            with open(path, "rb") as fh:
+                fh.seek(0x3C)
+                e_lfanew = int.from_bytes(fh.read(4), "little")
+                if 0x40 <= e_lfanew <= size - 4:
+                    fh.seek(e_lfanew)
+                    _is_pe = fh.read(4) == b"PE\x00\x00"
+        except Exception:
+            _is_pe = False
+        if _is_pe:
+            return {"ok": False, "name": name,
+                    "error": "这看着是个可执行文件（扩展名被改过），不会被当文本发给模型。"}
     cut = size > MAX_READ_BYTES
     if k == "docx":
         # 按**路径**开 zip：中央目录在文件尾部，先截前 4MB 再解的话，>4MB 的

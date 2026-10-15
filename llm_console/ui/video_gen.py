@@ -8,7 +8,7 @@ import threading
 import time
 from tkinter import ttk, messagebox
 
-from ..core import cloudjobs, config, providers, sdprofile
+from ..core import cloudjobs, config, media, providers, sdprofile
 from . import theme
 from ..core.media import (build_video_cmd, resolve_video_files, salvage_products,
                           vid_out_dir)
@@ -70,9 +70,11 @@ class VideoGenMixin:
             seed = int(self.cfg.get("vid_seed", -1))
         except Exception:
             seed = -1
-        size = str(self.cfg.get("vid_size", "512x512")).strip() or "512x512"
-        if "x" not in size.lower():
-            size = "512x512"
+        # 分辨率写法与生图同一份判据（media._wh：×＊*、全角都认，非法值兜底）——
+        # 以前这里只查半角 x，832×480 / 1024*1024（手改配置可达）被静默改 512（坑 266）
+        _w, _h = media._wh(str(self.cfg.get("vid_size", "512x512")) or "512x512",
+                           "512x512")
+        size = "%sx%s" % (_w, _h)
         ext = str(self.cfg.get("vid_format", "webm")).strip().lstrip(".").lower()
         if ext not in ("webm", "avi", "webp"):
             ext = "webm"          # sd-cli 的单文件视频输出只认这三种容器

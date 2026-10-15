@@ -420,6 +420,8 @@ function renderTiles(){
       ev.stopPropagation();
       REFS.splice(idx, 1);
       delete MASKS[rf.name];
+      /* 瓷砖移除即释放本地 Blob URL，反复选图不泄漏浏览器内存 */
+      try { URL.revokeObjectURL(rf.url); } catch(e){}
       renderTiles(); syncZones();
     };
     d.appendChild(x);            /* 2026-10-13 补：原先创建了却忘了挂上 DOM —— 按钮

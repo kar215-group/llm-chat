@@ -394,6 +394,18 @@ class RemoteServer:
     # ---- 生命周期 ----
 
     def start(self):
+        # 重入保护（坑 271）：start 内有起组 / 绑端口 / 起服务线程，绕过
+        # App.start_remote_async 二次调用会留下第二个 httpd（旧的不再被引用、
+        # 端口却一直占着）。先 stop 再 start 是正常路径（settings 拨开关走它）。
+        if getattr(self, "httpd", None) is not None or getattr(self, "_starting", False):
+            raise RemoteStartError("远程服务已经在启动或运行中，先停止再启动")
+        self._starting = True
+        try:
+            return self._start_inner()
+        finally:
+            self._starting = False
+
+    def _start_inner(self):
         # 注意不能用 `cfg.get("remote_port", 8443) or 8443`：那个 `or` 会把
         # 手改成 0 的端口**静默变成 8443**（服务器听 8443、网址窗显示 :0，
         # 手机永远连不上）——正是要报出来的那一类。None / 空串才回落默认值。

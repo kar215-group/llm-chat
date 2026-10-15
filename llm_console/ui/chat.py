@@ -266,9 +266,17 @@ class ChatMixin:
                                "dropped": dropped, "budget": budget,
                                "cloud": cloud, "doc": doc["doc"]}
         # 单张视图与图片列表一并清掉：条上只剩这一块文档瓷砖
+        dropped_imgs = list(self._attached_images or [])
         self._attached_image = None
         self._attached_images = []
         self._show_attach_bar()
+        # 互斥切换要开口（坑 277）：多选里图片在前、文档在后时图片会被摘掉，
+        # 不能静默——聊天区留一句，说清哪些图不会被发送
+        if dropped_imgs:
+            names = "、".join(os.path.basename(p) for p in dropped_imgs[:3])
+            more = " 等" if len(dropped_imgs) > 3 else ""
+            self._append("\n[提示] 已切换为文本附件「%s」，之前选的图片（%s%s）不会一起发送。\n"
+                         % (doc["name"], names, more), "meta")
 
     def _show_attach_bar(self):
         """把附件条贴到输入区上方，并重画瓷砖与右侧模式区。
@@ -671,6 +679,13 @@ class ChatMixin:
                 self._append("\n[提示] 手机端有一个远程%s在进行：等它完成，"
                              "或在 设置 → 远程访问 点「停止远程任务」。\n"
                              % self._remote_busy_kind(), "meta")
+            elif self._svc_busy:
+                # 坑 268：服务启停 / 换载中按发送或回车不能静默吞掉
+                self._append("\n[提示] 服务正在启停或加载模型，等它完成再发。\n",
+                             "meta")
+            else:
+                # 纯 _busy（理论上的边沿窗口）也给一句话，别让按键看着像坏了
+                self._append("\n[提示] 上一轮还在收尾，稍等一下再发。\n", "meta")
             return
         text = self.input.get("1.0", "end").strip()
         if not text:

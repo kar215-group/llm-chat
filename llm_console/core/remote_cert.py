@@ -7,7 +7,9 @@
 
   PowerShell（一次调用，零管理员、不进证书库）
     1. `[RSA]::Create(2048)` 造密钥对；
-    2. `CertificateRequest...CreateSelfSigned` 出自签证书（SAN = localhost + 127.0.0.1）；
+    2. `CertificateRequest...CreateSelfSigned` 出自签证书（**只有 CN，刻意不加 SAN**：
+       手机按 IP 字面量访问，加 localhost/127.0.0.1 的 SAN 也不匹配，而存量证书不会
+       因代码升级重生成——见 `16` §27 跳过项 2，坑库旁注）；
     3. 证书 DER（RawData）与 RSA 参数（ExportParameters）以 base64 JSON 打到 stdout。
   Python（纯标准库）
     4. 把参数转大端、DER 编码成 PKCS#1 RSAPrivateKey → `key.pem`；

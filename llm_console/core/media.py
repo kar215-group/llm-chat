@@ -19,6 +19,7 @@ docs/flux.md、docs/wan.md 与 `sd-cli --help` 的原文（开发机没实测过
 import os
 import re
 import shutil
+import threading
 
 from . import config, sdprofile
 from .models import (IMAGE_SUBDIR, _is_mmproj, find_vl_pairs, scan_models,
@@ -437,6 +438,7 @@ def mask_hint(tier, auto=True, has_mask=False):
 # 不一致时，在消费点前一处归一"同一条纪律）：GUI 的 `-i`/`-r` 与远程网页上传的
 # 参考图都经 `build_img_cmd`，改这一处两条路一起对上。
 _FLAT_DIR = ""
+_FLAT_LOCK = threading.Lock()       # GUI 与远程两条线程理论可并发首次建目录（坑 269）
 
 
 def _flat_dir():
@@ -444,7 +446,9 @@ def _flat_dir():
     global _FLAT_DIR
     if not _FLAT_DIR:
         import tempfile
-        _FLAT_DIR = tempfile.mkdtemp(prefix="llm_console_img_")
+        with _FLAT_LOCK:
+            if not _FLAT_DIR:
+                _FLAT_DIR = tempfile.mkdtemp(prefix="llm_console_img_")
     return _FLAT_DIR
 
 
@@ -476,8 +480,15 @@ def flatten_exif(path):
             im = im.convert("RGBA" if alpha else "RGB")
             stem = os.path.splitext(os.path.basename(p))[0] or "img"
             keep = "".join(c if (c.isalnum() or c in "-_") else "_" for c in stem)[:40]
-            out = os.path.join(_flat_dir(), "%s_%08x.%s"
+            # 名字带 mtime_ns（坑 269）：同一路径的图片会话内被编辑覆盖重发时，
+            # 旧副本不会被复用；也顺带把 32 位截断 hash 的撞名面降到零
+            try:
+                mtime = os.stat(p).st_mtime_ns
+            except Exception:
+                mtime = 0
+            out = os.path.join(_flat_dir(), "%s_%08x_%x.%s"
                                % (keep, abs(hash(os.path.abspath(p))) & 0xFFFFFFFF,
+                                  mtime & 0xFFFFFFFFFFFFFFFF,
                                   "png" if alpha else "jpg"))
             if alpha:
                 im.save(out, "PNG")
@@ -699,7 +710,16 @@ def salvage_products(cfg, expected, extra_roots=(), rc=None):
             # 不 walk，真失败的链路零额外成本（坑 265）
             if not src and any(ord(ch) > 127 for ch in p):
                 hits = _find_in_roots(os.path.basename(p), search_roots)
-                src = hits[0] if hits else ""
+                if hits:
+                    # 多个同名候选时取**最新修改**那个（坑 278）：产物名带秒级
+                    # 时间戳，同名基本只可能是本次产物 vs 历史遗留——别按
+                    # walk 顺序碰巧搬走旧文件
+                    def _mt(fp):
+                        try:
+                            return os.path.getmtime(fp)
+                        except Exception:
+                            return 0.0
+                    src = max(hits, key=_mt)
             if not src:
                 continue
             try:

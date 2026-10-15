@@ -288,6 +288,14 @@ class RemoteJobs:
         batch_rx = re.compile(r"generating image: (\d+)/(\d+) - ")
         tail = []
         log = config.media_log_path(self.cfg, task["out"])
+        # 常驻句柄（坑 273）：原来引擎**每行**输出都 open/write/close 一次，
+        # 几百上千行采样进度在慢盘 / 杀软扫描下是纯开销；与 GUI reader 同款行缓冲。
+        lf = None
+        if log:
+            try:
+                lf = open(log, "a", encoding="utf-8", errors="replace", buffering=1)
+            except Exception:
+                lf = None
         try:
             for line in proc.stdout:
                 line = (line or "").rstrip()
@@ -311,11 +319,9 @@ class RemoteJobs:
                                                 n * total]
                         else:
                             task["progress"] = [cur, total]
-                if log:
+                if lf is not None:
                     try:
-                        with open(log, "a", encoding="utf-8",
-                                  errors="replace") as lf:
-                            lf.write(line + "\n")
+                        lf.write(line + "\n")
                     except Exception:
                         pass
                 if stop.is_set():
@@ -328,6 +334,12 @@ class RemoteJobs:
             audit("image.read", task.get("device_id", "?"), False,
                   "%s: %s" % (type(e).__name__, e))
             task["error"] = READ_FAIL_MSG
+        finally:
+            if lf is not None:
+                try:
+                    lf.close()
+                except Exception:
+                    pass
         # 系统码页把中文路径读歪时（引擎 MinGW 窄 argv = UTF-8 × 文件 API 按 ACP
         # 解释，判据见 core/media.salvage_products），产物落在乱码镜像目录里 ——
         # 必须在算 found 之前搬回来，否则手机端看到的是"引擎没有交付文件"，

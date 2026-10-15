@@ -155,11 +155,16 @@ class RemoteChat:
                 return False, BUSY_MSG      # 二次判：上面那次在锁外
             hist = list(self._sessions.get(device_id) or [])
             hist.append({"role": "user", "content": text})
-            self._sessions[device_id] = _trim(hist)
+            sess = _trim(hist)
+            self._sessions[device_id] = sess
             job = {"device_id": device_id, "state": "running",
                    "answer": "", "thinking": "", "error": "", "usage": None,
                    "lock": threading.Lock(),
-                   "messages": list(self._sessions[device_id])}
+                   # 本轮所属会话的**对象身份**：drain 收尾时拿它比对当前会话——
+                   # 回答中点了「新对话」，clear 已把旧列表摘掉，旧回答就不再挂进
+                   # 新（空）会话（坑 274）
+                   "session": sess,
+                   "messages": list(sess)}
             q = queue.Queue()
             stop = threading.Event()
             job["stop"] = stop
@@ -202,11 +207,14 @@ class RemoteChat:
         with job["lock"]:
             ans = job["answer"]
             if job["state"] != "failed" and ans.strip():
-                # 半截回答也写回会话（与本机 GUI 同口径：已经生成了的不作废）
+                # 半截回答也写回会话（与本机 GUI 同口径：已经生成了的不作废）。
+                # 但只在**本轮会话仍是当前会话**时写（坑 274）：中途点过「新对话」
+                # 就挂回旧的已清空会话，别让旧回答凭空出现在新对话里。
                 with self._lock:
-                    hist = list(self._sessions.get(job["device_id"]) or [])
-                    hist.append({"role": "assistant", "content": ans})
-                    self._sessions[job["device_id"]] = _trim(hist)
+                    if self._sessions.get(job["device_id"]) is job.get("session"):
+                        hist = list(self._sessions.get(job["device_id"]) or [])
+                        hist.append({"role": "assistant", "content": ans})
+                        self._sessions[job["device_id"]] = _trim(hist)
             if job["state"] == "running":
                 job["state"] = "done"
             # **不清 _job**：终态与残余文本留着给下一次轮询——手机切后台/亮屏后

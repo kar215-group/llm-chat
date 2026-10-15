@@ -533,9 +533,21 @@ def download(url, dest, emit=None, timeout=None, log=None, stop_flag=None):
         except Exception:
             head = b""
         low_head = head.lstrip()[:64].lower()
-        if (ct.startswith("text/") or ct.startswith("application/xml")
-                or low_head.startswith((b"<!doctype", b"<html", b"<?xml",
-                                        b"<error", b"{"))):
+        # 魔数是硬证据，Content-Type 是软提示（坑 276）：网关 / CDN 给真图错配
+        # text/* 的事见过，单看类型会把真产物误杀。头部明明白白是网页 / 错误页
+        # 才拒；只有在魔数也不认识图片/视频时，Content-Type 的 text/xml 指控才算数。
+        looks_like_page = low_head.startswith(
+            (b"<!doctype", b"<html", b"<?xml", b"<error", b"{"))
+        looks_like_media = (
+            head.startswith(b"\x89PNG\r\n\x1a\n")
+            or head[:3] == b"\xff\xd8\xff"
+            or (head[:6] in (b"GIF87a", b"GIF89a"))
+            or head[:4] == b"RIFF" and head[8:12] == b"WEBP"
+            or head[4:8] == b"ftyp"           # mp4/mov 系列 ISO-BMFF
+        )
+        if looks_like_page or (
+                (ct.startswith("text/") or ct.startswith("application/xml"))
+                and not looks_like_media):
             _discard(part)
             return False, ("下载到的不是产物文件（像是网页/错误页：%s），已丢弃"
                            % (ct or low_head[:24].decode("latin-1", "replace")))

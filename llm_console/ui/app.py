@@ -1831,7 +1831,9 @@ class App(ChatMixin, ImageGenMixin, VideoGenMixin, ServiceMixin, ModelsMixin, Se
             self._serving_model = (os.path.basename(self.cfg["model"])
                                    if ok else None)
             self._render_status(ok, ok)
-            self.send_btn.configure(state="normal", text="发送")
+            # 走统一按钮出口（坑 267）：直接 configure(normal) 会绕过 _set_busy_ui 的
+            # 远程忙碌闸——换载完成的边沿若手机端刚起任务，发送键就被错误放开。
+            self._set_busy_ui(False)
             pending = self._pending_text
             self._pending_text = None
             if ok and pending:

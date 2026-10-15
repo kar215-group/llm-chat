@@ -136,6 +136,20 @@ class ServiceMixin:
             if self._closing:
                 return False         # 窗口已关闭：立刻中止等待，交由清理流程杀进程
             if server_ready(self.cfg):
+                # 同一性复核（坑 275）：预检 bind 与本进程 bind 之间存在 TOCTOU，
+                # 极端情况下 /health 的 200 可能来自**占了同一端口的别的实例**。
+                # 本进程 PID 在监听名单里才算真就绪；反查工具失灵（空集）不拦。
+                try:
+                    from ..core.server import _listening_pids
+                    listeners = _listening_pids(int(self.cfg.get("port") or 0))
+                    if listeners and getattr(self._proc, "pid", None) not in listeners:
+                        self._sq.put(("note",
+                                      "端口 %d 被另一个服务进程占用（响应不是刚启动的这个），"
+                                      "本次启动未接管该端口。"
+                                      % int(self.cfg.get("port") or 0)))
+                        return False
+                except Exception:
+                    pass
                 return True
             # 进程已退出（崩溃 / 参数不兼容）→ 快速失败，不傻等满上限
             if i >= 6 and not server_alive(self.cfg):

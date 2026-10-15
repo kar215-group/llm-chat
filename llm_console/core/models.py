@@ -1169,8 +1169,20 @@ def resolve_model(cfg, name, chat=None):
     # 任何模糊档都绝不命中——请求 qwen2.5-72b 拿到 Qwen2.5-7B，8081 代理答非所问
     # 还零提示（实测复现）。只带规模的一侧不受限（"qwen2.5" 请求照常模糊命中）。
     def _sizes(s):
-        return {m.group(1) for m in
-                re.finditer(r"(?<![a-z0-9])(\d+)[b](?![a-z0-9])", str(s))}
+        # 同时认 8x7b / 8x22b 这类 MoE 写法（坑 272）：旧正则在 "8x7b" 上只匹配到
+        # 孤立的 "7b"（"8" 后是 x 被边界挡掉），规模守卫凭空得到一个 70 亿。
+        # 取两段数字（专家数×参数）+ 整个复合串（复合串之间也别互相模糊命中）。
+        out = set()
+        for m in re.finditer(r"(?<![a-z0-9])(\d+)(?:x(\d+))?b(?![a-z0-9])",
+                             str(s)):
+            if m.group(2):
+                # 8x7b：复合串整体 + 末尾参数规模 7；开头的 8 是**专家数**不是
+                # 参数量，不能拿它当规模（否则 8x7b 与 8x22b 会假"规模一致"）
+                out.add("%sx%s" % (m.group(1), m.group(2)))
+                out.add(m.group(2))
+            else:
+                out.add(m.group(1))
+        return out
 
     req_sizes = _sizes(n)
 
