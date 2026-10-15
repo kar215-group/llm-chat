@@ -69,8 +69,9 @@ NAV_SPEC = [
                      "思考型模型的「思考过程」和「正式回答」共用 max_tokens 那一份额度，"
                      "思考写得长就会挤掉回答。"},
             {"key": "svc", "label": "服务参数", "page": "local_text", "section": "svc",
-             "title": "服务参数（点「保存并重启服务」生效）",
+             "title": "服务参数（保存后重启生效）",
              "help": "这些是 llama-server 的启动参数，改完必须重启服务才生效。\n"
+                     "点底部「保存」时，如果服务正在运行，会问你要不要立即重启。\n"
                      "GPU 层数（ngl）与上下文（ctx）都是**按模型分别记忆**的：切换模型时"
                      "自动带上各自的值，这里改的是当前选中模型的那一份。"},
         ]},
@@ -3357,25 +3358,76 @@ class SettingsMixin:
                     return                      # 已经开着：抬到前面就够了
 
                 def redraw():
+                    from ..core.device_ua import os_label
+                    from tkinter import simpledialog
                     for c in frm.winfo_children():
                         c.destroy()
-                    devs = self.remote.devices()
-                    if not devs:
+                    persons = self.remote.personas()
+                    if not persons:
                         ttk.Label(frm, text="还没有已配对的设备。",
                                   style="Dim.TLabel").pack(anchor="w")
                     else:
-                        ttk.Label(frm, text="吊销后需要重新配对：",
-                                  style="Dim.TLabel").pack(anchor="w")
-                        for d in devs:
-                            rowf = ttk.Frame(frm)
-                            rowf.pack(anchor="w", pady=2)
-                            ttk.Label(rowf, text="%s（%s，最近活跃 %s）" % (
-                                d.get("name", "?"), d.get("id", "?"),
-                                d.get("last_seen", "?"))).pack(side="left")
-                            theme.button(rowf, text="吊销", width=6,
-                                         command=lambda did=d["id"]:
-                                         (self.remote.revoke(did), redraw())
-                                         ).pack(side="left", padx=8)
+                        ttk.Label(
+                            frm,
+                            text="按设备列出（同一台设备换 Wi-Fi / 直连 / 浏览器"
+                                 "配对会自动归在一起）。「吊销」会让这台设备的"
+                                 "所有连接方式全部失效：" if simple else
+                            "按设备列出；「吊销」= 这台设备所有连接方式全部失效，"
+                            "下方每个入口可单独吊销：",
+                            style="Dim.TLabel", wraplength=520, justify="left").pack(
+                            anchor="w", pady=(0, 4))
+                        for p in persons:
+                            oses = "、".join(os_label(k) for k in (p.get("os_set") or []))
+                            tag = oses or "未知设备"
+                            if len(p.get("os_set") or []) > 1:
+                                tag += "（多系统）"
+                            pf = ttk.Frame(frm)
+                            pf.pack(anchor="w", pady=3, fill="x")
+                            ttk.Label(pf, text="%s · %s（最近活跃 %s）" % (
+                                tag, p.get("name", "?"),
+                                p.get("last_seen") or "—")).pack(side="left")
+                            pid = p["id"]
+
+                            def _rename(pid=pid, old=p.get("name", "")):
+                                nm = simpledialog.askstring(
+                                    "设备备注", "给这台设备起个名字：",
+                                    initialvalue=old, parent=w)
+                                if nm and nm.strip():
+                                    self.remote.rename_persona(pid, nm.strip())
+                                    redraw()
+
+                            theme.button(pf, text="改名", width=6,
+                                         command=_rename).pack(side="left", padx=(8, 0))
+                            theme.button(
+                                pf, text="吊销", width=6,
+                                command=lambda pid=pid:
+                                    messagebox.askyesno(
+                                        "吊销设备",
+                                        "吊销后，这台设备的所有连接方式都会失效，"
+                                        "需要重新配对。确定吊销吗？", parent=w)
+                                    and (self.remote.revoke_persona(pid), redraw())
+                            ).pack(side="left", padx=4)
+                            # 入口级清单只在高级模式露出（W Q4②：普通用户容易把
+                            # "换个入口重配"误当成数据被删，坑 284）
+                            if not simple:
+                                creds = p.get("credentials") or []
+                                if len(creds) > 1:
+                                    for cd in creds:
+                                        cf = ttk.Frame(frm)
+                                        cf.pack(anchor="w", padx=(24, 0))
+                                        ttk.Label(
+                                            cf, style="Muted.TLabel",
+                                            font=("Microsoft YaHei UI", 8),
+                                            text="入口 %s · %s · IP %s · 加入 %s" % (
+                                                cd.get("id", "?"),
+                                                os_label(cd.get("os")),
+                                                cd.get("last_ip") or "—",
+                                                cd.get("added") or "—")).pack(side="left")
+                                        theme.button(
+                                            cf, text="吊销此入口", width=10,
+                                            command=lambda did=cd.get("id"):
+                                                (self.remote.revoke(did), redraw())
+                                        ).pack(side="left", padx=6)
                     code_var.set(_pair_text())
 
                 redraw()
@@ -4330,7 +4382,8 @@ class SettingsMixin:
                 r10["i"] += 1
 
                 flavor_var = tk.StringVar(value="")
-                btn_act = theme.button(vf, text="检查更新", width=12)
+                # width 14：第四态「补全缺失文件」6 个汉字，12 字符宽会挤（坑 280）
+                btn_act = theme.button(vf, text="检查更新", width=14)
                 btn_act.pack(side="left")
                 # 档位下拉先建不 pack：**点过「检查更新」才 pack 出来**（W 2026-10-05）。
                 # 构造时就绑 textvariable（坑 112：只 set 变量而没绑，界面是空的而数据是对的）。
@@ -4349,13 +4402,15 @@ class SettingsMixin:
 
                 # 这一行引擎的会话状态：可用版本 / 正在装 / 取消标志 / 当前模式。
                 # mode：idle（未就位或已就位）· checking（正在查）· ready（查到新版本）·
-                #       installing（正在下载安装）。按钮文字与状态行都由 `_render` 按它刷。
+                #       installing（整包下载安装）· repair（exe 在但缺 CUDA 运行库）·
+                #       repair_body（exe 不在，主体不完整）· repairing（补全下载合并中）。
+                # 按钮文字与状态行都由 `_render` 按它刷（坑 280 加后三态）。
                 box = {"builds": [], "busy": False, "stop": None, "mode": "idle",
                        "checked": False}
 
                 def _render(b=box, co=cfg_of, so=exe_of, sv=st_var, stl=st, btn=btn_act,
                             fv=flavor_var, k=key):
-                    """按当前 mode 刷按钮文字与状态行（四态文案的唯一出口）。"""
+                    """按当前 mode 刷按钮文字与状态行（各态文案的唯一出口）。"""
                     mode = b.get("mode") or "idle"
                     if mode == "checking":
                         _say(sv, stl, "正在查…", theme.c("warnlit"))
@@ -4365,14 +4420,54 @@ class SettingsMixin:
                         _say(sv, stl, _flavor_line(b, k, fv))
                         btn.configure(text="更新引擎", state="normal")
                         return
-                    if mode == "installing":
+                    if mode in ("installing", "repairing"):
                         btn.configure(text="取消安装", state="normal")
+                        return
+                    if mode == "repair":
+                        # CUDA 两个 zip 只放齐一个：exe 在、ggml-cuda 在、cudart64 缺
+                        _say(sv, stl,
+                             "已就位：%s\n但缺少 CUDA 运行库（官方 CUDA 包是两个压缩包，"
+                             "另一个还没放进同一目录），这样服务会启动即退出。"
+                             "点右侧「补全缺失文件」可只下载运行库一键补齐。" % so(),
+                             theme.c("warnlit"))
+                        btn.configure(text="补全缺失文件", state="normal")
+                        return
+                    if mode == "repair_body":
+                        _say(sv, stl,
+                             "未就位：引擎主体不完整（目录里没有 %s，多半是主压缩包"
+                             "没下完或没解压完整）。点右侧「补全缺失文件」完整重装。"
+                             % engine_install.exe_name(k),
+                             theme.c("errdeep"))
+                        btn.configure(text="补全缺失文件", state="normal")
                         return
                     text, color = _state_of(co, so)
                     if b.get("checked") and text.startswith("已就位"):
                         text += "（已是最新）"      # 查过且没有更新版本
                     _say(sv, stl, text, color)
                     btn.configure(text="检查更新", state="normal")
+
+                def _refresh_inspect(b=box, k=key, do=dir_of, co=cfg_of, rf=_render):
+                    """看这份引擎是不是半装，据结果在 idle / repair / repair_body 间定态。
+
+                    只在**空闲类**状态、已指路、且没在忙时看目录（一次 listdir，几毫秒；
+                    坑 280）。查到新版本的 ready / 正在查 / 正在装都不碰——那几态优先级
+                    更高。判据在 `engine_install.inspect_engine` 一处（diagnose 也用它）。
+                    """
+                    if b.get("busy") or (b.get("mode") not in
+                                         ("idle", "repair", "repair_body")):
+                        return
+                    if not str(co() or "").strip():
+                        b["mode"] = "idle"
+                        rf()
+                        return
+                    try:
+                        insp = engine_install.inspect_engine(k, do())
+                        miss = insp.get("missing") or ""
+                    except Exception:
+                        miss = ""
+                    b["mode"] = {"cudart": "repair",
+                                 "body": "repair_body"}.get(miss, "idle")
+                    rf()
 
                 def _apply_dir(kk, folder):
                     """把选中的文件夹写回该引擎的指路项，并把已建的输入框一起回填。
@@ -4398,7 +4493,11 @@ class SettingsMixin:
                         pass
 
                 def do_check(_e=None, b=box, k=key, cb=flavor_cb, fv=flavor_var,
-                             sv=st_var, stl=st, rf=_render, sf=_show_flavor):
+                             sv=st_var, stl=st, rf=_render, sf=_show_flavor,
+                             ri=_refresh_inspect):
+                    # ri 必须在**这一层**（循环体当场执行的 def）默认参数上绑定：内层
+                    # done 的默认参数要等到 do_check 被调用时才求值，那时名字已漂到
+                    # 最后一轮 sd（坑 124 同款，坑 280 排查时实踩）。
                     """点「检查更新」才联网（开页不联网：首屏与无头自检都不该被网络拖累）。
 
                     令牌与显卡型号都在主线程取快照再进子线程（子线程不读 Tk 变量、不翻配置，坑 54）。
@@ -4413,7 +4512,7 @@ class SettingsMixin:
                     rf()
 
                     def done(builds, why, kinds, kk=k, bb=b, cb=cb, vv=fv, sv=sv, stl=stl,
-                             rf=rf, sf=sf):
+                             rf=rf, sf=sf, ri=ri):
                         bb["busy"] = False
                         if not builds:
                             bb["mode"] = "idle"
@@ -4431,10 +4530,16 @@ class SettingsMixin:
                         sf()                       # 点过「检查更新」才显示档位下拉
                         if _newer_tag(bb, kk):
                             bb["mode"] = "ready"   # 状态行报「查询到新版本」，按钮变「更新引擎」
+                            rf()
                         else:
+                            # 先退出 checking 态：_refresh_inspect 的守卫只放行
+                            # idle/repair*，不复位它会把这次刷新整个跳过（状态行
+                            # 停在"正在查…"）
                             bb["mode"] = "idle"
-                            bb["checked"] = True   # 查过且没有更新版本 → 状态行加"（已是最新）"
-                        rf()
+                            bb["checked"] = True   # 查过且没有更新版本
+                            # 查完也顺手看一眼半装（坑 280）：没新版但目录缺 cudart
+                            # 时，这一步把按钮切成「补全缺失文件」
+                            ri()
 
                     def work():
                         try:
@@ -4470,7 +4575,8 @@ class SettingsMixin:
                     except Exception as e:
                         messagebox.showwarning("复制链接", "复制失败（%s）。" % e)
 
-                def manual_dir(_e=None, k=key, b=box, rf=_render, ad=_apply_dir):
+                def manual_dir(_e=None, k=key, b=box, rf=_render, ad=_apply_dir,
+                               ri=_refresh_inspect, do=dir_of, co=cfg_of):
                     """「手动定向」：用户自己指一个文件夹（该引擎所在目录）。"""
                     folder = filedialog.askdirectory(
                         title="选择 %s 所在文件夹" % engine_install.exe_name(k),
@@ -4484,13 +4590,16 @@ class SettingsMixin:
                             % engine_install.exe_name(k)):
                         return
                     ad(k, folder)
-                    b["mode"] = "idle"
+                    b["mode"] = "idle"      # 先退忙碌/ready 态，ri 的守卫才放行
                     b["checked"] = False
-                    rf()
+                    # 用户指的目录可能正是半装那一份：重判一次（坑 280）
+                    ri(b, k, do, co, rf)
 
                 def do_install(_e=None, b=box, k=key, sv=st_var, stl=st, fv=flavor_var,
-                               co=cfg_of, btn=btn_act, rf=_render, ad=_apply_dir,
-                               setting=setting):
+                               co=cfg_of, do=dir_of, btn=btn_act, rf=_render,
+                               ad=_apply_dir, ri=_refresh_inspect, setting=setting):
+                    # ri/do 也必须在这一层绑定（同 do_check：内层 finish 默认参数晚求值，
+                    # 直接写名字会漂到 sd 轮，坑 124/280）
                     """点「更新引擎」：选档 → 下载校验 → 解压换目录；**装完指向新那份**。"""
                     p = _plan_of(b, k, fv)
                     if not p or not p["files"]:
@@ -4515,11 +4624,13 @@ class SettingsMixin:
                         self._ui_q.put(lambda: _say(sv, stl, text))
 
                     def finish(ok, why_, exe, p=p, b=b, sv=sv, stl=stl, k=k, btn=btn,
-                               rf=rf, ad=ad, setting=setting):
+                               rf=rf, ad=ad, setting=setting, ri=ri,
+                               do=do, co=co):
                         b["busy"] = False
+                        b["mode"] = "idle"   # 退 installing 态，ri 守卫才放行
                         if not ok:
-                            b["mode"] = "idle"
-                            rf()
+                            # 回到目录的真实状态（repair_body 来的失败后仍是 repair_body）
+                            ri(b, k, do, co, rf)
                             _say(sv, stl, why_, theme.c("errdeep"))
                             messagebox.showwarning(
                                 "更新引擎",
@@ -4533,7 +4644,7 @@ class SettingsMixin:
                         ad(k, p.get("dir") or engine_install.default_dir(k))
                         b["mode"] = "idle"
                         b["checked"] = False
-                        rf()
+                        ri(b, k, do, co, rf)   # 新装必完整 → idle（坑 280 同一出口）
                         messagebox.showinfo(
                             "更新引擎",
                             "已装好并指过去：\n%s\n\n回 设置 → %s 就能用它。" % (exe, setting))
@@ -4582,16 +4693,187 @@ class SettingsMixin:
 
                     threading.Thread(target=work_safe, daemon=True).start()
 
-                def do_click(_e=None, b=box, on_check=do_check, on_install=do_install):
-                    """「检查更新 / 更新引擎 / 取消安装」共用一个按钮：按当前 mode 分派。
+                def do_repair(_e=None, b=box, k=key, sv=st_var, stl=st, fv=flavor_var,
+                              co=cfg_of, do=dir_of, btn=btn_act, rf=_render,
+                              ri=_refresh_inspect, cb=flavor_cb, sf=_show_flavor,
+                              on_install=do_install):
+                    """半装一键补全（坑 280）。
 
-                    为什么要合并（W 2026-10-05）：三个动作是同一件事的三个阶段，拆成三个按钮
-                    既占地方、又要用户自己判断该点哪个。
+                    · repair（exe 在、缺 cudart）：确认后**只下载运行库 zip** 并就地合并进
+                      用户现有的引擎目录（不重下主包、不换目录、不改 engine_installed——
+                      他那份的版本我们无从知道）；
+                    · repair_body（exe 都不在）：无法逐文件知道还缺啥，确认后**整包重装**
+                      （复用 do_install：主包+运行库 → 默认目录 → 指路）。
+                    没查过版本就先在子线程查一次（与 do_check 同款，子线程不读 Tk 变量）。
+                    """
+                    mode = b.get("mode") or ""
+                    if b.get("busy") or mode not in ("repair", "repair_body"):
+                        return
+                    # dll/exe 会被运行中的进程占用：先拦（判据与 _guard 同源）
+                    if str(co() or "").strip() and (
+                            self._server_alive_flag or
+                            (server_process_alive() and server_alive(self.cfg))):
+                        messagebox.showwarning(
+                            "补全缺失文件",
+                            "这份引擎正在运行。请先在主页面停止服务，再补全文件。")
+                        return
+                    body_mode = (mode == "repair_body")
+
+                    def begin():
+                        if body_mode:
+                            _begin_body()
+                        else:
+                            _begin_cudart()
+
+                    def _begin_body():
+                        p = _plan_of(b, k, fv)
+                        if not p or not p["files"]:
+                            messagebox.showwarning(
+                                "补全缺失文件",
+                                "没查到可用的安装包。请先点「检查更新」，选一个 CUDA 档位。")
+                            return
+                        if not messagebox.askyesno(
+                                "补全缺失文件",
+                                "引擎主体不完整，将完整下载并重装（主包 + 运行库，"
+                                "约 %.0f MB）到默认引擎目录。\n\n现在开始下载吗？"
+                                % (p["total"] / 1048576.0)):
+                            return
+                        b["mode"] = "ready"        # do_install 的入口态；其 finish 会再 inspect
+                        on_install()
+
+                    def _begin_cudart():
+                        build = engine_install.pick_build(b["builds"], fv.get())
+                        rp = engine_install.runtime_plan(k, build, fv.get())
+                        f = rp.get("file")
+                        if not f:
+                            messagebox.showwarning(
+                                "补全缺失文件",
+                                "选中的档位（%s）不含 CUDA 运行库。\n"
+                                "请在左侧「档位」里改选一个 cuda 档位，再点补全。"
+                                % (fv.get() or "？"))
+                            return
+                        if not messagebox.askyesno(
+                                "补全缺失文件",
+                                "将补全 CUDA 运行库：\n版本 %s · 档位 %s · 约 %.0f MB\n"
+                                "只下载运行库并合并进：\n%s\n\n现在开始下载吗？"
+                                % (rp.get("tag") or "？", rp.get("flavor") or fv.get(),
+                                   (f.get("size") or 0) / 1048576.0, do())):
+                            return
+                        target = do()
+                        b["stop"] = threading.Event()
+                        b["busy"] = True
+                        b["mode"] = "repairing"
+                        rf()
+                        _say(sv, stl, "准备下载 %s（%.0f MB）…"
+                             % (f.get("name"), (f.get("size") or 0) / 1048576.0))
+
+                        def emit(text):
+                            self._ui_q.put(lambda: _say(sv, stl, text))
+
+                        def finish_rt(ok, why_, merged):
+                            b["busy"] = False
+                            b["mode"] = "idle"   # 退 repairing 态，ri 守卫才放行
+                            ri(b, k, do, co, rf)       # 重新 inspect：补齐→idle，失败→回 repair
+                            if not ok:
+                                _say(sv, stl, why_, theme.c("errdeep"))
+                                if why_ != "已取消":
+                                    messagebox.showwarning(
+                                        "补全缺失文件",
+                                        "%s\n\n也可以点「复制下载链接」自行下载后解压到同一目录。"
+                                        % why_)
+                                return
+                            messagebox.showinfo(
+                                "补全缺失文件",
+                                "已补全 %d 个运行库文件。重启服务后即可正常使用 CUDA。"
+                                % len(merged))
+
+                        def work():
+                            tmp = engine_install.staging_dir()
+                            ok, why_, merged = True, "", []
+                            zp = ""
+                            try:
+                                _safe = re.sub(r"[^0-9A-Za-z._-]", "_",
+                                               os.path.basename(
+                                                   str(f.get("name") or "cudart.zip")
+                                                   .replace("\\", "/"))) or "cudart.zip"
+                                zp = os.path.join(tmp, _safe)
+                                emit("正在下载 %s（%.0f MB）…"
+                                     % (f.get("name"), (f.get("size") or 0) / 1048576.0))
+                                ok, why_ = engine_install.download(
+                                    f.get("url"), zp, emit=emit, stop_flag=b["stop"],
+                                    digest=f.get("digest") or "",
+                                    expected_size=int(f.get("size") or 0))
+                                if ok:
+                                    ok, why_, merged = engine_install.merge_runtime(
+                                        k, zp, target, emit=emit, stop_flag=b["stop"])
+                            except Exception as e:
+                                ok, why_ = False, "补全时出错：%s" % e
+                            finally:
+                                engine_install.cleanup(tmp)
+                            self._ui_q.put(lambda: finish_rt(ok, why_, merged))
+
+                        def work_safe_rt():
+                            try:
+                                work()
+                            except Exception as e:      # 兜底：异常不穿回 UI 线程（坑 54）
+                                self._ui_q.put(
+                                    lambda: finish_rt(False, "补全时出错：%s" % e, []))
+
+                        threading.Thread(target=work_safe_rt, daemon=True).start()
+
+                    # 已查过版本并选了档 → 直接进确认；否则先联网查（按钮置灰防重复点）
+                    if b.get("builds") and fv.get():
+                        begin()
+                        return
+                    tok = secrets.get_github_token()
+                    hw = {"gpu_name": str(self.cfg.get("gpu_name") or "")}
+                    b["busy"] = True
+                    btn.configure(state="disabled", text="补全缺失文件")
+                    _say(sv, stl, "正在查询可用版本以补全…", theme.c("warnlit"))
+
+                    def fetched(builds, why, kinds, bb=b, cb=cb, vv=fv, sv=sv, stl=stl,
+                                sf=sf, btn=btn, ri=ri, do=do, co=co, begin=begin):
+                        bb["busy"] = False
+                        btn.configure(state="normal")
+                        if not builds:
+                            ri(b, k, do, co, rf)
+                            _say(sv, stl, why or "没查到带本平台安装包的版本。",
+                                 theme.c("errdeep"))
+                            return
+                        bb["builds"] = builds
+                        ids = [x["id"] for x in engine_install.flavors_from(builds[0])]
+                        cb.configure(values=ids)
+                        if ids:
+                            vv.set(engine_install.recommend_flavor(builds[0], kinds) or ids[0])
+                        sf()
+                        begin()
+
+                    def work():
+                        try:
+                            builds, why = engine_install.list_builds(k, token=tok)
+                        except Exception as e:
+                            builds, why = [], "查可用版本时出错：%s" % e
+                        try:
+                            kinds = hardware.gpu_kinds(hw)
+                        except Exception:
+                            kinds = set()
+                        self._ui_q.put(lambda: fetched(builds, why, kinds))
+
+                    threading.Thread(target=work, daemon=True).start()
+
+                def do_click(_e=None, b=box, on_check=do_check, on_install=do_install,
+                             on_repair=do_repair):
+                    """主按钮按当前 mode 分派：检查更新 / 更新引擎 / 补全 / 取消。
+
+                    为什么合并（W 2026-10-05；坑 280 加补全两态）：这些动作是同一件事的
+                    不同阶段或现场，拆成一排按钮既占地方、又要用户自己判断该点哪个。
                     """
                     mode = b.get("mode") or "idle"
-                    if mode == "ready":
+                    if mode in ("repair", "repair_body"):
+                        on_repair()
+                    elif mode == "ready":
                         on_install()
-                    elif mode == "installing":
+                    elif mode in ("installing", "repairing"):
                         if b["stop"] is not None:
                             b["stop"].set()
                     else:
@@ -4611,8 +4893,10 @@ class SettingsMixin:
                 flavor_cb.bind("<<ComboboxSelected>>",
                                lambda e=None, b=box, k=key, fv=flavor_var,
                                sv=st_var, stl=st: _on_pick(b, k, fv, sv, stl))
-                eng_refresh[key] = _render
-                _render()
+                # 登记 inspect 出口（不是裸 _render）：进页自动定向后调它会先看半装
+                # （坑 280）；首屏也走它，已指路的半装一进页就显示「补全缺失文件」
+                eng_refresh[key] = _refresh_inspect
+                _refresh_inspect()
 
             # 进页自动定向（W 2026-10-08：删掉「自动定向」按钮，换成进页自动做一次）：
             # 只处理**未就位**的引擎（已就位的一个字节都不动）；判据 / 落点与「首次打开
@@ -4846,7 +5130,7 @@ class SettingsMixin:
                     except Exception:
                         pass
 
-        def _global_save(restart=False):
+        def _global_save():
             """底部「保存」= 通用参数 + **所有已建区块各自的保存逻辑**，都成功才关窗。
 
             钩子跑全部已建（_done）区块，不只当前页（R-116）：`_apply_settings` 的
@@ -4854,6 +5138,10 @@ class SettingsMixin:
             主题色 / 服务商页改的名字 / 通用页换的优化模型"切页保存时被**静默丢弃**——
             主题色最坑：选色框一关预览已经把界面染成新色，用户认定保存好了，重启回退。
             钩子幂等、已建区块数量有限，全跑的成本可控。任一钩子不通过就不关窗。
+
+            关窗前若 llama-server **正在运行**，问一句要不要顺手重启（坑 281）：端口 /
+            模型 / GPU 层数 / context 这些参数不重启不生效，旧版另设「保存并重启服务」
+            按钮，用户常只点保存、改了不自知。没在跑 / 正在启停（_svc_busy）就不问。
             """
             ok, why = self._apply_settings(v)
             if not ok:
@@ -4881,8 +5169,18 @@ class SettingsMixin:
                 self._maybe_adopt_first_model(force=True)
             except Exception:
                 pass
+            # 运行态判据与引擎安装守卫同源（本进程旗标优先，再按端口 HTTP 复核，坑 189）
+            running = (not self._svc_busy
+                       and (self._server_alive_flag
+                            or (server_process_alive() and server_alive(self.cfg))))
+            do_restart = False
+            if running:
+                do_restart = bool(messagebox.askyesno(
+                    "保存设置",
+                    "检测到 llama-server 正在运行。\n\n部分设置（端口、模型、GPU 层数、"
+                    "上下文长度等）需要重启服务才生效。\n\n保存后立即重启服务吗？"))
             win.destroy()
-            if restart:
+            if do_restart:
                 self.restart_server()
 
         # 「用户模式」切换入口（2026-10-07 W 定，顶替原「显示全部参数」的位置）：
@@ -4913,8 +5211,7 @@ class SettingsMixin:
         theme.button(bar, text="切换到高级模式" if simple else "切换到普通模式",
                    command=_switch_mode).pack(side="left", padx=(2, 0))
         theme.button(bar, text="关闭", command=win.destroy).pack(side="right", padx=4)
-        theme.button(bar, text="保存并重启服务",
-                   command=lambda: _global_save(restart=True)).pack(side="right", padx=4)
+        # 旧版第二个按钮「保存并重启服务」已删（坑 281）：保存时若服务在跑会自己问一句
         theme.button(bar, text="保存", command=_global_save).pack(side="right")
 
         # 首屏默认落在第一个叶子（本地模型 → 文本模型 → 生成参数）；

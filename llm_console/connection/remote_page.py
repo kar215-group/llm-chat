@@ -260,13 +260,28 @@ function show(which){
   if (which !== "mask") $("maskui").style.display = "none";
 }
 if (AUTHED) { show("home"); setTab("img"); loadCaps(); } else show("pair");
+
+/* 本设备的持久标识 cid（坑 283）：随机 128bit，只存这个浏览器的 localStorage，
+   配对时上报。用途仅限"同一台设备换了连接地址 / 清了 Cookie 时被电脑端认出来"，
+   不是密码、不做鉴权；清掉它只会退回手动确认并入。 */
+function deviceCid(){
+  try {
+    var k = "lc_cid", v = localStorage.getItem(k);
+    if (v && /^[0-9a-f]{32}$/.test(v)) return v;
+    var b = new Uint8Array(16);
+    (crypto.getRandomValues || crypto.msGetRandomValues).call(crypto, b);
+    v = Array.prototype.map.call(b, function(x){ return ("0"+x.toString(16)).slice(-2); }).join("");
+    localStorage.setItem(k, v);
+    return v;
+  } catch(e) { return ""; }   /* 无痕/存储被禁：没有 cid 也能配对，只是不能自动认出 */
+}
 $("pairbtn").onclick = function(){
   var code = $("code").value.trim();
   if (!/^[0-9]{6}$/.test(code)) { $("pairmsg").textContent = "请输 6 位数字。"; return; }
   $("pairbtn").disabled = true;
   fetch("/api/pair", {method:"POST",
       headers:{"Content-Type":"application/json"},
-      body:JSON.stringify({code:code, name:"手机"})})
+      body:JSON.stringify({code:code, cid:deviceCid()})})
     .then(function(r){ return r.json().then(function(j){ return {ok:r.ok, j:j}; }); })
     .then(function(o){
       if (o.ok) { location.reload(); }

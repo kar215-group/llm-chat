@@ -427,6 +427,11 @@ class RemoteJobs:
     def _may_see(self, owner, device_id):
         """归属判据**唯一一处**：谁的任务能被谁看见。
 
+        两个入参现在都是 **persona id**（坑 283：`_caller_id` 返回逻辑设备 id，
+        同一台手机的多个连接入口归一）；直接字符串相等即可。升级前台账里的老
+        `dev_N` 条目与任何 persona 都不等 → 对手机端不可见（W 2026-10-15 拍板
+        不做兼容）。
+
         loopback（`device_id == "local"`）全可见；其余默认只看自己提交的，
         `remote_history` 开着才放宽到台账全量（16 §4 第 3 条预留的口径 ——
         只放宽判据，台账形状与"白名单落点"都不动）。

@@ -447,19 +447,17 @@ def run_checks(cfg, proxy_running=False, server_running=False, probe_gpu=True):
                       ("open_dir", app_dir)))
     else:
         out.append(_c("server_exe", GROUP_ENGINE, OK, "推理引擎已就位", exe))
-        try:
-            names = [f.lower() for f in os.listdir(os.path.dirname(exe) or ".")]
-        except Exception:
-            names = []
-        has_cudart = any(n.startswith("cudart64") for n in names) or not names
-        # 只在引擎**确实带 CUDA 构建**（目录里有 ggml-cuda*.dll）却缺运行库时才报
-        # （R-103）：CPU / Vulkan / SYCL 档本来就不需要 cudart，原来对它们误报
-        # "服务会启动即退出"
-        if not has_cudart and any(n.startswith("ggml-cuda") for n in names):
+        # 半装判据与引擎管理页**同一份**（engine_install.inspect_engine，坑 280）：
+        # 只在引擎确实带 CUDA 构建（有 ggml-cuda*.dll）却缺运行库时才报（R-103）——
+        # CPU / Vulkan / SYCL 档本来就不需要 cudart，不能对它们误报"启动即退出"
+        _insp = engine_install.inspect_engine(
+            "llama", os.path.dirname(exe) or ".")
+        if _insp.get("missing") == "cudart":
             out.append(_c("cudart", GROUP_ENGINE, WARN, "引擎目录里缺 CUDA 运行库",
                           "没找到 cudart64_*.dll（但存在 ggml-cuda）",
-                          "服务会启动即退出。用 llama.cpp 官方的 CUDA 12 发行包"
-                          "（它自带 cudart），或把 cudart 的 dll 复制进引擎目录。"))
+                          "服务会启动即退出。官方 CUDA 发行包是两个压缩包，把 cudart "
+                          "那个也解压进同一目录；或在 设置 → 引擎管理 点「补全缺失文件」"
+                          "一键补齐。"))
 
     name = str(cfg.get("gpu_name", "") or "")
     vram = float(cfg.get("vram_gb", 0) or 0)

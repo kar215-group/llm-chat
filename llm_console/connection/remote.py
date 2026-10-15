@@ -53,7 +53,7 @@ import threading
 import time
 import urllib.parse
 
-from ..core import remote_cert, secrets
+from ..core import device_ua, remote_cert, secrets
 from .remote_audit import (AUDIT_KEEP, AUDIT_PATH, AUDIT_ROTATE_BYTES,
                            audit, audit_poll, clear_audit, poll_reset,
                            read_audit)
@@ -184,10 +184,15 @@ class _RemoteHandler(http.server.BaseHTTPRequestHandler):
         self._dev_val = None
 
     def _auth_ok(self):
-        """127.0.0.1 豁免；其余必须已配对。"""
+        """127.0.0.1 豁免；其余必须已配对**且凭证挂在有效 persona 上**（坑 283）。
+
+        persona 缺失（迁移没跑 / 数据半残）按未配对拒——fail-closed，绝不放行后再
+        让归属键落空（None 会让几台坏凭证的会话互相串）。
+        """
         if is_loopback(self._client_ip()):
             return True
-        return self._device() is not None
+        dev = self._device()
+        return dev is not None and bool(dev.get("persona"))
 
     def _read_json(self):
         try:
@@ -318,23 +323,45 @@ class _RemoteHandler(http.server.BaseHTTPRequestHandler):
                 # 这一码试错满额刚作废：说清去哪儿重出（W 2026-10-12 逐字批准）
                 return self._json(429, {"error": PAIR_BURNED_MSG})
             return self._json(403, {"error": PAIR_BAD_MSG})
-        token = _pysecrets.token_urlsafe(32)
-        token_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()
-        dev_name = name or ("浏览器设备 " + str(ip))
-        if not self.server.confirm_pair({"ip": ip, "name": dev_name,
-                                         "agent": str(self.headers.get(
-                                             "User-Agent", ""))[:80]}):
+        ua = str(self.headers.get("User-Agent", ""))
+        os_key, os_label = device_ua.os_family(ua)
+        cid = device_ua.valid_cid(str(payload.get("cid", "")))
+        # 默认设备名 = 系统类型（W：不显示手机/平板，就显示 Android/iOS/…）；
+        # 老页面可能仍上报 name，保留兼容
+        dev_name = name or os_label
+        auto = secrets.find_persona_by_cid(cid) if cid else None
+        # 电脑端确认弹窗的决策：False=拒绝；{"pid":"p_N"}=并入该逻辑设备；
+        # {"pid":""}/缺省=新设备。候选列表给弹窗画单选（坑 283）
+        decision = self.server.confirm_pair({
+            "ip": ip, "name": dev_name, "os_key": os_key, "os": os_label,
+            "agent": ua[:160], "cid": cid or "",
+            "auto": (auto or {}).get("id", ""),
+            "candidates": [{"id": c.get("id"), "name": c.get("name"),
+                            "os_set": c.get("os_set") or [],
+                            "last_seen": c.get("last_seen") or ""}
+                           for c in secrets.personas_with_creds()]})
+        if not decision:
             _audit(self, "pair", False, "denied on PC")
             return self._json(403, {"error": "电脑端拒绝了这次配对。"})
-        did = secrets.add_remote_device(dev_name, token_hash,
-                                        time.strftime("%Y-%m-%d %H:%M"))
-        _audit(self, "pair", True, "device " + did)
+        merge_pid = str(decision.get("pid", "") or "")
+        token = _pysecrets.token_urlsafe(32)
+        token_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()
+        try:
+            pid, did = secrets.finalize_pairing(
+                token_hash, time.strftime("%Y-%m-%d %H:%M"),
+                name=dev_name, os_key=os_key, cid=cid, ip=ip, agent=ua,
+                merge_pid=merge_pid)
+        except KeyError:
+            # 等待确认的 120s 里目标设备被吊销了（坑 283：落盘前复验失败）
+            _audit(self, "pair", False, "merge target revoked")
+            return self._json(403, {"error": "选择的设备已被吊销，请重新配对。"})
+        _audit(self, "pair", True, "persona " + pid + " via " + did)
         # HTTPS 在跑时补 `Secure`：这个 token 是长期凭证（一年），少了这个标志，
         # 之后降级成 HTTP 用时它会明文过网（同一部手机、同一个 Wi-Fi 就够嗅了）。
         cookie = ("%s=%s; Path=/; Max-Age=31536000; HttpOnly; SameSite=Lax%s"
                   % (COOKIE_NAME, token,
                      "; Secure" if getattr(self.server, "https_on", False) else ""))
-        return self._json(200, {"ok": True, "device_id": did, "name": dev_name},
+        return self._json(200, {"ok": True, "device_id": pid, "name": dev_name},
                           extra_headers=[("Set-Cookie", cookie)])
 
     # ---- 页面 ----
@@ -406,6 +433,13 @@ class RemoteServer:
             self._starting = False
 
     def _start_inner(self):
+        # 老 secrets.json 的凭证没有 persona 字段：开服务前一次性迁移（幂等；
+        # 损坏文件不迁移不抹盘，坑 283）。放在鉴权面起来之前，保证此后每条凭证
+        # 都带得到归属键
+        try:
+            secrets.ensure_personas()
+        except Exception:
+            pass
         # 注意不能用 `cfg.get("remote_port", 8443) or 8443`：那个 `or` 会把
         # 手改成 0 的端口**静默变成 8443**（服务器听 8443、网址窗显示 :0，
         # 手机永远连不上）——正是要报出来的那一类。None / 空串才回落默认值。
@@ -598,17 +632,34 @@ class RemoteServer:
     def devices(self):
         return secrets.remote_devices()
 
+    def personas(self):
+        """已配对设备窗的聚合视图（逻辑设备 + 名下入口凭证）。"""
+        return secrets.personas_with_creds()
+
+    def rename_persona(self, pid, name):
+        return secrets.rename_persona(pid, name)
+
+    def revoke_persona(self, pid):
+        """设备级全局吊销（该设备所有入口凭证一起失效）。"""
+        ok = secrets.revoke_persona(pid)
+        if ok:
+            audit("revoke", "", True, "persona " + str(pid))
+        return ok
+
     def revoke(self, dev_id):
+        """入口级吊销（单条凭证；只在高级模式露出，坑 284）。"""
         ok = secrets.remove_remote_device(dev_id)
         if ok:
-            audit("revoke", "", True, str(dev_id))
+            audit("revoke", "", True, "credential " + str(dev_id))
         return ok
 
     # ---- 生图端点（路由在 start() 里挂；jobs 为 None 时不挂 = 一期开关齐了才开）----
 
     def _caller_id(self, h):
+        """当前请求的归属键 = **persona id**（坑 283：历史 / 会话 / 上传按逻辑设备
+        归一，同一台手机换连接入口也是同一个键）；回环 = "local"。"""
         dev = h._device()
-        return dev["id"] if dev else "local"
+        return str(dev.get("persona") or "") if dev else "local"
 
     def _h_image(self, h):
         payload = h._read_json()

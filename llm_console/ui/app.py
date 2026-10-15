@@ -1869,23 +1869,23 @@ class App(ChatMixin, ImageGenMixin, VideoGenMixin, ServiceMixin, ModelsMixin, Se
         if self._closing:
             return False
         ev = threading.Event()
-        box = {"ok": False}
+        # 决策（坑 283）：None/False=拒绝；{"pid":"p_N"}=并入已有逻辑设备；
+        # {"pid":""}=新设备
+        box = {"decision": None}
 
         def ask():
             try:
-                box["ok"] = bool(messagebox.askyesno(
-                    "远程配对请求",
-                    "有设备请求连接远程访问：\n\n来自：%s\n设备：%s\n\n"
-                    "只允许你自己发起的设备接入。允许这次配对吗？"
-                    % (info.get("ip", "?"), info.get("name", "?")),
-                    parent=self.root))
+                from .dialogs import PairConfirmDialog
+                dlg = PairConfirmDialog(self.root, info)
+                dlg.wait_window()
+                box["decision"] = dlg.result
             except Exception:
-                box["ok"] = False
+                box["decision"] = None
             finally:
                 ev.set()
         self._ui_q.put(ask)
         ev.wait(timeout=120)
-        return box["ok"]
+        return box["decision"]
 
     def _keepawake_want(self):
         """锁屏运行的意愿判据（keepawake 线程每 15 秒问一次；只读 cfg，不碰 Tk）。

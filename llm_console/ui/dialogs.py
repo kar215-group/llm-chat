@@ -9,6 +9,7 @@ r"""llm_console.ui.dialogs — 独立对话框：退出确认。
 import tkinter as tk
 from tkinter import ttk
 
+from ..core.device_ua import os_label
 from . import theme
 
 
@@ -47,5 +48,94 @@ class ExitDialog(tk.Toplevel):
 
     def _done(self, result):
         self.result = result
+        self.destroy()
+
+
+class PairConfirmDialog(tk.Toplevel):
+    """远程配对确认（坑 283）：新设备 / 并入已有逻辑设备，二选一 + 拒绝。
+
+    info = {ip, os(系统标签), os_key, agent, cid, auto(自动识别到的 persona id),
+            candidates:[{id,name,os_set,last_seen}…]}。
+    result = None（拒绝/关窗/Esc）或 `{"pid": "p_N" | ""}`（空串=新设备）。
+    cid 命中过已有设备时默认选并入那台并给提示；否则默认"新设备"。
+    """
+
+    def __init__(self, parent, info):
+        super().__init__(parent)
+        self.title("远程配对请求")
+        theme.style_toplevel(self)
+        self.resizable(False, False)
+        self.result = None
+        info = info or {}
+        cands = [c for c in (info.get("candidates") or []) if c.get("id")]
+        auto_pid = str(info.get("auto") or "")
+
+        ttk.Label(self, text="有设备请求连接远程访问",
+                  font=("Microsoft YaHei UI", 10, "bold")).pack(
+            padx=28, pady=(18, 6))
+        meta = ttk.Frame(self)
+        meta.pack(padx=28, anchor="w")
+        ttk.Label(meta, text="系统：", style="Dim.TLabel").grid(row=0, column=0, sticky="e")
+        ttk.Label(meta, text=str(info.get("os") or "未知设备")).grid(row=0, column=1, sticky="w")
+        ttk.Label(meta, text="来源：", style="Dim.TLabel").grid(row=1, column=0, sticky="e")
+        ttk.Label(meta, text=str(info.get("ip") or "?")).grid(row=1, column=1, sticky="w")
+        agent = str(info.get("agent") or "")
+        if agent:
+            ttk.Label(self, text=agent[:90], style="Muted.TLabel",
+                      font=("Microsoft YaHei UI", 8), wraplength=420, justify="left").pack(
+                padx=28, pady=(4, 2), anchor="w")
+        if auto_pid:
+            auto_name = next((str(c.get("name") or "?") for c in cands
+                              if c.get("id") == auto_pid), info.get("os") or "已配对设备")
+            ttk.Label(self,
+                      text="识别到这是你已配对的「%s」（换了连接方式或浏览器），"
+                           "默认并入它，之前的历史产物都还在。" % auto_name,
+                      style="Note.TLabel", wraplength=420, justify="left").pack(
+                padx=28, pady=(6, 2), anchor="w")
+
+        box = ttk.LabelFrame(self, text="这台设备算作：")
+        box.pack(padx=28, pady=(8, 4), fill="x")
+        self.var = tk.StringVar(value=auto_pid or "")
+        ttk.Radiobutton(box, text="一台新设备（独立的历史产物，不与其他设备互通）",
+                        variable=self.var, value="").pack(anchor="w", padx=10, pady=(6, 2))
+        if cands:
+            for c in cands:
+                oses = "、".join(os_label(k) for k in (c.get("os_set") or [])) or "未知"
+                seen = str(c.get("last_seen") or "")
+                tail = ("（%s，最近活跃 %s）" % (oses, seen)) if seen else ("（%s）" % oses)
+                ttk.Radiobutton(box, text="并入「%s」%s —— 共用它的历史产物"
+                                          % (str(c.get("name") or "?"), tail),
+                                variable=self.var,
+                                value=str(c["id"])).pack(anchor="w", padx=10, pady=1)
+        else:
+            ttk.Label(box, text="（还没有其他已配对设备）", style="Muted.TLabel").pack(
+                anchor="w", padx=10, pady=(0, 6))
+
+        ttk.Label(self, text="只允许你自己发起的设备接入。选错了随时可在"
+                             "「设置 → 远程访问 → 已配对设备」里吊销。",
+                  style="Muted.TLabel", wraplength=420, justify="left",
+                  font=("Microsoft YaHei UI", 9)).pack(padx=28, pady=(4, 8))
+        btns = ttk.Frame(self)
+        btns.pack(padx=28, pady=(0, 16))
+        theme.button(btns, text="允许", width=10,
+                     command=self._allow).pack(side="left", padx=4)
+        theme.button(btns, text="拒绝", width=10,
+                     command=self._deny).pack(side="left", padx=4)
+
+        self.bind("<Escape>", lambda e: self._deny())
+        self.protocol("WM_DELETE_WINDOW", self._deny)
+        self.transient(parent)
+        self.update_idletasks()
+        x = parent.winfo_rootx() + max(0, (parent.winfo_width() - self.winfo_width()) // 2)
+        y = parent.winfo_rooty() + max(0, (parent.winfo_height() - self.winfo_height()) // 3)
+        self.geometry("+%d+%d" % (x, y))
+        self.grab_set()
+
+    def _allow(self):
+        self.result = {"pid": str(self.var.get() or "")}
+        self.destroy()
+
+    def _deny(self):
+        self.result = None
         self.destroy()
 

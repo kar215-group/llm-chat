@@ -670,6 +670,141 @@ def install(engine, files, dest_dir, emit=None, stop_flag=None, guard=None):
     return True, "", os.path.join(dest_dir, exe)
 
 
+# ---------------------------------------------------------------------------
+# 半装检测与"只补运行库"（CUDA 两个 zip 只放齐一个的现场，坑 280）
+# ---------------------------------------------------------------------------
+
+def inspect_engine(engine, dest_dir=None):
+    """看一份引擎目录完不完整。
+
+    CUDA 发行包 = 主包 + cudart 运行库**两个 zip**（模块开头事实 3）：用户自行
+    浏览器下载、手动解压时经常只放齐一个——主包在（exe + ggml-cuda*.dll）、
+    cudart64*.dll 缺，服务启动即退出。这份判据原来只写在 diagnose 里，引擎管理
+    页看不到（坑 280），收口到这里，diagnose 与设置页共用。
+
+    返回 `{"exe","cuda","cudart","complete","missing"}`，missing：
+      · `""`     —— 完整（含"本档本来就不需要 cudart"的 CPU/Vulkan/SYCL）
+      · `"body"` —— 连 exe 都不在（主体没解完，无法逐文件知道还缺啥，只能整包重装）
+      · `"cudart"` —— exe 在、是 CUDA 构建、但缺 cudart64*.dll
+    只在 Windows 判 dll（半装机制本身就是 Win 双 zip；别给 Linux 的 LD 路径现场误报）。
+    """
+    d = dest_dir or default_dir(engine)
+    exe = os.path.join(d, exe_name(engine))
+    res = {"exe": False, "cuda": False, "cudart": False,
+           "complete": True, "missing": ""}
+    if not os.path.isfile(exe):
+        res.update(complete=False, missing="body")
+        return res
+    res["exe"] = True
+    if os.name != "nt":
+        return res
+    try:
+        names = [f.lower() for f in os.listdir(d)]
+    except Exception:
+        return res
+    res["cuda"] = any(n.startswith("ggml-cuda") for n in names)
+    res["cudart"] = any(n.startswith("cudart64") for n in names)
+    if res["cuda"] and not res["cudart"]:
+        res.update(complete=False, missing="cudart")
+    return res
+
+
+def runtime_plan(engine, build, flavor_id, plat=None, archs=None):
+    """repair 专用清单：某档位配对的那个 cudart 运行库包（**只取 extra**）。
+
+    与整包 `plan` 同一份配对结果（`flavors_from` 里的 `extra`），不重写配对规则。
+    该档位没有运行库（CPU/Vulkan 档）→ `file=None`，界面据此让用户改选 CUDA 档。
+    """
+    plat = plat if plat is not None else platform_token()
+    out = {"tag": str((build or {}).get("tag") or ""),
+           "flavor": flavor_id, "file": None, "size": 0}
+    for f in flavors_from(build, plat, archs):
+        if f["id"] != flavor_id:
+            continue
+        out["flavor"] = f.get("label") or flavor_id
+        rt = f.get("extra")
+        if rt:
+            out["file"] = {"name": str(rt.get("name") or ""),
+                           "url": str(rt.get("browser_download_url") or ""),
+                           "size": int(rt.get("size") or 0),
+                           "digest": str(rt.get("digest") or "")}
+            out["size"] = int(rt.get("size") or 0)
+        break
+    return out
+
+
+def _flatten_runtime(root):
+    """cudart 包也可能带一层目录：把含 cudart64*.dll 那层的**文件**铺平到 `root`。
+
+    与 `_flatten_for_exe` 同手法（只挪不删、只一层），只是找的锚点从 exe 换成
+    运行库 dll。返回铺平后根目录里是否至少有一个 cudart64*.dll。
+    """
+    if any(f.lower().startswith("cudart64") for f in os.listdir(root)):
+        return True
+    for cur, _dirs, files in os.walk(root):
+        if cur == root:
+            continue
+        if not any(f.lower().startswith("cudart64") for f in files):
+            continue
+        for name in files:
+            dst = os.path.join(root, name)
+            if not os.path.exists(dst):
+                try:
+                    shutil.move(os.path.join(cur, name), dst)
+                except Exception:
+                    pass
+        break
+    return any(f.lower().startswith("cudart64") for f in os.listdir(root))
+
+
+def merge_runtime(engine, zip_path, dest_dir, emit=None, stop_flag=None):
+    """把一个 cudart 运行库 zip **合并**进现有引擎目录（就地补，不换目录）。
+
+    与整包 `install` 的区别：半装现场主包已在、只缺运行库，整包换目录会把用户
+    自己那份冲掉，也没必要重下几百 MB 主包。`(ok, why, [实际并入的文件名])`。
+    """
+    if stop_flag is not None and stop_flag.is_set():
+        return False, "已取消", []
+    if not os.path.isdir(dest_dir):
+        return False, "引擎目录不存在：%s" % dest_dir, []
+    stage = staging_dir()
+    try:
+        if emit:
+            emit("正在解压 %s …" % os.path.basename(zip_path))
+        try:
+            with zipfile.ZipFile(zip_path) as zf:
+                bad = next((n for n in zf.namelist() if _zip_member_unsafe(n)), None)
+                if bad is not None:
+                    return False, "压缩包里的文件路径不对（%s），已拒收" % bad, []
+                zf.extractall(stage)
+        except Exception as e:
+            return False, "解压失败：%s" % e, []
+        if not _flatten_runtime(stage):
+            return False, "这个压缩包里没找到 cudart64 运行库（档位可能选错了）", []
+        if stop_flag is not None and stop_flag.is_set():
+            return False, "已取消", []
+        merged = []
+        # 平铺后运行库就在 stage 根：**只并根这一层的文件**（包内若还有 LICENSE 等
+        # 子目录，那些不影响运行，不往里拖，免得污染引擎目录）
+        for name in sorted(os.listdir(stage)):
+            src = os.path.join(stage, name)
+            if not os.path.isfile(src):
+                continue
+            try:
+                shutil.copy2(src, os.path.join(dest_dir, name))
+            except PermissionError:
+                return False, ("运行库文件被占用（引擎正在运行），请先在主页面"
+                               "停止服务再补全。"), merged
+            except OSError as e:
+                return False, "写入引擎目录失败：%s" % e, merged
+            merged.append(name)
+        if not merged:
+            return False, "压缩包里没有可合并的运行库文件", []
+        return True, "", merged
+    finally:
+        cleanup(stage)
+
+
 def installed(engine, dest_dir=None):
     """那份引擎现在是不是真的就位（`dest_dir` 缺省 = 自动安装的默认落点）。返回 exe 路径或空串。"""
     d = dest_dir or default_dir(engine)
