@@ -33,6 +33,7 @@ from ..core import config, models, promptopt, providers, secrets
 from . import cloud
 from .cloud import MAX_ATTEMPTS, RETRY_STATUS, humanize_http, humanize_net
 from .stream import REASONING_KEYS
+from .. import texts
 
 # 本地 27B ≈3.7 tok/s（开发机基线），2048 额度最坏 ≈10 分钟——超时给足，
 # 与 stream_worker 的"长思考要等得起"同一考虑
@@ -86,7 +87,7 @@ def _local_target(cfg):
         "headers": config.api_headers(cfg),
         "model": "local",
         "timeout": LOCAL_TIMEOUT,
-        "label": label or "本地模型",
+        "label": label or texts.OPT_N,
         "thinking": {"chat_template_kwargs": {"enable_thinking": False}},
         # 与 stream_worker 同款：llama-server 的 prompt cache。本地引擎默认单槽，
         # 三路请求实际串行——但同前缀让第 2/3 路的 prefill 几乎免费（并行的时延
@@ -108,12 +109,12 @@ def _cloud_target(cfg, pid, model):
     if p is None or not p.get("enabled", True):
         # 停用也要拦（R-49）：get_provider 用 enabled_only=False 取全表，
         # 原来这里只判 None → "已停用"分支不可达，停用的服务商照旧被用来发付费请求
-        return None, "优化模型指定的服务商「%s」不存在或已停用。" % pid
+        return None, texts.OPT_CAT % pid
     if providers.model_kind_of(p, model) != providers.KIND_TEXT:
-        return None, "「%s」不是文本模型——提示词优化只能走文本链路（别的会发错协议）。" % model
+        return None, texts.OPT_CAT_2 % model
     key = secrets.get_api_key(pid)
     if not key:
-        return None, "还没给「%s」填 API Key（设置 → 云端模型 → 服务商与密钥）。" % p.get("name")
+        return None, texts.OPT_CAT_3 % p.get("name")
     return {
         "kind": "cloud", "provider": p,
         "url": providers.chat_completions_url(p),
@@ -133,8 +134,7 @@ def resolve_target(cfg):
         sp = providers.split_cloud_id(spec)
         if sp:
             return _cloud_target(cfg, sp[0], sp[1])
-        return None, ("优化模型指定值不认识：%r（留空 = 跟随当前文本模型；"
-                      "或填 local / 云端模型）。" % spec)
+        return None, (texts.OPT_CAT_4 % spec)
     if spec == "local":
         return _local_target(cfg), ""
     # 留空 = 自动跟随（W 2026-10-08 定）
@@ -143,7 +143,7 @@ def resolve_target(cfg):
             sp = providers.split_cloud_id(cfg.get("model", ""))
             if sp:
                 return _cloud_target(cfg, sp[0], sp[1])
-            return None, "当前选中的云端模型解析失败：%r" % cfg.get("model")
+            return None, texts.OPT_CAT_5 % cfg.get("model")
         return _local_target(cfg), ""
     # 选中的是生图/生视频：回退第一个可用文本模型（本地优先，坑 150 的可用性判据）
     if models.usable_local(cfg).get("chat"):
@@ -151,7 +151,7 @@ def resolve_target(cfg):
     for pid, _pname, m in providers.cloud_models(cfg, providers.KIND_TEXT):
         if secrets.has_api_key(pid):
             return _cloud_target(cfg, pid, m)
-    return None, "没有可用于提示词优化的文本模型（本地引擎/模型未就位，云端也没有填过密钥的文本模型）。"
+    return None, texts.OPT_L1
 
 
 def _safe_read(err, limit=900):
@@ -197,7 +197,7 @@ def _parse_ok(data, attempts, t0):
     """成功回包 → 结果 dict。形状防炸口径同 cloud._ask_window（message 可能是裸串）。"""
     ms = int((time.time() - t0) * 1000)
     if not isinstance(data, dict):
-        return _fail("回包不是 JSON 对象（原文：%s）" % str(data)[:120], attempts, t0)
+        return _fail(texts.OPT_CAT_6 % str(data)[:120], attempts, t0)
     choices = data.get("choices") or [{}]
     first = choices[0] if choices and isinstance(choices[0], dict) else {}
     msg = first.get("message") or {}
@@ -223,11 +223,10 @@ def _parse_ok(data, attempts, t0):
         # 坑 49 形态：思考与回答共享同一份额度，正文被思考吃光 = 这个模型关不掉思考。
         # W 2026-10-08 定「照发 + 检测回报」：如实说，不伪装成"优化失败"。
         out["ok"] = False
-        out["error"] = ("该模型没能关闭思考：输出全花在思考过程（%d 字），正文一个字没剩。"
-                        "请换一个不带思考、或支持关闭思考的文本模型。" % len(reasoning))
+        out["error"] = (texts.OPT_CAT_7 % len(reasoning))
     elif not text:
         out["ok"] = False
-        out["error"] = "模型返回了空内容（finish_reason=%s）。" % (finish or "未知")
+        out["error"] = texts.OPT_CAT_8 % (finish or texts.OPT_N_2)
     return out
 
 
@@ -249,7 +248,7 @@ def optimize_once(target, messages, temperature, max_tokens, stop_flag=None):
     while True:
         attempt += 1
         if stop_flag is not None and stop_flag.is_set():
-            return _fail("已停止。", attempt, t0, stopped=True)
+            return _fail(texts.OPT_A0, attempt, t0, stopped=True)
         req = urllib.request.Request(target["url"],
                                      data=json.dumps(body).encode("utf-8"),
                                      headers=target["headers"], method="POST")
@@ -267,25 +266,25 @@ def optimize_once(target, messages, temperature, max_tokens, stop_flag=None):
                 continue
             if e.code in RETRY_STATUS and attempt < MAX_ATTEMPTS:
                 if _sleep(stop_flag, 2 ** attempt):
-                    return _fail("已停止。", attempt, t0, stopped=True)
+                    return _fail(texts.OPT_A0, attempt, t0, stopped=True)
                 continue
             if target["kind"] == "cloud":
                 msg = humanize_http(e.code, raw, target.get("provider"))
             else:
                 said = _server_says(raw)
-                msg = "本地服务返回错误（HTTP %s）。%s" % (e.code, said or "")
+                msg = texts.OPT_CAT_9 % (e.code, said or "")
             return _fail(msg, attempt, t0)
         except Exception as e:
             if stop_flag is not None and stop_flag.is_set():
-                return _fail("已停止。", attempt, t0, stopped=True)
+                return _fail(texts.OPT_A0, attempt, t0, stopped=True)
             if attempt < MAX_ATTEMPTS:
                 if _sleep(stop_flag, 2 ** attempt):
-                    return _fail("已停止。", attempt, t0, stopped=True)
+                    return _fail(texts.OPT_A0, attempt, t0, stopped=True)
                 continue
             if target["kind"] == "cloud":
                 msg = humanize_net(e, target.get("provider"))
             else:
-                msg = ("无法连接本地服务（%s）——请先点「启动服务」或检查端口设置。"
+                msg = (texts.OPT_CAT_10
                        % target["url"])
             return _fail(msg, attempt, t0)
         # 已拿到 200：本次调用已在服务端生成并计费，解析侧任何失败都**绝不重试**——
@@ -297,12 +296,12 @@ def optimize_once(target, messages, temperature, max_tokens, stop_flag=None):
         except ValueError:
             # 200 但回包不是 JSON（网关插页 / 代理劫持一类）：重试也大概率还是它，
             # 如实报原文摘录，不走网络重试
-            return _fail("服务返回了 200，但回包不是 JSON（原文：%s）"
+            return _fail(texts.OPT_CAT_11
                          % raw_ok.strip()[:160], attempt, t0)
         try:
             return _parse_ok(data, attempt, t0)
         except Exception as e:
-            return _fail("已收到 200 回包，但解析失败（不再重试——本次调用已生成并计费）：%s"
+            return _fail(texts.OPT_CAT_12
                          % (e or type(e).__name__), attempt, t0)
 
 
@@ -330,14 +329,14 @@ def optimize_all(cfg, user_text, scenario=None, kind=None, has_image=False,
     """
     text = str(user_text or "").strip()
     if not text:
-        return {"ok": False, "error": "没有可优化的内容。", "results": [],
+        return {"ok": False, "error": texts.OPT_DERROR, "results": [],
                 "scenario": "", "model": "", "elapsed_ms": 0}
     if scenario is None:
         scenario = promptopt.resolve_scenario(
             kind if kind is not None else cfg.get("model_kind"),
             has_image, ref_mode)
     if scenario not in promptopt.SCENARIOS:
-        return {"ok": False, "error": "不认识的优化场景：%r" % scenario,
+        return {"ok": False, "error": texts.OPT_CAT_13 % scenario,
                 "results": [], "scenario": "", "model": "", "elapsed_ms": 0}
     target, err = resolve_target(cfg)
     if target is None:
@@ -352,7 +351,7 @@ def optimize_all(cfg, user_text, scenario=None, kind=None, has_image=False,
         except Exception:
             alive = True
         if not alive:
-            return {"ok": False, "error": "本地服务没启动：先在主页面点「启动服务」再优化提示词。",
+            return {"ok": False, "error": texts.OPT_DERROR_2,
                     "results": [], "scenario": scenario, "model": target["label"],
                     "elapsed_ms": 0}
 
@@ -377,7 +376,7 @@ def optimize_all(cfg, user_text, scenario=None, kind=None, has_image=False,
                   "stopped" if r.get("stopped") else ("done" if r["ok"] else "error"),
                   r.get("error") or "")
         except Exception as e:      # 兜底：任何意外都不许让 join 缺一路
-            r = _fail("优化请求内部出错：%s: %s" % (type(e).__name__, e), 0, t0)
+            r = _fail(texts.OPT_CAT_14 % (type(e).__name__, e), 0, t0)
             r.update(strategy=strategy, label=promptopt.STRATEGY_LABEL[strategy],
                      suspect=False, missing=[])
         with lock:
@@ -395,4 +394,4 @@ def optimize_all(cfg, user_text, scenario=None, kind=None, has_image=False,
     return {"ok": ok, "scenario": scenario, "model": target["label"],
             "results": results,
             "elapsed_ms": int((time.time() - t0) * 1000),
-            "error": "" if ok else (results[0]["error"] if results else "请求没能发出。")}
+            "error": "" if ok else (results[0]["error"] if results else texts.OPT_ELSE)}

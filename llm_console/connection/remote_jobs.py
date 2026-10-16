@@ -23,14 +23,15 @@ from ..core import config, media
 from .remote_audit import audit
 from .remote_ledger import ledger_add, ledger_load, ledger_update
 from .remote_uploads import upload_paths
+from .. import texts
 
 # ---- 给手机端的失败原话（W 2026-10-12 定口径：**只给人话，引擎原始行不留**）----
 # sd-cli 的输出里带着模型与产物的**绝对路径**（盘符、用户名、目录结构），而坑 209⑥
 # 早就定了"不把本机路径回给手机端"——`submit` 里"引擎没就位"那句就是照这个写的。
 # 原始行并没有丢：整份都进本机日志（media_log_path）与审计 detail，本机想看随时能看。
-FATAL_MSG = "电脑端的生图引擎没出图（退出码 %s）。详细输出留在电脑端的生图日志里。"
-READ_FAIL_MSG = "电脑端读不到生图引擎的输出了。详细输出留在电脑端的生图日志里。"
-SPAWN_FAIL_MSG = "电脑端的生图引擎起不来（sd-cli 没能启动）。请在电脑端确认引擎目录还在。"
+FATAL_MSG = texts.RJ_FATAL_MSG
+READ_FAIL_MSG = texts.RJ_READ_FAIL_MSG
+SPAWN_FAIL_MSG = texts.RJ_SPAWN_FAIL_MSG
 
 class RemoteJobs:
     """远程生图的单槽任务管理器：提交 / 进度 / 取消 / 产物取回。
@@ -89,14 +90,14 @@ class RemoteJobs:
         """
         prompt = str(prompt or "").strip()
         if not prompt:
-            return None, "提示词不能为空。"
+            return None, texts.RJ_L1
         if len(prompt) > 4000:
-            return None, "提示词太长（上限 4000 字）。"
+            return None, texts.RJ_L1_2
         with self._lock:
             if self._proc is not None:
-                return None, "已有一个远程生图在进行（本机同一时间只跑一个）。"
+                return None, texts.RJ_L1_3
             if self._local_busy():
-                return None, "本机正在忙（生成 / 生视频 / 服务操作），稍后再试。"
+                return None, texts.RJ_L1_4
             # 立刻占槽（坑 260）：从这里到 _proc 赋值之间有扫盘 / 读 GGUF 头 /
             # 建目录 / Popen，慢盘上可达秒级；不占槽 GUI 侧 _any_busy 轮询会在这个
             # 窗口放行第二份 sd-cli。任何失败返回都经 finally 释放；成功后由 _proc
@@ -132,17 +133,15 @@ class RemoteJobs:
         if not os.path.isfile(cli):
             # 不把引擎的绝对路径回给手机端（坑 209⑥：那是本机用户名与目录结构）；
             # 路径进审计，手机那头只留"去哪儿修"。
-            audit("image.submit", device_id, False, "no sd-cli: %s" % (cli or "(空)"))
-            return None, ("电脑端还没配好生图引擎：在 设置 → 本地模型 → "
-                          "生图（sd.cpp） 里指向 sd.cpp 目录。")
+            audit("image.submit", device_id, False, "no sd-cli: %s" % (cli or texts.RJ_N))
+            return None, (texts.RJ_L1_5)
         diffusion = resolve_img_model_path(snap)
         if not diffusion:
-            return None, ("未找到生图模型：电脑端还没配好扩散权重。")
+            return None, (texts.RJ_L1_6)
         files = resolve_img_files(snap, diffusion)
         missing = sdprofile.missing_slots(files["family"], files)
         if missing:
-            return None, ("这个生图模型（识别为 %s）缺配套文件：%s——在电脑端"
-                          "设置里补齐。" % (sdprofile.label_of(files["family"]),
+            return None, (texts.RJ_CAT % (sdprofile.label_of(files["family"]),
                                            "、".join(missing)))
         try:
             need = modelreq.assess(snap, diffusion, "image", files=files)
@@ -151,8 +150,7 @@ class RemoteJobs:
         except Exception:
             lvl = 0
         if lvl >= modelreq.LEVEL_FATAL:
-            return None, ("这台机器带不动这个模型（%s）——远程没人能按"
-                          "「仍要继续」，请在电脑端确认后再来。"
+            return None, (texts.RJ_CAT_2
                           % modelreq.LEVEL_TEXT[lvl])
         # ---- 二期：附件 → 带图两档 → 强度 → 遮罩（判据与 GUI 逐字同源）----
         ref_paths, err = upload_paths(device_id, refs or [], "ref")
@@ -178,8 +176,8 @@ class RemoteJobs:
         st_value = None              # 底图重绘档才算强度；None = build_img_cmd 自己判
         echo = []
         if used:
-            echo.append("[%s] 参考图 %d 张%s"
-                        % (capability.MODE_LABEL.get(mode, "带图"), len(used),
+            echo.append(texts.RJ_CAT_3
+                        % (capability.MODE_LABEL.get(mode, texts.RJ_A1), len(used),
                            "" if not drop_note else "（%s）" % drop_note))
             if mode == capability.MODE_EDIT:
                 # 回显与命令行同源：这里算一次，数值显式交给 build_img_cmd
@@ -188,9 +186,9 @@ class RemoteJobs:
                 # 小改档 + 没带遮罩 → 半句指路（判据在 media.mask_hint，与 GUI 同源）
                 _hint = mask_hint(_t, auto=not str(strength_tier or "").strip(),
                                   has_mask=bool(mask_path))
-                echo.append("重绘强度 %s（%s）%s%s"
+                echo.append(texts.RJ_CAT_4
                             % (st_value, st_why,
-                               "｜遮罩：只重绘涂抹区" if mask_path else "",
+                               texts.RJ_IF if mask_path else "",
                                _hint))
         try:
             # 兜底 20 = DEFAULT_CONFIG["img_steps"]（与 GUI 两端读法逐字同源；
@@ -217,8 +215,7 @@ class RemoteJobs:
         except Exception as e:
             audit("image.submit", device_id, False, "outdir failed: %s (%s: %s)"
                   % (outdir, type(e).__name__, e))
-            return None, ("电脑端的产物目录建不出来：检查那个目录的磁盘与权限"
-                          "（位置在 设置 → 云端模型 → 生图 / 生视频 的「修改产物位置」）。")
+            return None, (texts.RJ_L1_7)
         tid = _pysecrets.token_hex(4)
         # 微秒防同秒碰撞：**不能**走 time.strftime("%f") —— Windows 的 C 运行时
         # strftime 不认 %f（glibc 扩展），当场 ValueError；datetime 是 Python
@@ -447,7 +444,7 @@ class RemoteJobs:
         return {"id": t2.get("id"),
                 "state": t2.get("state") or ("done" if t2.get("ok") else "failed"),
                 "progress": None, "files": t2.get("files") or [],
-                "error": "" if t2.get("ok") else "已结束（详见电脑端 media_logs）",
+                "error": "" if t2.get("ok") else texts.RJ_ELSE,
                 "echo": [], "device_id": t2.get("device_id")}
 
     def status(self, task_id, device_id):

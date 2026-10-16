@@ -21,6 +21,7 @@ import tempfile
 import tkinter as tk
 from tkinter import ttk
 
+from .. import texts
 from . import imgdecode, theme, widgets
 
 
@@ -35,16 +36,16 @@ class MaskEditMixin:
         """这一档能不能涂遮罩 → `(能不能, 不能时的原因)`（原因写进附件条状态行）。"""
         from ..core import capability, providers
         if providers.is_cloud(self.cfg):
-            return False, "遮罩只对本地生图生效：云端生图的接口没有这个入参。"
+            return False, texts.MASK_NO_CLOUD
         if str(self.cfg.get("model_kind") or "") != "image":
-            return False, "遮罩只在生图模型的「底图重绘」档用得上。"
+            return False, texts.MASK_ONLY_EDIT
         if self._effective_ref_mode() != capability.MODE_EDIT:
-            return False, "当前是「主体参考」档，遮罩用不上——切回「底图重绘」再点图片涂抹。"
+            return False, texts.MASK_WRONG_MODE
         # 底图重绘一次只认第一张（`media.plan_ref_images`），涂在其余几张上的遮罩
         # 发送时根本不会被读到 —— 与其让用户白涂一遍再静默丢掉，点这里就说清。
         imgs = list(getattr(self, "_attached_images", None) or [])
         if image_path and len(imgs) > 1 and imgs[0] != image_path:
-            return False, "底图重绘一次只认第一张图：这张不会送去重绘，遮罩用不上。"
+            return False, texts.MASK_FIRST_ONLY
         return True, ""
 
     def _mask_cleanup(self):
@@ -104,7 +105,7 @@ class MaskEditMixin:
         try:
             from PIL import Image, ImageDraw, ImageOps
         except Exception:
-            self._attach_note_var.set("这台机器上没有 Pillow，用不了涂抹遮罩。")
+            self._attach_note_var.set(texts.MASK_NO_PILLOW)
             self.attach_note.grid()
             return None
 
@@ -124,7 +125,7 @@ class MaskEditMixin:
 
         win = tk.Toplevel(self.root)
         win.withdraw()                      # 摆正了再显示（否则左上角闪一下，坑 161）
-        win.title("涂抹要重绘的区域 · %s" % os.path.basename(image_path))
+        win.title(texts.MASK_TITLE % os.path.basename(image_path))
         theme.style_toplevel(win)
         win.transient(self.root)
         self._mask_win = win
@@ -133,7 +134,7 @@ class MaskEditMixin:
         body.pack(fill="both", expand=True, padx=12, pady=(10, 10))
         # 顶栏那句要按**画布宽度**折行：不折的话它自己的请求宽能顶出窗口右界
         # （坑 113 同族——长中文标签按字符估算宽度必偏）。
-        ttk.Label(body, text="涂过的地方交给模型重绘，没涂的地方保持不变；一点不涂 = 不用遮罩。",
+        ttk.Label(body, text=texts.MASK_HINT,
                   style="Dim.TLabel", font=("Microsoft YaHei UI", 9),
                   wraplength=dw).pack(anchor="w")
 
@@ -212,12 +213,12 @@ class MaskEditMixin:
 
         bar = ttk.Frame(body)
         bar.pack(fill="x")
-        ttk.Label(bar, text="笔刷", font=("Microsoft YaHei UI", 9)).pack(side="left")
+        ttk.Label(bar, text=texts.MASK_BRUSH, font=("Microsoft YaHei UI", 9)).pack(side="left")
         brush = tk.IntVar(value=40)
         ttk.Scale(bar, from_=self.MASK_BRUSH_MIN, to=self.MASK_BRUSH_MAX,
                   orient="horizontal", length=180, variable=brush).pack(side="left", padx=(4, 10))
         erase = tk.BooleanVar(value=False)
-        theme.check(bar, text="橡皮擦", variable=erase).pack(side="left", padx=(0, 10))
+        theme.check(bar, text=texts.MASK_ERASER, variable=erase).pack(side="left", padx=(0, 10))
 
         def clear():
             cancel_pending()
@@ -225,7 +226,7 @@ class MaskEditMixin:
             small.paste(0, (0, 0, dw, dh))
             refresh_overlay()
 
-        theme.button(bar, text="清空", command=clear).pack(side="left")
+        theme.button(bar, text=texts.MASK_CLEAR, command=clear).pack(side="left")
 
         # ---- 笔刷范围提示：跟着鼠标的一个圈（红=涂，蓝=擦），大小就是笔刷粗细 ----
         ring = {"item": None, "at": (0, 0)}
@@ -340,14 +341,14 @@ class MaskEditMixin:
                 try:
                     mask.save(out)
                 except Exception as e:
-                    note.set("遮罩存不下来：%s" % e)
+                    note.set(texts.MASK_SAVE_FAIL % e)
                     return
                 self._masks[image_path] = out
             close()
             self._refresh_attach_note()
 
-        theme.button(foot, text="取消", command=close).pack(side="right")
-        theme.button(foot, text="确定", command=commit, bootstyle="primary").pack(
+        theme.button(foot, text=texts.BTN_CANCEL, command=close).pack(side="right")
+        theme.button(foot, text=texts.BTN_OK, command=commit, bootstyle="primary").pack(
             side="right", padx=(0, 6))
         win.protocol("WM_DELETE_WINDOW", close)
         win.bind("<Escape>", lambda _e: close())

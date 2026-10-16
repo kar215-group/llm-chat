@@ -11,6 +11,7 @@ import traceback
 import tkinter as tk
 from tkinter import ttk, messagebox
 
+from .. import texts
 from ..core.config import (load_config, DEFAULT_CONFIG, APP_DIR, APP_VERSION,
                            CONFIG_PATH)
 from ..core import (capability, cloudjobs, codesign, config, crashlog, diagnose,
@@ -232,8 +233,7 @@ class App(ChatMixin, ImageGenMixin, VideoGenMixin, ServiceMixin, ModelsMixin, Se
             self.proxy.start()
         elif _proxy_want:
             # 不起代理必须说一声：否则 agent 那边是"连不上"，用户在这儿什么线索都没有
-            self._sq.put(("note", "API 代理没有启动：这台机器上还没有可转发的本地文本模型。"
-                                  "备好引擎与模型后在 设置 → 本地模型 API 里启用。"))
+            self._sq.put(("note", texts.APP_PROXY_NOT_STARTED))
 
         # 远程访问（99 K1，connection/remote.py）：手机浏览器 → 本机。
         # 启动闸 = remote_enabled（默认关）；配对制 + HTTPS + 审计三件套在服务端
@@ -270,9 +270,7 @@ class App(ChatMixin, ImageGenMixin, VideoGenMixin, ServiceMixin, ModelsMixin, Se
 
         threading.Thread(target=self._status_loop, daemon=True).start()
         if self._other_instance:
-            self._sq.put(("note",
-                          "[配置] 检测到另一个程序实例正在运行——两边同时改设置会互相覆盖，"
-                          "建议只保留一个（之后的保存会被拒并在这里说明）。"))
+            self._sq.put(("note", texts.APP_ANOTHER_INSTANCE))
         # 不再在启动时自动补全模型参数（W 2026-10-05）：改由「进 模型文件与引擎 页」按
         # 10 分钟冷却触发一次（见 ui/models_ui._auto_scan_models + settings 的 files 进页钩子）。
         root.after(80, self._poll)
@@ -344,9 +342,7 @@ class App(ChatMixin, ImageGenMixin, VideoGenMixin, ServiceMixin, ModelsMixin, Se
                 # 这台机器**判断不了**（PowerShell 被禁 / 策略拦截）也得说出来 ——
                 # 一律静默的话，用户既收不到询问、也收不到"判不了"，两条路全断（2026-10-06）。
                 # 只留一行说明，不弹窗：环境受限的机器多半也弹不出什么结果。
-                self._append("[签名] 这台机器判断不了本程序的签名状态（%s）。"
-                             "想手动处理：设置 → 关于与诊断 → 连点 5 下版本号，"
-                             "在开发者选项里操作。\n" % why, "meta")
+                self._append(texts.APP_CODESIGN_UNKNOWN % why, "meta")
             return                       # 没签名（why 为空）/ 读不出来：不问也不记账
         if info.get("trusted"):
             return                       # 已经信任：什么都不用做，也不记账
@@ -359,23 +355,18 @@ class App(ChatMixin, ImageGenMixin, VideoGenMixin, ServiceMixin, ModelsMixin, Se
         if not remembered:
             # 记账失败的出口（2026-10-06）：只读目录里"问过了"记不住，就会天天重弹。
             # 至少把原因说明白 —— 信任动作本身写进系统证书库，与配置文件无关。
-            self._append("[签名] 配置写不进去（%s），这条询问记不住，下次启动还会再问。"
-                         "可在 设置 → 关于与诊断 →「诊断」里查原因。\n"
-                         % (config.write_error()[1] or "原因未知"), "meta")
+            self._append(texts.APP_CODESIGN_SAVE_FAIL
+                         % (config.write_error()[1] or texts.APP_CODESIGN_WHY_UNKNOWN), "meta")
         if not messagebox.askyesno(
-                "把本软件签名列入本机可信名单",
-                "当前本软件签名未进入本机可信名单，自动更新功能可能无法使用，"
-                "请确认将签名写入本机可信名单\n\n"
-                "请确保该软件是从 GitHub 上直接下载的，\n"
-                "否则将签名列入可信名单是一件很危险的事\n\n"
-                "如取消，后续仍可点击 5 下版本号进入开发者模式进行授权"):
+                texts.APP_CODESIGN_TITLE,
+                texts.APP_CODESIGN_BODY):
             return
         ok, why = codesign.trust()
         if ok:
             self._codesign_info = dict(info, trusted=True)
-            self._append("[签名] 已把本软件的签名列入本机可信名单（当前用户）。\n", "meta")
+            self._append(texts.APP_CODESIGN_OK, "meta")
         else:
-            self._append("[签名] 列入可信名单失败：%s\n" % why, "meta")
+            self._append(texts.APP_CODESIGN_FAIL % why, "meta")
 
     def _guide_missing(self):
         """引导第一屏那份缺件清单。
@@ -521,8 +512,8 @@ class App(ChatMixin, ImageGenMixin, VideoGenMixin, ServiceMixin, ModelsMixin, Se
             self._guide = None
             self._guide_active = False
             self._render_status(self._server_alive_flag, self._server_ready_flag)
-            messagebox.showwarning("新手引导",
-                                   "引导没能打开（%s: %s），界面照常可用。"
+            messagebox.showwarning(texts.APP_GUIDE_TITLE,
+                                   texts.APP_GUIDE_OPEN_FAIL
                                    % (type(e).__name__, e))
 
     # ---- 布局 ----
@@ -530,7 +521,7 @@ class App(ChatMixin, ImageGenMixin, VideoGenMixin, ServiceMixin, ModelsMixin, Se
         top = ttk.Frame(self.root)
         top.pack(fill="x", padx=10, pady=(10, 4))
 
-        self.status_var = tk.StringVar(value="○ 检查中…")
+        self.status_var = tk.StringVar(value=texts.APP_STATUS_CHECKING)
         self.status_label = tk.Label(top, textvariable=self.status_var,
                                      fg=theme.c("muted"),
                                      bg=theme.c("bg"),
@@ -573,19 +564,19 @@ class App(ChatMixin, ImageGenMixin, VideoGenMixin, ServiceMixin, ModelsMixin, Se
                                          style="Round.Icon.TButton",
                                          image=self._gear_photo())
         self.btn_settings.pack(side="right", padx=3)
-        widgets.bind_tip(self.btn_settings, "设置")
-        self.stop_svc_btn = theme.button(top, text="停止服务",
+        widgets.bind_tip(self.btn_settings, texts.APP_BTN_SETTINGS_TIP)
+        self.stop_svc_btn = theme.button(top, text=texts.APP_BTN_STOP_SVC,
                                          command=self.stop_server_async, state="disabled")
         self.stop_svc_btn.pack(side="right", padx=3)
-        self.start_btn = theme.button(top, text="启动服务", command=self.on_start_restart)
+        self.start_btn = theme.button(top, text=texts.APP_BTN_START_SVC, command=self.on_start_restart)
         self.start_btn.pack(side="right", padx=3)
         # 置灰时悬停给一句"为什么不行、去哪儿修"（与附件条置灰档同一套做法，坑 213 的
         # 口径：置灰不隐藏 + 说清依据）。判据没挡住时返回空串，bind_tip 就不弹层。
         widgets.bind_tip(self.start_btn, self._start_tip)
-        self.stop_gen_btn = theme.button(top, text="停止生成",
+        self.stop_gen_btn = theme.button(top, text=texts.APP_BTN_STOP_GEN,
                                          command=self.stop_generate, state="disabled")
         self.stop_gen_btn.pack(side="right", padx=3)
-        self.clear_btn = theme.button(top, text="清空对话", command=self.clear_chat)
+        self.clear_btn = theme.button(top, text=texts.APP_BTN_CLEAR, command=self.clear_chat)
         self.clear_btn.pack(side="right", padx=3)
 
         # 按当前模型类型初始化按钮状态（生图模型：启动按钮即刻置灰）
@@ -669,27 +660,19 @@ class App(ChatMixin, ImageGenMixin, VideoGenMixin, ServiceMixin, ModelsMixin, Se
         if kind in ("image", "video") and not missing:
             # 附图在生图那边是参考图、在生视频这边是**首帧**（-i/--init-img，开发机主体是
             # fl2va 变体，写成"参考图"是坑 42 的老错）；云端生视频没有首帧入参，所以那条不承诺
-            extra = {"image": "和参考图（可选）",
-                     "video": "" if cloud else "和首帧（可选）"}[kind]
-            self._append("本地对话台已就绪。\n"
-                         "当前模型：%s —— 无需启动服务，直接发提示词%s即可。\n"
-                         "点顶部模型名切换模型；回车发送，Shift+回车换行；"
-                         "生成中可点「停止生成」。\n"
-                         "────────────────────\n" % (name, extra), "meta")
+            extra = {"image": texts.APP_READY_REF_IMG,
+                     "video": "" if cloud else texts.APP_READY_REF_VID}[kind]
+            self._append(texts.APP_READY_MEDIA % (name, extra), "meta")
         else:
             if missing:
-                what = ("模型目录里放一个 .gguf 就能选上"
-                        if not cloud else "在 设置 → 云端模型 里挑一个就能选上")
+                what = (texts.APP_READY_HOW_LOCAL_MISSING
+                        if not cloud else texts.APP_READY_HOW_CLOUD_MISSING)
             elif cloud:
-                what = "云端模型直连服务商，不用启动服务，发送后稍等一会儿就有回答"
+                what = texts.APP_READY_HOW_CLOUD
             else:
-                what = "点「启动服务」加载，状态变 ● 运行中 后即可对话"
-            self._append("本地对话台已就绪。\n"
-                         "当前模型：%s —— %s。\n"
-                         "点顶部模型名切换模型；回车发送，Shift+回车换行；"
-                         "「停止生成」会保留已生成的内容。\n"
-                         "────────────────────\n"
-                         % (name if (missing or cloud) else name + "（语言模型）", what),
+                what = texts.APP_READY_HOW_LOCAL
+            self._append(texts.APP_READY_CHAT
+                         % (name if (missing or cloud) else name + texts.APP_LANG_TAG, what),
                          "meta")
 
     def _build_inputbar(self):
@@ -731,7 +714,7 @@ class App(ChatMixin, ImageGenMixin, VideoGenMixin, ServiceMixin, ModelsMixin, Se
         self.refmode_zone = theme.tint(tk.Frame(self.attach_frame, relief="groove", bd=1,
                                                 background=theme.c("bg")), bg="bg")
         self.refmode_zone.grid(row=0, column=1, sticky="ns", padx=(8, 0))
-        theme.tint(tk.Label(self.refmode_zone, text="带图方式",
+        theme.tint(tk.Label(self.refmode_zone, text=texts.APP_REFMODES_TITLE,
                             background=theme.c("bg"), foreground=theme.c("label"),
                             font=("Microsoft YaHei UI", 9)),
                    fg="label", bg="bg").pack(anchor="w", padx=8, pady=(4, 0))
@@ -746,12 +729,12 @@ class App(ChatMixin, ImageGenMixin, VideoGenMixin, ServiceMixin, ModelsMixin, Se
         # 底图重绘档专属：本次任务的强度档（"" = 交给提示词自动分档）。
         # 只加一行下拉，不开第二个分区 —— 附件条与输入区同属固定外框，
         # 每多一行都在挤可伸缩的聊天区（坑 56）。
-        self._strength_choices = [("", "自动")] + [
+        self._strength_choices = [("", texts.APP_STRENGTH_AUTO)] + [
             (t, media.TIER_LABEL[t]) for t in media.STRENGTH_TIERS]
         self._strength_var = tk.StringVar(value=self._strength_choices[0][1])
         self._strength_row = sr = theme.tint(
             tk.Frame(self.refmode_zone, background=theme.c("bg")), bg="bg")
-        theme.tint(tk.Label(sr, text="重绘强度", background=theme.c("bg"),
+        theme.tint(tk.Label(sr, text=texts.APP_STRENGTH_TITLE, background=theme.c("bg"),
                             foreground=theme.c("label"),
                             font=("Microsoft YaHei UI", 9)),
                    fg="label", bg="bg").pack(side="left")
@@ -813,10 +796,10 @@ class App(ChatMixin, ImageGenMixin, VideoGenMixin, ServiceMixin, ModelsMixin, Se
 
         btns = ttk.Frame(bot)
         btns.pack(side="left", fill="y", padx=(6, 0))
-        self.send_btn = theme.button(btns, text="发送", command=self.send_message,
+        self.send_btn = theme.button(btns, text=texts.APP_BTN_SEND, command=self.send_message,
                                      width=10, bootstyle="primary")
         self.send_btn.pack(fill="both", expand=True)
-        self.attach_btn = theme.button(btns, text="📎 附件", command=self.pick_image,
+        self.attach_btn = theme.button(btns, text=texts.APP_BTN_ATTACH, command=self.pick_image,
                                        width=10, bootstyle="secondary-outline")
         self.attach_btn.pack(fill="x", pady=(4, 0))
 
@@ -922,9 +905,9 @@ class App(ChatMixin, ImageGenMixin, VideoGenMixin, ServiceMixin, ModelsMixin, Se
         opt_open = getattr(self, "_opt_panel", None) is not None
         self.send_btn.configure(
             state="disabled" if (blocked or opt_open) else "normal",
-            text="生成中…" if busy else "发送")
+            text=texts.APP_BTN_SEND_BUSY if busy else texts.APP_BTN_SEND)
         self.stop_gen_btn.configure(state="normal" if running else "disabled",
-                                    text="停止生成")
+                                    text=texts.APP_BTN_STOP_GEN)
         self.clear_btn.configure(state="disabled" if blocked else "normal")
 
     def _remote_busy(self):
@@ -940,9 +923,9 @@ class App(ChatMixin, ImageGenMixin, VideoGenMixin, ServiceMixin, ModelsMixin, Se
         r = getattr(self, "remote", None)
         try:
             if r and r.jobs and r.jobs.busy():
-                return "生图"
+                return texts.CHAT_ACTION_IMG
             if r and r.chat and r.chat.busy():
-                return "对话"
+                return texts.APP_REMOTE_KIND_CHAT
         except Exception:
             return ""
         return ""
@@ -980,13 +963,9 @@ class App(ChatMixin, ImageGenMixin, VideoGenMixin, ServiceMixin, ModelsMixin, Se
                         if str(self.cfg.get("remote_bind") or "") == remote_mod.BIND_WFD:
                             # 设备直连档的失败原因自带指路（组起不来 / 没链路），
                             # 别套"证书或端口"那半句去误导
-                            self._sq.put(("note",
-                                          "远程访问启动失败：%s——到 设置 → 远程访问 "
-                                          "重新拨一次开关可重试。" % err))
+                            self._sq.put(("note", texts.APP_REMOTE_FAIL % err))
                         else:
-                            self._sq.put(("note",
-                                          "远程访问启动失败（证书或端口问题），暂未开启——"
-                                          "到 设置 → 远程访问 重新拨一次开关可重试。"))
+                            self._sq.put(("note", texts.APP_REMOTE_FAIL_CERT))
                     elif self.remote.running():
                         if not bool(self.cfg.get("remote_enabled", False)):
                             # 造证书那几十秒里用户把开关关了（关的那一刻 running()
@@ -1000,8 +979,7 @@ class App(ChatMixin, ImageGenMixin, VideoGenMixin, ServiceMixin, ModelsMixin, Se
                             return
                         # W 2026-10-11：主页只提醒一次、不带网址（地址在
                         # 设置 → 远程访问 的「网址 ****」里）。
-                        self._sq.put(("note",
-                                      "远程服务已启动（网址与配对码在 设置 → 远程访问）"))
+                        self._sq.put(("note", texts.APP_REMOTE_OK))
                 if on_done is not None:
                     try:
                         on_done(err)
@@ -1087,16 +1065,15 @@ class App(ChatMixin, ImageGenMixin, VideoGenMixin, ServiceMixin, ModelsMixin, Se
             return
         self.chat.configure(state="normal")
         try:
-            self.chat.insert("end", "\n[云端] 有 %d 个云端任务的结果还没落地"
-                             "（产物地址只活 24 小时）：\n" % len(jobs), "meta")
+            self.chat.insert("end", texts.APP_JOBS_HEAD % len(jobs), "meta")
             for j in jobs[:6]:
                 self.chat.insert("end", "  " + cloudjobs.describe(j) + "\n", "meta")
                 if cloudjobs.expired(j):
                     continue
                 if str(j.get("status")) in ("pending", "running", "unknown", "submitted"):
-                    text = "继续等"
+                    text = texts.APP_BTN_WAIT
                 else:
-                    text = "取回"
+                    text = texts.APP_BTN_RETRIEVE
                 btn = theme.button(self.chat, text=text,
                                    command=lambda x=j: self._recover_job(x),
                                    bootstyle="primary-outline")
@@ -1132,16 +1109,16 @@ class App(ChatMixin, ImageGenMixin, VideoGenMixin, ServiceMixin, ModelsMixin, Se
             return                      # 已经有一条在输出栏里了，别叠第二条
         self.chat.configure(state="normal")
         try:
-            self.chat.insert("end", "\n[环境] 这台机器上三条路都还没通：\n",
+            self.chat.insert("end", texts.APP_ENV_HEAD,
                              ("meta", ENV_HINT_TAG))
             for m in q["missing"]:
-                self.chat.insert("end", "  · %s\n" % m, ("meta", ENV_HINT_TAG))
-            btn = theme.button(self.chat, text="去配置引擎",
+                self.chat.insert("end", texts.APP_ENV_ITEM % m, ("meta", ENV_HINT_TAG))
+            btn = theme.button(self.chat, text=texts.APP_BTN_CONFIG_ENGINE,
                                command=lambda: self.open_settings(jump="eng"),
                                bootstyle="primary-outline")
             self.chat.window_create("end", window=btn)
             self.chat.insert("end", "  ", ("meta", ENV_HINT_TAG))
-            btn2 = theme.button(self.chat, text="填云端密钥",
+            btn2 = theme.button(self.chat, text=texts.APP_BTN_CLOUD_KEY,
                                 command=lambda: self.open_settings(jump="c_prov"),
                                 bootstyle="secondary-outline")
             self.chat.window_create("end", window=btn2)
@@ -1184,15 +1161,14 @@ class App(ChatMixin, ImageGenMixin, VideoGenMixin, ServiceMixin, ModelsMixin, Se
         tid = str(job.get("task_id") or "")
         kind = "image" if str(job.get("kind")) == "image" else "video"
         if self._img_busy or self._vid_busy or self._busy:
-            self._append("\n[云端] 现在正忙，等当前任务结束后再取回。\n", "meta")
+            self._append(texts.APP_RECOVER_BUSY, "meta")
             return
         if cloudjobs.expired(job):
-            self._append("\n[云端] 这个任务超过 24 小时了，产物地址已失效，取不回来。\n",
-                         "error")
+            self._append(texts.APP_RECOVER_EXPIRED, "error")
             return
         provider = providers.get_provider(self.cfg, job.get("provider_id"))
         if not provider:
-            self._append("\n[云端] 取不回 %s：provider「%s」已经不在了。\n"
+            self._append(texts.APP_RECOVER_NO_PROVIDER
                          % (tid[:12], job.get("provider_id")), "error")
             return
         dest = str(job.get("dest") or "")
@@ -1204,7 +1180,7 @@ class App(ChatMixin, ImageGenMixin, VideoGenMixin, ServiceMixin, ModelsMixin, Se
         try:
             os.makedirs(os.path.dirname(dest), exist_ok=True)
         except Exception as e:
-            self._append("\n[云端] 存放目录建不出来：%s\n" % e, "error")
+            self._append(texts.APP_RECOVER_DIR_FAIL % e, "error")
             return
         gen, q, stop = self._cloud_begin(kind)
         self._cloud_pid = str(provider["id"])
@@ -1215,8 +1191,7 @@ class App(ChatMixin, ImageGenMixin, VideoGenMixin, ServiceMixin, ModelsMixin, Se
         else:
             self._vid_out = dest
             self._vid_log = config.media_log_path(self.cfg, dest, "cloud")
-        self._append("\n[云端] 取回 task_id=%s…（查状态，已完成就直接下载）\n"
-                     % tid[:16], "meta")
+        self._append(texts.APP_RECOVER_FETCH % tid[:16], "meta")
         threading.Thread(target=self._cloud_video_worker if kind == "video"
                          else self._cloud_image_worker,
                          args=(provider, str(job.get("model") or ""),
@@ -1234,16 +1209,14 @@ class App(ChatMixin, ImageGenMixin, VideoGenMixin, ServiceMixin, ModelsMixin, Se
             # 如实文案（文档 §12.3 ⑥）：提交请求可能已在路上，说"不会再有结果"是假话——
             # 任务照样可能建单并计费。取消意图由 worker 的世代守卫接手：任务号一回来
             # 就发现本轮已被取消，立刻补发真取消并把结果如实告知（见 _late_cancel；R-02）。
-            self._append("%s [已停止等待] 提交请求还在路上，任务号还没回来——任务号一到会"
-                         "自动发起取消；若云端已建单，这一单可能仍会继续跑并计费"
-                         "（取消结果稍后如实告知）。\n" % icon, "meta")
+            self._append(texts.APP_CANCEL_NOSTOP_WAIT % icon, "meta")
             return True
         provider = providers.get_provider(self.cfg, self._cloud_pid) or \
             providers.current_provider(self.cfg)
 
         def work():
             if provider is None:
-                msg = "取消不了：找不到对应的服务商。任务可能还在云端跑，之后可在对话里点「取回」。"
+                msg = texts.APP_CANCEL_NO_PROVIDER
             else:
                 # MiniMax 的 v1/v2 两套轮询地址按模型名选，取消也要用同一个模型去认
                 job = cloudjobs.get_job(tid) or {}
@@ -1253,7 +1226,7 @@ class App(ChatMixin, ImageGenMixin, VideoGenMixin, ServiceMixin, ModelsMixin, Se
                     # 取消成功要把台账落成 canceled（R-39）：否则重启后这条还挂在
                     # "结果没落地"清单里给「取回」按钮，去查一个已经死掉的任务
                     cloudjobs.update_job(tid, status="canceled")
-            self._ui_q.put(lambda: self._append("%s %s\n────────────────\n" % (icon, msg),
+            self._ui_q.put(lambda: self._append(texts.APP_CANCEL_LINE % (icon, msg),
                                                  "meta"))
         threading.Thread(target=work, daemon=True).start()
         return True
@@ -1270,14 +1243,12 @@ class App(ChatMixin, ImageGenMixin, VideoGenMixin, ServiceMixin, ModelsMixin, Se
         try:
             ok, msg = cloud_media.cancel(provider, tid, model)
         except Exception as e:
-            ok, msg = False, "取消请求出错：%s: %s" % (type(e).__name__, e)
+            ok, msg = False, texts.APP_CANCEL_REQ_ERR % (type(e).__name__, e)
         if ok:
             cloudjobs.update_job(tid, status="canceled")
-            text = ("%s [云端取消] 迟到的任务号（%s…）已取消成功：它还在排队，不会产生费用。"
-                    % (icon, tid[:16]))
+            text = texts.APP_CANCEL_LATE_OK % (icon, tid[:16])
         else:
-            text = ("%s [云端取消] 迟到的任务号（%s…）没能取消：%s"
-                    % (icon, tid[:16], msg))
+            text = texts.APP_CANCEL_LATE_FAIL % (icon, tid[:16], msg)
         self._ui_q.put(lambda: self._append(text + "\n────────────────\n", "meta"))
 
     # ---- 状态线程 ----
@@ -1321,9 +1292,7 @@ class App(ChatMixin, ImageGenMixin, VideoGenMixin, ServiceMixin, ModelsMixin, Se
                 if not probe_broken:
                     probe_broken = True
                     self._sq.put(("note",
-                                  "[服务] 状态探测不可用（%s: %s）——状态灯暂停更新；"
-                                  "「启动/停止服务」仍可直接用。"
-                                  % (type(e).__name__, e)))
+                                  texts.APP_PROBE_FAIL % (type(e).__name__, e)))
                 time.sleep(30)
                 continue
             probe_broken = False
@@ -1335,13 +1304,11 @@ class App(ChatMixin, ImageGenMixin, VideoGenMixin, ServiceMixin, ModelsMixin, Se
             sig = "%s|%s" % (path, reason)
             if path and sig != self._write_err_seen:
                 self._write_err_seen = sig
-                if "另一个程序实例" in reason:
+                if texts.APP_OTHER_INSTANCE_MARK in reason:
                     # Y10 拒绝保存：原因已在 reason 里说全，别再接"换文件夹"的无关建议
-                    self._sq.put(("note", "[配置] %s\n" % reason))
+                    self._sq.put(("note", texts.APP_CONFIG_LOCKED % reason))
                 else:
-                    self._sq.put(("note",
-                                  "[配置] 写不进去：%s（%s）—— 设置不会保存。"
-                                  "把本程序换到一个可写的文件夹，或在 设置 → 关于与诊断 里点「一键诊断」。"
+                    self._sq.put(("note", texts.APP_CONFIG_WRITE_FAIL
                                   % (os.path.basename(path), reason)))
             time.sleep(3)
 
@@ -1374,50 +1341,44 @@ class App(ChatMixin, ImageGenMixin, VideoGenMixin, ServiceMixin, ModelsMixin, Se
                     if self.cfg.get("cloud_show_reasoning" if self._turn_cloud
                                     else "show_reasoning", True):
                         if not self._reasoning_started:
-                            pending.append(("thinking", "\n【思考】\n"))
+                            pending.append(("thinking", texts.APP_THINK_PREFIX))
                             self._reasoning_started = True
                         pending.append(("thinking", text))
                         self._cur_reasoning.append(text)
                 elif kind == "content":
                     if self._reasoning_started and not self._content_started:
-                        pending.append(("assistant", "\n\n【回答】\n"))
+                        pending.append(("assistant", texts.APP_ANSWER_PREFIX))
                     self._content_started = True
                     pending.append(("assistant", text))
                     self._cur_content.append(text)
                 elif kind == "usage":
                     self._last_usage = text          # 收尾时统一显示，避免打断正文流
                 elif kind == "retry":
-                    pending.append(("meta", "\n[云端] %s\n" % text))
+                    pending.append(("meta", texts.APP_CLOUD_RETRY % text))
                 elif kind == "fileplan":
-                    pending.append(("meta", "\n[附件] %s\n" % text))
+                    pending.append(("meta", texts.APP_FILEPLAN % text))
                 elif kind in ("done", "stopped", "error"):
                     self._flush_stream(pending)      # 先落已收到的正文，再处理收尾
                     pending = []
                     if kind == "done":
                         self._finish_turn()
                         if str(text) == "length":
-                            self._append("[提示] 本轮回复被 max_tokens 上限截断"
-                                         "（思考过程 + 正式回答共享该额度，"
-                                         "思考较长时会挤掉回答）。\n"
-                                         "解决：设置 → 生成参数 调大 max_tokens；或 服务参数 把 "
-                                         "reasoning 设为 off（不思考，直接回答）。\n", "error")
+                            self._append(texts.APP_TRUNC_HINT, "error")
                         elif str(text) == "incomplete":
                             # SSE 流没收到任何收尾标志就断了（R-16）：半截回答不能
                             # 冒充完整回答——内容保留（云端那半截是付过费的），如实提示
-                            self._append("[提示] 本轮回复没有收到结束标记（流被中断），"
-                                         "以上内容可能不完整。\n", "error")
+                            self._append(texts.APP_INCOMPLETE_HINT, "error")
                     elif kind == "stopped":
-                        self._append("\n\n[已停止生成——已生成内容已保留，"
-                                     "补充新信息后可直接继续发送]", "meta")
+                        self._append(texts.APP_STOPPED_MARK, "meta")
                         self._finish_turn()
                     else:
-                        self._append("\n\n[错误] " + str(text), "error")
+                        self._append(texts.APP_ERROR_PREFIX + str(text), "error")
                         self._finish_turn(error=True)
             except Exception as e:
                 # 关键健壮性：与生图/生视频分支同一铁律——任何异常都不得中断
                 # after 链（断了就是界面永久假死）；落崩溃日志但不中断
                 try:
-                    self._append("[内部错误] 对话事件处理异常: %s\n" % e, "error")
+                    self._append(texts.APP_INTERNAL_CHAT % e, "error")
                 except Exception:
                     crashlog.note("[对话事件处理异常] %s: %s" % (type(e).__name__, e))
         self._flush_stream(pending)
@@ -1446,7 +1407,7 @@ class App(ChatMixin, ImageGenMixin, VideoGenMixin, ServiceMixin, ModelsMixin, Se
             except Exception as e:
                 # 关键健壮性：生图 UI 更新异常不得中断主轮询（否则界面假死）
                 try:
-                    self._append("[内部错误] 生图进度处理异常: %s\n" % e, "error")
+                    self._append(texts.APP_INTERNAL_IMG % e, "error")
                 except Exception:
                     pass
 
@@ -1471,7 +1432,7 @@ class App(ChatMixin, ImageGenMixin, VideoGenMixin, ServiceMixin, ModelsMixin, Se
             except Exception as e:
                 # 同生图：任何异常都必须被吃掉，不能让 after 链断掉（界面永久假死）
                 try:
-                    self._append("[内部错误] 生视频进度处理异常: %s\n" % e, "error")
+                    self._append(texts.APP_INTERNAL_VID % e, "error")
                 except Exception:
                     pass
 
@@ -1485,7 +1446,7 @@ class App(ChatMixin, ImageGenMixin, VideoGenMixin, ServiceMixin, ModelsMixin, Se
             except Exception as e:
                 # 同上：状态事件异常也不得打断 after 链（界面假死）
                 try:
-                    self._append("[内部错误] 状态事件处理异常: %s\n" % e, "error")
+                    self._append(texts.APP_INTERNAL_STATUS % e, "error")
                 except Exception:
                     crashlog.note("[状态事件处理异常] %s: %s" % (type(e).__name__, e))
 
@@ -1536,7 +1497,7 @@ class App(ChatMixin, ImageGenMixin, VideoGenMixin, ServiceMixin, ModelsMixin, Se
                 res = updater.check_update(cur, updater.CHANNEL_STABLE, cache=cache,
                                            token=token)
             except Exception as e:          # 兜底：异常不许穿回 UI 线程（坑 54）
-                res = (updater.STATE_ERROR, {"msg": "检查更新时出错：%s" % e})
+                res = (updater.STATE_ERROR, {"msg": texts.APP_UPD_CHECK_ERR % e})
             self._ui_q.put(lambda: self._dev_upd_notify(*res))
 
         threading.Thread(target=work, daemon=True).start()
@@ -1747,16 +1708,16 @@ class App(ChatMixin, ImageGenMixin, VideoGenMixin, ServiceMixin, ModelsMixin, Se
         if cloud:
             # 只写"云端就绪"：服务商名已经在那边的模型按钮上了（「模型名（云）」），
             # 这里再拼一遍会长到把模型按钮顶出顶栏（W 报的显示问题）
-            self.status_var.set("☁ 云端就绪")
+            self.status_var.set(texts.APP_STATUS_CLOUD)
             self.status_label.configure(fg=theme.c("accent"))
         elif ready:
-            self.status_var.set("● 运行中 (端口 %s)" % self.cfg.get("port"))
+            self.status_var.set(texts.APP_STATUS_RUNNING % self.cfg.get("port"))
             self.status_label.configure(fg=theme.c("ok"))
         elif alive:
-            self.status_var.set("◐ 模型加载中…")
+            self.status_var.set(texts.APP_STATUS_LOADING)
             self.status_label.configure(fg=theme.c("warn"))
         else:
-            self.status_var.set("○ 未运行")
+            self.status_var.set(texts.APP_STATUS_STOPPED)
             self.status_label.configure(fg=theme.c("muted"))
 
         self._layout_topbar(
@@ -1775,16 +1736,17 @@ class App(ChatMixin, ImageGenMixin, VideoGenMixin, ServiceMixin, ModelsMixin, Se
             # 云端 / 生图 / 生视频都不需要聊天服务：启动按钮即使可见（引导期）也置灰；
             # 停止按钮仍按实际服务状态（若旧聊天服务还在运行可停掉）
             self._start_block = ""
-            self.start_btn.configure(text="启动服务", state="disabled")
+            self.start_btn.configure(text=texts.APP_BTN_START_SVC, state="disabled")
             self.stop_svc_btn.configure(state="normal" if alive else "disabled")
         elif self._start_block_reason():
             # 闸门（W 2026-10-13 定）：没有可用的本地文本模型时，哪怕 llama 引擎已经
             # 下载到位，也不许启动——按钮置灰 + 悬停说清缺什么（悬停文案见 START_BLOCK_TIP）。
             # 判据与「未启动」那句拦截同源（`chat_start_block`），动作路径另有守卫（坑 128）。
-            self.start_btn.configure(text="启动服务", state="disabled")
+            self.start_btn.configure(text=texts.APP_BTN_START_SVC, state="disabled")
             self.stop_svc_btn.configure(state="normal" if alive else "disabled")
         else:
-            self.start_btn.configure(text="重启服务" if alive else "启动服务",
+            self.start_btn.configure(text=texts.APP_BTN_RESTART_SVC if alive
+                                     else texts.APP_BTN_START_SVC,
                                      state="normal")
             self.stop_svc_btn.configure(state="normal" if alive else "disabled")
 
@@ -1808,8 +1770,7 @@ class App(ChatMixin, ImageGenMixin, VideoGenMixin, ServiceMixin, ModelsMixin, Se
             # 服务实际加载的模型变了（常见来源：agent 经 8081 让代理换了模型）。
             # 顶栏跟着刷新 + 说一句，免得"顶栏写着 A、回答其实来自 B"（坑 134）
             self._update_model_label()
-            self._append("\n[服务] 服务现在加载的是 %s"
-                         "（可能由 agent 经代理切换；再发消息会按当前选中的模型自动换载）。\n"
+            self._append(texts.APP_SERVING_LINE
                          % display_name(self.cfg, str(item[1])), "meta")
         elif tag == "svc_done":
             _, alive, ready, note, is_error, launched = item
@@ -1840,24 +1801,23 @@ class App(ChatMixin, ImageGenMixin, VideoGenMixin, ServiceMixin, ModelsMixin, Se
                 self._do_send(pending)
             elif pending:
                 self.input.insert("1.0", pending)
-                self._append("[提示] 加载失败，你的消息已放回输入框，可稍后重试。\n", "error")
+                self._append(texts.APP_RELOAD_PUT_BACK, "error")
         elif tag == "note":
-            self._append("\n[服务] " + str(item[1]) + "\n", "meta")
+            self._append(texts.APP_NOTE_PREFIX + str(item[1]) + "\n", "meta")
         elif tag == "remote_busy":
             # 远程生图的忙/闲边沿（_status_loop 检测）：按当前状态重算一遍按钮。
             # 只刷按钮，不写对话流 —— 手机端起任务不该在电脑端的聊天区留一行。
             self._set_busy_ui(self._busy)
         elif tag == "ngl":
             _, key, res = item
-            self._append("\n[服务] 新模型 %s（共 %d 层）：按显存 %.1fGB 与模型大小估算，"
-                         "显存可容纳约 %d 层，已自动设置 GPU 层数 %d（可在设置中微调）。\n"
+            self._append(texts.APP_NGL_LINE
                          % (display_name(self.cfg, key), res["n_layers"],
                             res["vram"], res["ngl_max"], res["ngl"]), "meta")
         elif tag == "alias":
             _, key, alias = item
             if os.path.basename(self.cfg["model"]) == key:
                 self._update_model_label()
-            self._append("\n[服务] 模型别名已生成：%s\n" % alias, "meta")
+            self._append(texts.APP_ALIAS_LINE % alias, "meta")
 
     def _confirm_pair_remote(self, info):
         """远程配对确认（connection/remote 在 handler 线程调）→ 弹窗问用户。
@@ -2067,7 +2027,7 @@ def main():
     # 选区覆盖（apply 内部；选中文本强调色与全局主题色互相独立）。
     theme.apply(root, mode=theme.resolve_mode(cfg.get("ui_theme")),
                 accent=cfg.get("ui_accent"), accent_sel=cfg.get("ui_accent_sel"))
-    root.title("LLM 本地对话台 - llama.cpp")
+    root.title(texts.APP_WINDOW_TITLE)
     # 1080x700 是量出来的，不是拍的（DPI-aware 严格档实测，含"模型名占满 22 字"的情况）：
     # 顶栏右侧 5 个按钮各要 120px，左侧状态灯 + 模型名合计要 904px。
     # 880 宽时客户区只剩 860 →「清空对话」被压扁到 76px、「设置」右缘超出 3px；

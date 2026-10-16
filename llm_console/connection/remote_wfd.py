@@ -32,6 +32,7 @@ import time
 
 from ..core.config import APP_DIR
 from . import remote_net
+from .. import texts
 
 # 直连组的组名 / 密码（ASCII；WPA2 口径——本机驱动 P2P Sae 不支持，实测）。
 # 文案待 W 逐字过目；将来要用户可改就加 cfg 键（wfd_ssid / wfd_pass）喂进
@@ -139,7 +140,7 @@ def start_go(ssid=None, passphrase=None, timeout=GO_READY_TIMEOUT):
     if running():
         return True
     if os.name != "nt":
-        raise WfdGoError("无线直连组只在 Windows 上可用")
+        raise WfdGoError(texts.RWFD_A0)
     try:
         os.makedirs(WFD_DIR, exist_ok=True)
         if os.path.exists(stop_file()):
@@ -158,21 +159,20 @@ def start_go(ssid=None, passphrase=None, timeout=GO_READY_TIMEOUT):
         _proc = _popen(cmd, env)
     except FileNotFoundError:
         _proc = None
-        raise WfdGoError("找不到 PowerShell，无法开启无线直连组")
+        raise WfdGoError(texts.RWFD_A0_2)
     except Exception as e:
         _proc = None
-        raise WfdGoError("无法开启无线直连组（%s）" % e)
+        raise WfdGoError(texts.RWFD_CAT % e)
     deadline = time.time() + timeout
     while time.time() < deadline:
         if _proc.poll() is not None:
             _proc = None
-            raise WfdGoError("无线直连组没能开起来（本机无线功能被关闭，"
-                             "或被系统策略拒绝）")
+            raise WfdGoError(texts.RWFD_A0_3)
         if remote_net.wfd_go_addr():
             return True
         time.sleep(0.5)
     stop_go()
-    raise WfdGoError("无线直连组开启超时（%d 秒内没等到组主地址）"
+    raise WfdGoError(texts.RWFD_CAT_2
                      % int(timeout))
 
 

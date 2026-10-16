@@ -16,6 +16,7 @@
 
 标签是要落进配对记录与 UI 的用户可见字符串，改动走铁律 14。
 """
+from .. import texts
 
 FAMILIES = (
     ("harmony", ("openharmony", "harmonyos", "arkweb"), "HMOS"),
@@ -26,14 +27,14 @@ FAMILIES = (
     ("linux", ("x11", "linux", "wayland"), "Linux"),
 )
 
-OS_UNKNOWN = ("unknown", "未知设备")
+OS_UNKNOWN = ("unknown", texts.DUA_L1)
 _LABELS = {key: label for key, _n, label in FAMILIES}
-_LABELS["unknown"] = "未知设备"
+_LABELS["unknown"] = texts.DUA_L1
 
 
 def os_label(key):
     """系统 key → 显示标签（persona.os_set 里存的是 key，界面渲染用它）。"""
-    return _LABELS.get(str(key or ""), "未知设备")
+    return _LABELS.get(str(key or ""), texts.DUA_L1)
 
 
 def os_family(ua):

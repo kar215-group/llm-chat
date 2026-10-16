@@ -6,6 +6,7 @@ import threading
 import time
 from tkinter import messagebox
 
+from .. import texts
 from ..core import modelreq
 from ..core.models import BLOCK_ENGINE, BLOCK_MODEL, BLOCK_STALE, chat_start_block, display_name
 from ..core.params import ctx_for, current_ngl, estimate_kv_gb
@@ -14,16 +15,16 @@ from ..core.server import _reset_alive_cache, server_alive, server_process_alive
 
 # 「启动服务」被闸门挡住时的两行话：同一个原因，按钮的悬停气泡说一句、动作路径被
 # 别的入口踩到时在输出栏说一句。判据只有一处（`core.models.chat_start_block`），
-# 措辞也只有一处，免得两个入口各念一套（坑 128）。
+# 措辞也只有一处，免得两个入口各念一套（坑 128）。文案在 texts.py 的 SVC_BLOCK_*。
 START_BLOCK_TIP = {
-    BLOCK_ENGINE: "llama 引擎还没就位：在 设置 → 模型文件与引擎 → 引擎管理 里定向或下载。",
-    BLOCK_MODEL: "这台机器上还没有可用的本地文本模型：在 设置 → 模型文件与引擎 里补全或手动定向模型。",
-    BLOCK_STALE: "当前选中的模型文件已经不在了：点顶部模型名重选一个可用的本地文本模型。",
+    BLOCK_ENGINE: texts.SVC_BLOCK_ENGINE_TIP,
+    BLOCK_MODEL: texts.SVC_BLOCK_MODEL_TIP,
+    BLOCK_STALE: texts.SVC_BLOCK_STALE_TIP,
 }
 START_BLOCK_NOTE = {
-    BLOCK_ENGINE: "llama 引擎还没就位（在 设置 → 模型文件与引擎 → 引擎管理 里定向或下载）。",
-    BLOCK_MODEL: "这台机器上还没有可用的本地文本模型（引擎与能聊天的 .gguf 都要就位）。",
-    BLOCK_STALE: "当前选中的模型文件已经不在了（点顶部模型名重选一个可用的本地文本模型）。",
+    BLOCK_ENGINE: texts.SVC_BLOCK_ENGINE_NOTE,
+    BLOCK_MODEL: texts.SVC_BLOCK_MODEL_NOTE,
+    BLOCK_STALE: texts.SVC_BLOCK_STALE_NOTE,
 }
 
 
@@ -49,14 +50,8 @@ class ServiceMixin:
         if not alive:
             return "go"
         ans = messagebox.askyesnocancel(
-            "显存共存确认",
-            "%s需要占用显存，而 llama-server 当前仍在运行（常驻约 3GB）。\n\n"
-            "  是 —— 保持服务开启，直接开始%s\n"
-            "        （显存可能不够导致生成失败，聊天服务不受影响）\n\n"
-            "  否 —— 先停止服务，再%s\n"
-            "        （对话历史保存在本程序里不会丢，之后点「启动服务」可重新加载）\n\n"
-            "  取消 / 关闭本窗口 —— 放弃本次%s，什么都不改\n"
-            % (action, action, action, action))
+            texts.SVC_VRAM_TITLE,
+            texts.SVC_VRAM_BODY % (action, action, action, action))
         if ans is None:
             return "cancel"
         return "go" if ans else "stop"
@@ -67,18 +62,18 @@ class ServiceMixin:
         走同步路径是因为生图/生视频紧接着就要 Popen，必须先把显存腾出来；
         taskkill + 1s 等待与模型换载路径用的是同一套做法。
         """
-        self._append("[服务] 正在停止 llama-server 以释放显存…\n", "meta")
+        self._append(texts.SVC_RELEASING, "meta")
         try:
             stop_server(self.cfg)
             time.sleep(1.0)
         except Exception as e:
-            self._append("[服务] 停止失败：%s\n" % e, "error")
+            self._append(texts.SVC_STOP_FAIL % e, "error")
         _reset_alive_cache()
         self._server_alive_flag = False
         self._server_ready_flag = False
         self._serving_model = None
         self._render_status(False, False)
-        self._append("[服务] 已停止，显存已释放。\n", "meta")
+        self._append(texts.SVC_RELEASED, "meta")
 
     # ---- 性能分级（2026-10-06 W）：加入时的分级提示在 models_ui 扫描侧；
     #      启动这条线只拦「必闪退」档（3 级），弹一次确认、可坚持继续 ----
@@ -98,12 +93,11 @@ class ServiceMixin:
             return True
         self._perf_warned.add(path)
         return messagebox.askyesno(
-            "设备可能带不动这个模型",
-            "%s\n\n（%s）\n\n仍要继续吗？"
-            % (modelreq.LEVEL_TEXT[lvl], need["detail"]))
+            texts.SVC_PERF_TITLE,
+            texts.SVC_PERF_CONFIRM % (modelreq.LEVEL_TEXT[lvl], need["detail"]))
 
     # ---- 服务控制 ----
-    def _start_gate_block(self, action="启动"):
+    def _start_gate_block(self, action=texts.SVC_START):
         """启动引擎前的闸门：这台机器现在能不能把 llama-server 拉起来。
 
         判据只有一处（`core.models.chat_start_block` = 有可用的本地文本模型 + 选中的那个
@@ -116,7 +110,7 @@ class ServiceMixin:
         blk = chat_start_block(self.cfg)
         if not blk:
             return False
-        self._append("\n[服务] 未%s：%s\n"
+        self._append(texts.SVC_NOT_STARTED
                      % (action, START_BLOCK_NOTE.get(blk, START_BLOCK_NOTE[BLOCK_MODEL])),
                      "error")
         return True
@@ -144,8 +138,7 @@ class ServiceMixin:
                     listeners = _listening_pids(int(self.cfg.get("port") or 0))
                     if listeners and getattr(self._proc, "pid", None) not in listeners:
                         self._sq.put(("note",
-                                      "端口 %d 被另一个服务进程占用（响应不是刚启动的这个），"
-                                      "本次启动未接管该端口。"
+                                      texts.SVC_PORT_TAKEN
                                       % int(self.cfg.get("port") or 0)))
                         return False
                 except Exception:
@@ -153,12 +146,11 @@ class ServiceMixin:
                 return True
             # 进程已退出（崩溃 / 参数不兼容）→ 快速失败，不傻等满上限
             if i >= 6 and not server_alive(self.cfg):
-                self._sq.put(("note",
-                              "服务进程已退出（可能是显存不足或该模型与当前 llama.cpp 不兼容）。"))
+                self._sq.put(("note", texts.SVC_PROC_EXITED))
                 return False
             if i - noted >= 12:               # 约每 18~20 秒汇报一次进度
                 noted = i
-                self._sq.put(("note", "仍在加载模型…（大模型首次加载可能需要 1~3 分钟）"))
+                self._sq.put(("note", texts.SVC_STILL_LOADING))
             time.sleep(1.5)
         return False
 
@@ -172,7 +164,7 @@ class ServiceMixin:
                 fn()
             except Exception as e:
                 try:
-                    self._finish_svc(False, "[服务] 服务操作中断：%s" % e, True)
+                    self._finish_svc(False, texts.SVC_INTERRUPTED % e, True)
                 except Exception:
                     self._svc_busy = False      # _finish_svc 自身再出事也绝不卡死按钮
         return wrapped
@@ -192,7 +184,7 @@ class ServiceMixin:
         # 生图模型：按钮已置灰，此处静默返回（不弹窗）
         if self._svc_busy or self.cfg.get("model_kind") == "image":
             return
-        if self._start_gate_block("重启" if self._server_alive_flag else "启动"):
+        if self._start_gate_block(texts.SVC_RESTART if self._server_alive_flag else texts.SVC_START):
             return
         if self._server_alive_flag:
             self.restart_server()
@@ -211,15 +203,14 @@ class ServiceMixin:
         # 中间任何一步意外抛错都必须走一次 _finish_svc，否则按钮永久置灰。
         # worker 本体另有 _svc_guard 兜；这里只护"还没来得及开线程"的窗口。
         try:
-            self._append("\n[服务] 正在启动 %s（GPU 层数 %d），加载约需十几秒到几分钟…\n"
+            self._append(texts.SVC_STARTING
                          % (display_name(self.cfg, self.cfg["model"]), current_ngl(self.cfg)), "meta")
             ctx = ctx_for(self.cfg, agent=agent)
             kv = estimate_kv_gb(self.cfg, ctx=ctx)
             if kv:
-                scene = "agent" if agent else "主页面"
-                warn = ("（显存部分偏高，若启动失败请降低 context 或 GPU 层数）"
-                        if kv["vram"] > 4 else "")
-                self._append("[服务] %s场景 context=%d，KV cache 预估：共 %.1fGB（显存 %.1f / 内存 %.1f）%s\n"
+                scene = "agent" if agent else texts.SVC_SCENE_MAIN
+                warn = (texts.SVC_VRAM_HIGH if kv["vram"] > 4 else "")
+                self._append(texts.SVC_KV_EST
                              % (scene, ctx, kv["total"], kv["vram"], kv["ram"], warn), "meta")
 
             def work():
@@ -227,36 +218,35 @@ class ServiceMixin:
                 try:
                     self._proc = start_server(self.cfg, ctx)
                 except Exception as e:
-                    self._finish_svc(False, "[服务] 启动失败: " + str(e), True)
+                    self._finish_svc(False, texts.SVC_START_FAIL_RAW + str(e), True)
                     return
                 ok = self._wait_ready()
-                self._finish_svc(ok, "[服务] 就绪，可以开始对话。"
+                self._finish_svc(ok, texts.SVC_READY
                                  if ok else
-                                 "[服务] 启动失败或超时——请检查模型路径与参数（设置 → 服务参数）。",
+                                 texts.SVC_START_FAIL_TIMEOUT,
                                  not ok, launched=launched)
             threading.Thread(target=self._svc_guard(work), daemon=True).start()
         except Exception as e:
-            self._finish_svc(False, "[服务] 服务操作中断：%s" % e, True)
+            self._finish_svc(False, texts.SVC_INTERRUPTED % e, True)
 
     def stop_server_async(self):
         if self._svc_busy or not self._server_alive_flag:
             return
         self._begin_svc()
         try:
-            self._append("\n[服务] 正在停止…\n", "meta")
+            self._append(texts.SVC_STOPPING, "meta")
 
             def work():
                 killed = stop_server(self.cfg)
                 if killed:
-                    self._finish_svc(False, "[服务] 服务已停止。")
+                    self._finish_svc(False, texts.SVC_STOPPED)
                 else:
                     # 如实说"没动手"：句柄与端口反查都没找到目标时，一个进程都没杀（R-01）
                     self._finish_svc(False,
-                                     "[服务] 没有找到监听端口 %d 的服务进程（未做任何操作）。"
-                                     % int(self.cfg.get("port") or 0))
+                                     texts.SVC_NO_PROC % int(self.cfg.get("port") or 0))
             threading.Thread(target=self._svc_guard(work), daemon=True).start()
         except Exception as e:
-            self._finish_svc(False, "[服务] 服务操作中断：%s" % e, True)
+            self._finish_svc(False, texts.SVC_INTERRUPTED % e, True)
 
     def restart_server(self, agent=False):
         if self._svc_busy:
@@ -265,8 +255,8 @@ class ServiceMixin:
             return
         self._begin_svc()
         try:
-            self._append("\n[服务] 正在重启（%s场景，应用最新服务参数）…\n"
-                         % ("agent" if agent else "主页面"), "meta")
+            self._append(texts.SVC_RESTARTING
+                         % ("agent" if agent else texts.SVC_SCENE_MAIN), "meta")
 
             def work():
                 stop_server(self.cfg)
@@ -277,22 +267,22 @@ class ServiceMixin:
                 try:
                     self._proc = start_server(self.cfg, ctx_for(self.cfg, agent=agent))
                 except Exception as e:
-                    self._finish_svc(False, "[服务] 启动失败: " + str(e), True)
+                    self._finish_svc(False, texts.SVC_START_FAIL_RAW + str(e), True)
                     return
                 ok = self._wait_ready()
-                self._finish_svc(ok, "[服务] 重启完成，可以继续对话。"
+                self._finish_svc(ok, texts.SVC_RESTARTED
                                  if ok else
-                                 "[服务] 启动失败或超时——请检查模型路径与参数（设置 → 服务参数）。",
+                                 texts.SVC_START_FAIL_TIMEOUT,
                                  not ok, launched=launched)
             threading.Thread(target=self._svc_guard(work), daemon=True).start()
         except Exception as e:
-            self._finish_svc(False, "[服务] 服务操作中断：%s" % e, True)
+            self._finish_svc(False, texts.SVC_INTERRUPTED % e, True)
 
     def on_start_restart_agent(self):
         """本地模型 API 页的服务按钮：以 agent 场景的 context 启动/重启。"""
         if self._svc_busy or self.cfg.get("model_kind") == "image":
             return
-        if self._start_gate_block("重启" if self._server_alive_flag else "启动"):
+        if self._start_gate_block(texts.SVC_RESTART if self._server_alive_flag else texts.SVC_START):
             return
         if self._server_alive_flag:
             self.restart_server(agent=True)

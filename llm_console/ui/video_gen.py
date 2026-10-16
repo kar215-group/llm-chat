@@ -8,6 +8,7 @@ import threading
 import time
 from tkinter import ttk, messagebox
 
+from .. import texts
 from ..core import cloudjobs, config, media, providers, sdprofile
 from . import theme
 from ..core.media import (build_video_cmd, resolve_video_files, salvage_products,
@@ -27,23 +28,16 @@ class VideoGenMixin:
         sd = self.cfg.get("sd_dir", "")
         cli = os.path.join(sd, "sd-cli.exe")
         if not os.path.isfile(cli):
-            self._append("\n[提示] 未找到生视频引擎 %s（生图与生视频共用 sd.cpp）—— "
-                         "请在 设置 → 本地模型 → 生视频（sd.cpp） 里把「sd.cpp 目录」指向你部署的 sd.cpp，"
-                         "并确认该版本支持视频生成。\n"
-                         % (cli or "（还没填目录）"), "error")
+            self._append(texts.VID_NO_ENGINE % (cli or texts.MEDIA_NO_DIR), "error")
             return
         files = resolve_video_files(self.cfg)
         # 人工指定的配套件没找到：逐条点名（R-20，与生图预检同一口径/同一句文案）
         for _s, _w in (files.get("manual_missing") or []):
-            self._append("\n[提示] 人工指定的%s没找到：%s——没有自动换成别的文件；"
-                         "请在设置里改正路径，或把该项清空改回自动发现。\n"
-                         % (sdprofile.slot_name(_s), _w), "error")
+            self._append(texts.MEDIA_MANUAL_MISSING % (sdprofile.slot_name(_s), _w), "error")
         if files["missing"]:
-            self._append("\n[提示] 视频链路组件不全，缺：\n  · %s\n\n"
-                         "把文件放进「%s」后重新发一次即可（文件名可在 设置 → 本地模型 → 生视频（sd.cpp） 里指定）。"
-                         "扩散主体、文本编码器、视频 VAE 缺一不可，VAE 最容易漏下。"
+            self._append(texts.VID_MISSING
                          % ("\n  · ".join(files["missing"]),
-                            self.cfg.get("video_model_dir") or "生视频"), "error")
+                            self.cfg.get("video_model_dir") or texts.VID_DEFAULT_DIR), "error")
             return
         # "必闪退"档启动确认（2026-10-06）：摆在消费输入框之前，点否一个字都不丢（坑 133）
         if not self._confirm_fatal_perf(files["diffusion"], "video", files=files):
@@ -87,11 +81,11 @@ class VideoGenMixin:
         self.input.delete("1.0", "end")
         self.clear_attachment()
         self._opt_star_refresh()      # 消费后立即重算星星显隐（R-89）
-        self._append("\n【你】\n" + prompt + "\n", "user")
+        self._append(texts.MEDIA_USER_PREFIX + prompt + "\n", "user")
         prompt = self._doc_merge(prompt, doc)
         if ref_img and os.path.isfile(ref_img):
             self._append_image(ref_img, max_w=320)
-            self._append("[图生视频] 首帧：%s（引擎会自动裁剪缩放到 %s）\n"
+            self._append(texts.VID_FIRST_FRAME
                          % (os.path.basename(ref_img), size), "meta")
         self._vid_gen += 1
         mygen = self._vid_gen
@@ -135,7 +129,7 @@ class VideoGenMixin:
             self._vid_busy = False
             self._vid_proc = None
             self._set_busy_ui(False)
-            self._append("[错误] 启动生视频引擎失败: %s\n" % e, "error")
+            self._append(texts.VID_START_FAIL % e, "error")
             return
         threading.Thread(target=self._vid_reader,
                          args=(self._vid_proc, mygen, self._vid_log, self._vid_t0,
@@ -160,17 +154,13 @@ class VideoGenMixin:
             dur = int(self.cfg.get("cloud_video_duration", 5) or 5)
         except Exception:
             dur = 5
-        res = str(self.cfg.get("cloud_video_resolution", "") or "").strip() or "（服务端默认）"
+        res = str(self.cfg.get("cloud_video_resolution", "") or "").strip() or texts.VID_CONFIRM_RES_DEFAULT
         return messagebox.askyesno(
-            "云端生视频",
-            "要提交一条云端视频任务吗？\n\n"
-            "  模型：%s\n  时长：%d 秒\n  分辨率：%s\n  费用：%s\n\n"
-            "注意：任务开始运行后就取消不掉了，只能不再等它——"
-            "结果之后仍可以在对话里点「取回」拿回来。\n"
-            "确认提交吗？" % (model or "（未选模型）",
-                             dur, res,
-                             providers.media_price_note(provider, providers.KIND_VIDEO,
-                                                        dur, model)))
+            texts.VID_CONFIRM_TITLE,
+            texts.VID_CONFIRM_BODY % (model or texts.VID_CONFIRM_NO_MODEL,
+                                     dur, res,
+                                     providers.media_price_note(provider, providers.KIND_VIDEO,
+                                                                dur, model)))
 
     def _start_cloud_video(self, prompt, doc=None):
         provider = providers.current_provider(self.cfg)
@@ -178,14 +168,13 @@ class VideoGenMixin:
         model = sp[1] if sp else ""
         err = cloud_media.check(self.cfg, provider, model, "video")
         if err:
-            self._append("\n[云端生视频] %s\n" % err, "error")
+            self._append(texts.VID_CLOUD_ERR % err, "error")
             return
         outdir = config.cloud_media_dir(self.cfg, "video")
         try:
             os.makedirs(outdir, exist_ok=True)
         except Exception as e:
-            self._append("\n[云端生视频] 存放目录建不出来：%s\n"
-                         "  目录可在 设置 → 云端模型 → 生图 / 生视频 里改。\n" % e, "error")
+            self._append(texts.MEDIA_CLOUD_DIR_FAIL % (texts.VID_CLOUD_TAG, e), "error")
             return
         # 扩展名只是默认值：真实落地名由产物 URL 决定（服务端给的是 MP4）
         out = os.path.join(outdir, time.strftime("vid_%Y%m%d_%H%M%S") + ".mp4")
@@ -193,13 +182,13 @@ class VideoGenMixin:
         self.input.delete("1.0", "end")
         self.clear_attachment()
         self._opt_star_refresh()      # 同 _start_chat_video（R-89）
-        self._append("\n【你】\n" + prompt + "\n", "user")
+        self._append(texts.MEDIA_USER_PREFIX + prompt + "\n", "user")
         prompt = self._doc_merge(prompt, doc)
         gen, q, stop = self._cloud_begin("video")
         self._cloud_pid = str(provider["id"])
         self._vid_out = out
         self._vid_log = config.media_log_path(self.cfg, out)
-        self._update_vid_progress_line("☁ 提交云端任务… %s（%s）"
+        self._update_vid_progress_line(texts.VID_CLOUD_SUBMITTING
                                        % (providers.short_of(model),
                                           provider.get("name") or ""))
         threading.Thread(target=self._cloud_video_worker,
@@ -237,9 +226,9 @@ class VideoGenMixin:
                     ratio=str(self.cfg.get("cloud_video_ratio", "") or ""),
                     negative=str(self.cfg.get("cloud_video_negative", "") or ""),
                     seed=_int("vid_seed", -1), log_path=log_path,
-                    title="云端生视频提交 %s" % model)
+                    title=texts.VID_CLOUD_SUBMIT_TITLE % model)
                 if not r["ok"]:
-                    emit(("line", "[ERROR] 提交失败：%s" % r["error"]))
+                    emit(("line", texts.VID_SUBMIT_FAIL % r["error"]))
                     q.put(("exit", 1, gen))
                     return
                 tid = r["task_id"]
@@ -271,7 +260,7 @@ class VideoGenMixin:
                 status = str(res.get("status") or "failed")
                 cloudjobs.update_job(tid, status=status,
                                      error=str(res.get("error") or "")[:600])
-                emit(("line", "[ERROR] %s" % (res.get("error") or "云端生视频失败")))
+                emit(("line", "[ERROR] %s" % (res.get("error") or texts.VID_CLOUD_FAILED)))
             q.put(("exit", 0 if paths else 1, gen))
         except Exception as e:
             # 兜底（2026-10-11 排查报告）：worker 体内任何未捕获异常都不许吞掉 exit
@@ -363,21 +352,21 @@ class VideoGenMixin:
             if not getattr(self, "_vid_saw_decode", False) and total == steps and cur <= total:
                 self._vid_phase = "sample"
                 self._update_vid_progress_line(
-                    "🎬 生成中… %d/%d 步 · %ds" % (cur, total, elapsed))
+                    texts.VID_PROG_STEPS % (cur, total, elapsed))
             elif total != steps:
                 # 权重加载（如 551/551、8/8）与采样后的附加阶段（如 9/9）也打印 x/y，
                 # 都不是采样进度：只报阶段与耗时，**绝不把原始进度条 |####…| 倒进聊天区**
                 self._update_vid_progress_line(
-                    "🎬 %s… %d/%d · %ds"
-                    % ("后处理" if getattr(self, "_vid_phase", "load") == "sample"
-                       else "加载模型权重", cur, total, elapsed))
+                    texts.VID_PROG_OTHER
+                    % (texts.VID_PHASE_POST if getattr(self, "_vid_phase", "load") == "sample"
+                       else texts.VID_PHASE_LOAD, cur, total, elapsed))
             return
         if "decoding" in low or "saving video" in low or "writing" in low:
             self._vid_saw_decode = True
-            self._update_vid_progress_line("🎬 解码并封装视频… %ds" % elapsed)
+            self._update_vid_progress_line(texts.VID_DECODING % elapsed)
         elif "out of memory" in low or "oom" in low or "error" in low or "failed" in low:
             # 引擎报错不再只留在进度行里：直接固化显示，避免用户以为还在跑
-            self._update_vid_progress_line("🎬 引擎输出：%s" % line.strip()[:120])
+            self._update_vid_progress_line(texts.VID_ENGINE_LINE % line.strip()[:120])
 
     def _handle_vid_exit(self, rc, gen):
         if gen != self._vid_gen:
@@ -400,7 +389,7 @@ class VideoGenMixin:
             self.chat.configure(state="disabled")
         self._vid_mark = None           # 收尾即封死 mark（同生图侧；R-13）
         if cancelled:
-            self._append("🎬 [已取消生成]\n", "meta")
+            self._append(texts.VID_CANCELLED, "meta")
             self._append("────────────────\n", "meta")
             return
         if rc == 0 and out and os.path.isfile(out):
@@ -408,34 +397,34 @@ class VideoGenMixin:
             # 所以结果形态与生图对齐但换成按钮行：聊天流里给位置 + 两个入口
             self.chat.configure(state="normal")
             try:
-                self.chat.insert("end", "\n🎬 视频已生成 · 耗时 %ds\n" % elapsed, "meta")
-                btn = theme.button(self.chat, text="打开视频",
+                self.chat.insert("end", texts.VID_DONE % elapsed, "meta")
+                btn = theme.button(self.chat, text=texts.VID_OPEN,
                                  command=lambda p=out: os.startfile(p))
                 self.chat.window_create("end", window=btn)
                 self.chat.insert("end", "  ", "meta")
-                btn2 = theme.button(self.chat, text="打开所在文件夹",
+                btn2 = theme.button(self.chat, text=texts.MEDIA_OPEN_FOLDER,
                                   command=lambda p=out: self._open_containing(p))
                 self.chat.window_create("end", window=btn2)
-                self.chat.insert("end", "\n🎬 已保存：%s（%.1f MB）\n"
+                self.chat.insert("end", texts.VID_SAVED
                                  % (out, os.path.getsize(out) / 1048576.0), "meta")
                 self.chat.insert("end", "────────────────\n", "meta")
                 self.chat.see("end")
             except Exception as e:
-                self._append("🎬 [回显失败: %s] 视频已保存：%s\n" % (e, out), "error")
+                self._append(texts.VID_ECHO_FAIL % (e, out), "error")
             self.chat.configure(state="disabled")
         else:
             # 退出码 0 却没有文件，和真的失败是两回事：分开说，否则排查方向会被带偏。
             # 云端那条把"引擎"换成"云端"，因为这时候原话来自服务商的回包而不是 stdout。
-            src = "云端" if cloud else "引擎"
-            why = ("%s正常返回但没有写出文件" % src if rc == 0 else "退出码 %s" % rc)
+            src = texts.MEDIA_SRC_CLOUD if cloud else texts.MEDIA_SRC_ENGINE
+            why = (texts.VID_NO_FILE % src if rc == 0 else texts.MEDIA_RC % rc)
             # 前导换行：进度行被整行删掉时连它自带的换行一起没了（与生图同一处修）
-            self._append("\n🎬 生成失败（%s）。\n" % why, "error")
+            self._append(texts.VID_FAIL % why, "error")
             tail = [x for x in self._vid_tail if x][-6:]
-            self._append("%s最后输出：\n  " % src + "\n  ".join(tail) + "\n" if tail
-                         else "（没有可用来判断原因的输出）\n", "error")
+            self._append(texts.MEDIA_LAST_OUTPUT % src + "\n  ".join(tail) + "\n" if tail
+                         else texts.VID_NO_OUTPUT, "error")
             log = getattr(self, "_vid_log", "")
             if log and os.path.isfile(log):
-                self._append("完整日志：%s\n" % log, "meta")
+                self._append(texts.MEDIA_LOG_PATH % log, "meta")
             self._append("────────────────\n", "meta")
 
     def _cancel_chat_video(self):

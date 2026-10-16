@@ -17,6 +17,7 @@ import time
 
 from ..core.config import APP_DIR
 from .remote_audit import audit
+from .. import texts
 
 # ---- 二期上传面（参考图 / 遮罩）----
 UPLOAD_DIR = os.path.join(APP_DIR, "remote_uploads")
@@ -92,24 +93,24 @@ def upload_store(device_id, kind, raw):
     遮罩（kind="mask"）落盘前经 `_mask_to_gray_png` 归一成 L 模式 PNG。
     """
     if kind not in UPLOAD_KINDS:
-        return "", "上传类型不对。"
+        return "", texts.RUP_L1
     if not raw:
-        return "", "这个文件是空的，换一张。"
+        return "", texts.RUP_L1_2
     if len(raw) > UPLOAD_MAX_BYTES:
-        return "", ("这张图 %.1fMB，超过 %dMB 上限——先压小一点。"
+        return "", (texts.RUP_CAT
                     % (len(raw) / 1048576.0, UPLOAD_MAX_BYTES // 1048576))
     ext = _sniff_image_ext(raw)
     if not ext:
-        return "", "这个文件不是支持的图片（认 PNG / JPG / WEBP / BMP）。"
+        return "", texts.RUP_L1_3
     if kind == "mask":
         norm = _mask_to_gray_png(raw)
         if norm is None:
-            return "", "这个文件不是支持的图片（认 PNG / JPG / WEBP / BMP）。"
+            return "", texts.RUP_L1_3
         raw, ext = norm, ".png"
     with _uploads_lock:
         _sweep_uploads()
         if len(_uploads) >= UPLOAD_MAX_FILES:
-            return "", "附件太多了，删几张再传。"
+            return "", texts.RUP_L1_4
         name = _pysecrets.token_hex(8) + ext
         try:
             os.makedirs(UPLOAD_DIR, exist_ok=True)
@@ -120,7 +121,7 @@ def upload_store(device_id, kind, raw):
             # 原话（含本机绝对路径与用户名）只进本机审计，不回给手机端（坑 209⑥）
             audit("upload", device_id, False, "save failed: %s: %s"
                   % (type(e).__name__, e))
-            return "", "附件存不下来：电脑端的磁盘或权限有问题，请在电脑端看一下。"
+            return "", texts.RUP_L1_5
         _uploads[name] = {"device_id": device_id, "kind": kind,
                           "ts": time.time(), "path": path}
     audit("upload", device_id, True, "%s %dB" % (kind, len(raw)))
@@ -141,7 +142,7 @@ def upload_paths(device_id, names, kind):
             if (not u or u["kind"] != kind
                     or (device_id != "local" and u["device_id"] != device_id)
                     or not os.path.isfile(u["path"])):
-                return [], "附件已过期，重新选一次。"
+                return [], texts.RUP_L1_6
             out.append(u["path"])
     return out, ""
 

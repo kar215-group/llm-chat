@@ -14,6 +14,8 @@
     （坑 150；清单由 `core.diagnose.guide_missing` 生成，判据只在那儿一处）。
 """
 
+from .. import texts
+
 WELCOME = "welcome"
 
 
@@ -27,14 +29,13 @@ def steps(app, missing=None):
     if missing:
         # W 2026-10-05：这一屏逐条列出三条路（原来只列 llama 与云端，只想生图的用户被
         # 催去下对话引擎）。每行一句"就绪 / 缺什么"，末行给两处指路。
-        body = ["三条路，挑一条配好就能用："]
-        body += ["· %s" % m["title"] for m in missing[:3]]
-        body.append("补齐都在 设置 里：本地 → 模型文件与引擎；云端 → 服务商与密钥。")
-        title = "开始之前"
+        body = [texts.GUIDE_WELCOME_PATHS]
+        body += [texts.GUIDE_WELCOME_PATH_ITEM % m["title"] for m in missing[:3]]
+        body.append(texts.GUIDE_WELCOME_GO_SETTINGS)
+        title = texts.GUIDE_WELCOME_TITLE_MISSING
     else:
-        body = ["这个工作台把本地大模型对话、生图生视频和给 agent 用的接口装进一个窗口。",
-                "环境检查没发现阻塞问题，往下看怎么用。"]
-        title = "欢迎使用 LLM Chat"
+        body = [texts.GUIDE_WELCOME_OK_1, texts.GUIDE_WELCOME_OK_2]
+        title = texts.GUIDE_WELCOME_TITLE_OK
     out.append({"target": None, "title": title, "body": body})
 
     def add(attr, title, body, pad=6):
@@ -46,28 +47,21 @@ def steps(app, missing=None):
         out.append({"target": w, "target_name": attr, "title": title, "body": body,
                     "pad": pad})
 
-    add("status_label", "先看这盏灯",
-        ["○ 未运行 / ◐ 加载中 / ● 运行中 —— 灯说什么就是什么。",
-         "首次加载大模型可能要 1~3 分钟，那期间输入框仍可以打字。"])
+    add("status_label", texts.GUIDE_LAMP_TITLE,
+        [texts.GUIDE_LAMP_1, texts.GUIDE_LAMP_2])
 
-    add("model_btn", "点这里换模型",
-        ["菜单里本地模型与云端模型混排，云端的带「（云）」后缀。",
-         "换模型只是选一下，不会在这里花几秒去加载权重。",
-         "选〔生图〕〔生视频〕的模型时不用启动服务，直接发提示词就出片。"])
+    add("model_btn", texts.GUIDE_MODEL_TITLE,
+        [texts.GUIDE_MODEL_1, texts.GUIDE_MODEL_2, texts.GUIDE_MODEL_3])
 
-    add("input", "在这儿说话",
-        ["Enter 发送，Shift+Enter 换行。",
-         "如果服务加载的不是你刚选的模型，它会自动换载再把这句话发出去，上下文不丢。"])
+    add("input", texts.GUIDE_INPUT_TITLE,
+        [texts.GUIDE_INPUT_1, texts.GUIDE_INPUT_2])
 
-    add("attach_btn", "📎 挂图片或文件",
-        ["图片要这个模型配了视觉投影器（mmproj）才收；文本文件本地云端都能发。",
-         "被拦下时提示会说明原因，并给你一次「仍按支持图片处理」的出口。"])
+    add("attach_btn", texts.GUIDE_ATTACH_TITLE,
+        [texts.GUIDE_ATTACH_1, texts.GUIDE_ATTACH_2])
 
-    add("start_btn", "启动 / 停止服务",
-        ["只有聊天需要启动服务；生图、生视频和所有云端模型都不经过它。",
-         "显存不够时会先问你怎么办，不会偷偷排队把机器卡死。"])
+    add("start_btn", texts.GUIDE_START_TITLE,
+        [texts.GUIDE_START_1, texts.GUIDE_START_2])
 
-    add("btn_settings", "出问题去哪里",
-        ["设置 → 关于与诊断：重看这段引导；点「诊断」跑一键诊断、复制诊断报告。",
-         "先跑一次诊断，比自己猜快得多。"])
+    add("btn_settings", texts.GUIDE_HELP_TITLE,
+        [texts.GUIDE_HELP_1, texts.GUIDE_HELP_2])
     return out

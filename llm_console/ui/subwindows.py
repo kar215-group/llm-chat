@@ -27,6 +27,7 @@ import threading
 import tkinter as tk
 from tkinter import ttk, messagebox
 
+from .. import texts
 from ..core import (crashlog, diagnose, providers, secrets, selfupdate, updater)
 from ..core.config import APP_DIR, APP_VERSION, CONFIG_PATH, save_config
 from . import theme
@@ -41,13 +42,13 @@ def open_file(path, what):
     """
     p = str(path or "").strip()
     if not p or not os.path.isfile(p):
-        messagebox.showinfo(what, "还没有这个文件：\n  %s\n\n没有过异常退出是好事。" % p)
+        messagebox.showinfo(what, texts.SWF_FILE_MISSING % p)
         return False
     try:
         os.startfile(p)                     # 交给系统默认程序（.log 一般是记事本）
         return True
     except Exception as e:
-        messagebox.showwarning(what, "打不开 %s：\n  %s" % (p, e))
+        messagebox.showwarning(what, texts.SWF_FILE_OPEN_FAIL % (p, e))
         return False
 
 
@@ -92,21 +93,19 @@ class SubWindowMixin:
         win = tk.Toplevel(host)
         _wins[kind] = win
         win.withdraw()          # 先藏起来，摆正了再显示（否则左上角闪一下）
-        win.title("成本估算 · 云端%s" % _kind_name)
+        win.title(texts.COST_TITLE % _kind_name)
         theme.style_toplevel(win)   # 经典背景 + 标题栏两件套（坑 186）
         win.geometry("620x470")
         win.minsize(560, 420)
         win.transient(host)
-        _unit_words = {providers.KIND_TEXT: "元/千token（输入 + 输出合并按这一个均价估）",
-                       providers.KIND_IMAGE: "元/张",
-                       providers.KIND_VIDEO: "元/秒 或 元/条（同一家两种都有，按模型选）"}
+        _unit_words = {providers.KIND_TEXT: texts.COST_UNIT_TEXT,
+                       providers.KIND_IMAGE: texts.COST_UNIT_IMAGE,
+                       providers.KIND_VIDEO: texts.COST_UNIT_VIDEO}
         _effect_words = {
-            providers.KIND_TEXT: "填了就在每轮「用量」行尾附一句预估费用",
-            providers.KIND_IMAGE: "填了就在提交前把价格打进对话流",
-            providers.KIND_VIDEO: "填没填都会在提交前弹一次确认，填了就报金额"}
-        ttk.Label(win, text="云端%s的单价按模型记，只用于费用预估（%s）。"
-                            "不填就明说「以账单为准」，不编数字。%s。"
-                            "点「写入单价」立即生效，不需要到底部「保存」。"
+            providers.KIND_TEXT: texts.COST_EFFECT_TEXT,
+            providers.KIND_IMAGE: texts.COST_EFFECT_IMAGE,
+            providers.KIND_VIDEO: texts.COST_EFFECT_VIDEO}
+        ttk.Label(win, text=texts.COST_INTRO
                   % (_kind_name, _unit_words[kind], _effect_words[kind]),
                   wraplength=580, justify="left", font=("Microsoft YaHei UI", 9)).pack(
             side="top", fill="x", padx=14, pady=(12, 4))
@@ -145,9 +144,9 @@ class SubWindowMixin:
             got = providers.price_table(providers.get_provider(cfg, pid_var.get()), kind)
             lst.configure(state="normal")
             lst.delete("1.0", "end")
-            lst.insert("1.0", "（这家一个都没填）" if not got else "")
+            lst.insert("1.0", texts.COST_LIST_EMPTY if not got else "")
             for m in sorted(got):
-                lst.insert("end", "%s    %g 元/%s\n" % (m, got[m]["price"], got[m]["unit"]))
+                lst.insert("end", texts.COST_LIST_LINE % (m, got[m]["price"], got[m]["unit"]))
             lst.configure(state="disabled")
 
         def load_price():
@@ -180,9 +179,9 @@ class SubWindowMixin:
                 pid_var.set("")
             if not refresh_models():
                 status_var.set(
-                    "这家还没有勾进菜单的%s模型：先去「选择模型」里加进来%s。"
+                    texts.COST_NO_MODEL
                     % (_kind_name,
-                       "（媒体模型名要用「直接加入」）"
+                       texts.COST_MEDIA_HINT
                        if kind != providers.KIND_TEXT else ""))
             else:
                 status_var.set("")
@@ -191,26 +190,26 @@ class SubWindowMixin:
         def write_price(clear=False):
             pid, model = pid_var.get(), model_var.get()
             if not pid or not model:
-                status_var.set("先把服务商和模型都选上。")
+                status_var.set(texts.COST_PICK_FIRST)
                 return
             per, unit = 0.0, ""
             if not clear:
                 try:
                     per = float(str(price_var.get()).strip())
                 except Exception:
-                    status_var.set("单价要填数字（元）。要清掉就点「清除该模型单价」。")
+                    status_var.set(texts.COST_NEED_NUMBER)
                     return
                 if per <= 0:
-                    status_var.set("单价要大于 0。要清掉就点「清除该模型单价」。")
+                    status_var.set(texts.COST_NEED_POSITIVE)
                     return
                 unit = unit_var.get()
             if not providers.set_price(cfg, pid, model, per, unit, kind):
-                status_var.set("这个服务商不在了，没写进去。")
+                status_var.set(texts.COST_PROVIDER_GONE)
                 return
             save_config(cfg)
             refresh_list()
-            status_var.set("已清除「%s」的单价。" % model if per <= 0
-                           else "已写入「%s」%.4g 元/%s。" % (model, per, unit))
+            status_var.set(texts.COST_CLEARED % model if per <= 0
+                           else texts.COST_WRITTEN % (model, per, unit))
 
         def pick_model(*_a):
             load_price()
@@ -218,16 +217,16 @@ class SubWindowMixin:
 
         combo_p.bind("<<ComboboxSelected>>", pick_provider)
         combo_m.bind("<<ComboboxSelected>>", pick_model)
-        lrow("服务商", combo_p)
-        lrow("模型", combo_m)
-        lrow("单价（元）", theme.entry(body, textvariable=price_var, width=10))
-        lrow("计费单位", combo_u)
-        lrow("已填的模型", lst)
+        lrow(texts.COST_LBL_PROVIDER, combo_p)
+        lrow(texts.COST_LBL_MODEL, combo_m)
+        lrow(texts.COST_LBL_PRICE, theme.entry(body, textvariable=price_var, width=10))
+        lrow(texts.COST_LBL_UNIT, combo_u)
+        lrow(texts.COST_LBL_FILLED, lst)
         btns = ttk.Frame(body)
         lrow("", btns)
-        theme.button(btns, text="写入单价", width=12,
+        theme.button(btns, text=texts.COST_BTN_WRITE, width=12,
                    command=lambda: write_price(False)).pack(side="left")
-        theme.button(btns, text="清除该模型单价", width=14,
+        theme.button(btns, text=texts.COST_BTN_CLEAR, width=14,
                    command=lambda: write_price(True)).pack(side="left", padx=(8, 0))
         ttk.Label(btns, textvariable=status_var, style="Hint.TLabel", wraplength=230,
                   justify="left", font=("Microsoft YaHei UI", 9)).pack(side="left", padx=(10, 0))
@@ -236,7 +235,7 @@ class SubWindowMixin:
             combo_p.current(0)
             pick_provider()
         else:
-            status_var.set("还没有可用的服务商。")
+            status_var.set(texts.COST_NO_PROVIDER)
         widgets.center_on(win, host)   # 摆到触发它的设置页正中，别落在屏幕左上角
         return win
 
@@ -262,7 +261,7 @@ class SubWindowMixin:
 
         win = tk.Toplevel(host)
         win.withdraw()          # 先藏起来，摆正了再显示（否则左上角闪一下）
-        win.title("诊断")
+        win.title(texts.DIAGW_TITLE)
         theme.style_toplevel(win)   # 经典背景 + 标题栏两件套（坑 186）
         # 6 行路径 + 16 行结果框 + 一排四个按钮：实测 660 高会把按钮那排裁掉半截
         # （截图量出来的，不是估的），给到 740 才全露出来
@@ -286,28 +285,26 @@ class SubWindowMixin:
                                                  sticky="w", pady=3)
 
         frozen = bool(getattr(sys, "frozen", False))
-        infolab("运行方式", "下载的 exe（双击即用）" if frozen
-                else "源码运行（python / pythonw）")
-        infolab("程序位置", APP_DIR)
-        infolab("配置文件", CONFIG_PATH)
-        infolab("密钥文件", os.path.join(APP_DIR, "secrets.json"))
-        infolab("运行库", "%s%s · Tk %s" % ("自带 Python " if frozen else "Python ",
+        infolab(texts.DIAGW_LBL_RUN, texts.DIAGW_RUN_EXE if frozen
+                else texts.DIAGW_RUN_SRC)
+        infolab(texts.DIAGW_LBL_APP, APP_DIR)
+        infolab(texts.DIAGW_LBL_CONFIG, CONFIG_PATH)
+        infolab(texts.DIAGW_LBL_SECRETS, os.path.join(APP_DIR, "secrets.json"))
+        infolab(texts.DIAGW_LBL_RUNTIME, "%s%s · Tk %s" % (texts.DIAGW_RUNTIME_BUNDLED if frozen else "Python ",
                                             sys.version.split()[0], tk.TkVersion))
-        infolab("错误日志", crashlog.log_path() if os.path.isfile(crashlog.log_path())
-                else "还没有异常记录")
+        infolab(texts.DIAGW_LBL_ERRLOG, crashlog.log_path() if os.path.isfile(crashlog.log_path())
+                else texts.DIAGW_NO_ERRORS)
 
         status = tk.StringVar(value="")
         box = theme.tint(tk.Text(body, height=16, width=52, font=("Microsoft YaHei UI", 9),
                                  state="normal", wrap="word",
                                  background=theme.c("bg"), foreground=theme.c("body")),
                          fg="body", bg="bg")
-        box.insert("1.0", "点「一键诊断」检查这台机器：引擎在不在、模型放对没有、"
-                          "目录能不能写、端口有没有被占。\n"
-                          "这一步只读本地信息 —— 不联网、不启动推理引擎、不碰显卡。")
+        box.insert("1.0", texts.DIAGW_INTRO)
         box.configure(state="disabled")
         i = rows["i"]
         rows["i"] += 1
-        ttk.Label(body, text="诊断结果", width=8, anchor="w").grid(
+        ttk.Label(body, text=texts.DIAGW_LBL_RESULT, width=8, anchor="w").grid(
             row=i, column=0, sticky="nw", padx=(0, 8), pady=(10, 3))
         box.grid(row=i, column=1, columnspan=2, sticky="w")
 
@@ -322,7 +319,7 @@ class SubWindowMixin:
         def do_diag():
             """诊断放线程里跑（nvidia-smi 最坏会等 10 秒，不能冻住界面），
             结果经 _ui_q 回主线程画 —— 子线程绝不碰控件（坑 54）。"""
-            status.set("正在检查…")
+            status.set(texts.DIAGW_CHECKING)
             cfg = dict(self.cfg)
             mine = bool(getattr(self, "proxy", None) and
                         getattr(self.proxy, "httpd", None))
@@ -343,15 +340,15 @@ class SubWindowMixin:
                 try:
                     rs = diagnose.run_checks(cfg, proxy_running=mine, server_running=srv)
                     f, w = diagnose.summary(rs)
-                    head = ("共 %d 项：%s\n\n" % (
+                    head = (texts.DIAGW_HEAD % (
                         len(rs),
-                        "没发现阻塞问题（%d 项提醒）" % w if not f
-                        else "%d 项需要处理、%d 项提醒" % (f, w)))
+                        texts.DIAGW_ALL_OK % w if not f
+                        else texts.DIAGW_HAVE_FAIL % (f, w)))
                     txt = head + diagnose.render_text(rs)
                     self._ui_q.put(lambda: (show(txt), merge_gpu(), status.set(
-                        "有 %d 项需要处理" % f if f else "没发现阻塞问题")))
+                        texts.DIAGW_STATUS_FAIL % f if f else texts.DIAGW_STATUS_OK)))
                 except Exception as e:
-                    msg = "诊断没跑完：%s: %s" % (type(e).__name__, e)
+                    msg = texts.DIAGW_RUN_FAIL % (type(e).__name__, e)
                     self._ui_q.put(lambda: status.set(msg))
             threading.Thread(target=work, daemon=True).start()
 
@@ -360,9 +357,9 @@ class SubWindowMixin:
             try:
                 win.clipboard_clear()
                 win.clipboard_append(body_txt)
-                status.set("诊断报告已复制到剪贴板，贴给别人就能求助。")
+                status.set(texts.DIAGW_COPIED)
             except Exception as e:
-                status.set("复制失败（%s）——可以改用「保存诊断报告」。" % e)
+                status.set(texts.DIAGW_COPY_FAIL % e)
 
         def save_report():
             body_txt = box.get("1.0", "end").strip()
@@ -370,17 +367,18 @@ class SubWindowMixin:
             try:
                 with open(path, "w", encoding="utf-8") as f:
                     f.write(body_txt + "\n")
-                status.set("已保存：%s" % path)
+                status.set(texts.DIAGW_SAVED % path)
             except Exception as e:
-                status.set("保存失败：%s: %s" % (type(e).__name__, e))
+                status.set(texts.DIAGW_SAVE_FAIL % (type(e).__name__, e))
 
         bf = ttk.Frame(body)
         i = rows["i"]
         rows["i"] += 1
         bf.grid(row=i, column=1, columnspan=2, sticky="w", pady=(8, 0))
-        for text, fn in (("一键诊断", do_diag), ("复制诊断报告", copy_report),
-                         ("保存诊断报告", save_report),
-                         ("打开错误日志", lambda: open_file(crashlog.log_path(), "错误日志"))):
+        for text, fn in ((texts.DIAGW_BTN_RUN, do_diag), (texts.DIAGW_BTN_COPY, copy_report),
+                         (texts.DIAGW_BTN_SAVE, save_report),
+                         (texts.DIAGW_BTN_ERRLOG,
+                          lambda: open_file(crashlog.log_path(), texts.DIAGW_ERRLOG_TITLE))):
             theme.button(bf, text=text, command=fn).pack(side="left", padx=(0, 6))
         ttk.Label(body, textvariable=status, style="Hint.TLabel", wraplength=520,
                   justify="left", font=("Microsoft YaHei UI", 9)).grid(
@@ -416,7 +414,7 @@ class SubWindowMixin:
 
         win = tk.Toplevel(host)
         win.withdraw()          # 先藏起来，摆正了再显示（否则左上角闪一下）
-        win.title("发现新版本")
+        win.title(texts.UPDW_TITLE)
         theme.style_toplevel(win)   # 经典背景 + 标题栏两件套（坑 186）
         W, H = 620, 520         # 一版正式公告约 18 行，560x430 装不下（滚动条是兜底不是常态）
         win.geometry("%dx%d" % (W, H))
@@ -434,14 +432,14 @@ class SubWindowMixin:
 
         top = ttk.Frame(win)
         top.pack(side="top", fill="x", padx=14, pady=(12, 4))
-        head_lab = ttk.Label(top, text="发现新版本：%s" % (info.get("name") or tag),
+        head_lab = ttk.Label(top, text=texts.UPDW_HEAD % (info.get("name") or tag),
                              font=("Microsoft YaHei UI", 11, "bold"))
         head_lab.pack(side="top", anchor="w")
         ver_lab = ttk.Label(
-            top, text="本机 %s → 新版 %s　·　发布于 %s　·　%s"
+            top, text=texts.UPDW_VERSIONS
             % (updater.display_version(info.get("current") or APP_VERSION),
                updater.display_version(tag),
-               info.get("published") or "日期未知",
+               info.get("published") or texts.UPDW_DATE_UNKNOWN,
                updater.channel_label(ch)),
             style="Note.TLabel", font=("Microsoft YaHei UI", 9),
             wraplength=524, justify="left")
@@ -480,12 +478,11 @@ class SubWindowMixin:
             notes.configure(state="disabled")
             notes.see("1.0")
 
-        _show_notes(info.get("notes") or "（这个 Release 没写说明）")
+        _show_notes(info.get("notes") or texts.UPDW_NO_NOTES)
 
         bar_var = tk.DoubleVar(value=0.0)
         bar = ttk.Progressbar(body, maximum=100.0, variable=bar_var, length=320)
-        status = tk.StringVar(value="下载用的是 GitHub 发布包，先校验再替换，"
-                                   "替换前会再确认一次。")
+        status = tk.StringVar(value=texts.UPDW_HINT)
         st_lab = ttk.Label(body, textvariable=status, style="Note.TLabel",
                            wraplength=520, justify="left",
                            font=("Microsoft YaHei UI", 9))
@@ -494,16 +491,15 @@ class SubWindowMixin:
         bar.pack_forget()       # 进下载阶段才显示；提示阶段放着只是占一行
 
         if exe_here is None:
-            ttk.Label(body, text="这是源码运行：自动更新只对下载的 exe 生效，"
-                                 "更新请 git pull。", style="WarnDim.TLabel",
+            ttk.Label(body, text=texts.UPDW_SOURCE_RUN, style="WarnDim.TLabel",
                       font=("Microsoft YaHei UI", 9)).pack(
                 side="top", anchor="w", pady=(6, 0))
 
         btns = ttk.Frame(win)
         btns.pack(side="bottom", fill="x", padx=14, pady=(0, 12))
-        btn_go = theme.button(btns, text="立即更新", width=12)
+        btn_go = theme.button(btns, text=texts.UPDW_GO, width=12)
         btn_go.pack(side="right")
-        btn_stop = theme.button(btns, text="暂不", width=10)
+        btn_stop = theme.button(btns, text=texts.UPDW_LATER, width=10)
         btn_stop.pack(side="right", padx=(0, 8))
         if exe_here is None:
             btn_go.configure(state="disabled")
@@ -520,26 +516,26 @@ class SubWindowMixin:
                 import webbrowser
                 if webbrowser.open(url):
                     return
-                raise RuntimeError("浏览器没响应")
+                raise RuntimeError(texts.UPDW_BROWSER_NORESP)
             except Exception as e:
                 messagebox.showinfo(
-                    "打开发布页",
-                    "浏览器没打开（%s）。\n把这个地址粘贴到浏览器里也一样：\n%s" % (e, url))
+                    texts.UPDW_OPEN_PAGE_TITLE,
+                    texts.UPDW_OPEN_FAIL % (e, url))
 
         def _copy_link():
             url = state.get("url") or _release_page_url()
             try:
                 win.clipboard_clear()
                 win.clipboard_append(url)
-                status.set("已复制%s，可以在浏览器或下载工具里取回来：%s"
-                           % ("安装包直链" if state.get("url") else "发布页地址", url))
+                status.set(texts.UPDW_COPIED
+                           % (texts.UPDW_COPY_DIRECT if state.get("url") else texts.UPDW_COPY_PAGE, url))
                 st_lab.configure(style="Note.TLabel")
             except Exception as e:
-                status.set("复制失败（%s）—— 地址：%s" % (e, url))
+                status.set(texts.UPDW_COPY_FAIL % (e, url))
 
-        theme.button(btns, text="打开发布页", width=11,
+        theme.button(btns, text=texts.UPDW_BTN_PAGE, width=11,
                    command=_open_release_page).pack(side="left")
-        theme.button(btns, text="复制下载链接", width=13,
+        theme.button(btns, text=texts.UPDW_BTN_COPYLINK, width=13,
                    command=_copy_link).pack(side="left", padx=(8, 0))
 
         def _record_dismiss():
@@ -577,9 +573,9 @@ class SubWindowMixin:
             bar_var.set(0.0)
             status.set(why)
             st_lab.configure(style="Note.TLabel")
-            btn_go.configure(text="立即更新",
+            btn_go.configure(text=texts.UPDW_GO,
                              state="normal" if exe_here else "disabled")
-            btn_stop.configure(text="暂不", state="normal")
+            btn_stop.configure(text=texts.UPDW_LATER, state="normal")
 
         def _dl_progress(txt, pct):
             if not win.winfo_exists():
@@ -595,11 +591,10 @@ class SubWindowMixin:
             if not win.winfo_exists():
                 _cleanup_staging()      # 窗口没等到这一刻就关了：包不留下
                 return
-            status.set("下载完成，校验通过。更新需要关闭当前程序"
-                       "（正在运行的服务也会一并停止），然后自动打开新版本。")
+            status.set(texts.UPDW_READY)
             st_lab.configure(style="OkLit.TLabel")
-            btn_go.configure(text="确认并更新", state="normal")
-            btn_stop.configure(text="取消", state="normal")
+            btn_go.configure(text=texts.UPDW_CONFIRM_GO, state="normal")
+            btn_stop.configure(text=texts.BTN_CANCEL, state="normal")
 
         def _apply():
             """确认并更新：换 exe → 拉新 → 写哨兵 → 正常退出收尾。
@@ -612,16 +607,13 @@ class SubWindowMixin:
             state["stage"] = "apply"
             btn_go.configure(state="disabled")
             btn_stop.configure(state="disabled")
-            status.set("正在替换程序文件…")
+            status.set(texts.UPDW_APPLYING)
             lock, lwhy = selfupdate.try_lock(exe_here)
             if lock is None:
                 if lwhy == "locked":
-                    _restore_prompt("另一个正在运行的实例在更新。请先关掉它，"
-                                    "或等它更新完重开程序。")
+                    _restore_prompt(texts.UPDW_LOCKED)
                 else:
-                    _restore_prompt("建不了更新锁（%s）—— 程序所在文件夹多半写不进去。"
-                                    "把本程序挪到可写的普通文件夹再试，或到发布页手动下载。"
-                                    % lwhy)
+                    _restore_prompt(texts.UPDW_LOCK_FAIL % lwhy)
                 return
             try:
                 ok, why = selfupdate.apply_update(state["exe"], exe_here, expect=expect)
@@ -631,8 +623,7 @@ class SubWindowMixin:
                 ok2, why2 = selfupdate.launch(exe_here)
                 if not ok2:
                     selfupdate.rollback(exe_here)
-                    _restore_prompt("新程序没能启动（%s），已回滚到旧版，本机版本没有动。"
-                                    % why2)
+                    _restore_prompt(texts.UPDW_LAUNCH_FAIL % why2)
                     return
                 selfupdate.mark_updated(exe_here)
                 _cleanup_staging()
@@ -645,13 +636,12 @@ class SubWindowMixin:
             必须跟着实际要装的对上（2026-10-06），别让用户"装的是 A′、看到的是 A"。"""
             if not win.winfo_exists():
                 return
-            head_lab.configure(text="发现新版本：%s" % (dl.get("name") or dl.get("tag") or tag))
+            head_lab.configure(text=texts.UPDW_HEAD % (dl.get("name") or dl.get("tag") or tag))
             ver_lab.configure(
-                text="本机 %s → 新版 %s　·　发布于 %s　·　%s\n"
-                     "（弹窗之后线上又发了新版本，现在装的是上面这个最新的）"
+                text=texts.UPDW_VERSIONS_NEWER
                 % (updater.display_version(info.get("current") or APP_VERSION),
                    updater.display_version(dl.get("tag") or tag),
-                   dl.get("published") or "日期未知",
+                   dl.get("published") or texts.UPDW_DATE_UNKNOWN,
                    updater.channel_label(ch)))
             if dl.get("notes"):
                 _show_notes(dl["notes"])    # 公告也得跟着换成实际要装的那一版
@@ -659,11 +649,11 @@ class SubWindowMixin:
         def _start_download():
             state["stage"] = "download"
             btn_go.configure(state="disabled")
-            btn_stop.configure(text="取消下载", state="normal")
+            btn_stop.configure(text=texts.UPDW_BTN_CANCEL_DL, state="normal")
             bar.pack(side="top", anchor="w", pady=(6, 0))
             bar_var.set(0.0)
             st_lab.configure(style="Note.TLabel")
-            status.set("正在向 GitHub 查询安装包…")
+            status.set(texts.UPDW_QUERYING)
 
             def work():
                 try:
@@ -681,13 +671,12 @@ class SubWindowMixin:
                 if need > 0:
                     import tempfile
                     for where, d, factor in (
-                            ("临时文件夹（%TEMP%）", tempfile.gettempdir(), 2.2),
-                            ("程序所在文件夹", os.path.dirname(exe_here or "") or None, 1.2)):
+                            (texts.UPDW_TEMP_DIR, tempfile.gettempdir(), 2.2),
+                            (texts.UPDW_APP_DIR, os.path.dirname(exe_here or "") or None, 1.2)):
                         ok_d, free = selfupdate.disk_ok(d, int(need * factor))
                         if not ok_d:
                             self._ui_q.put(lambda w=(
-                                "磁盘空间不够：装这次更新大约要 %.0f MB，%s 只剩 %.0f MB。"
-                                "清出一些空间再试，或到发布页手动下载。"
+                                texts.UPDW_DISK_FAIL
                                 % (need * factor / 1048576.0, where, free / 1048576.0)):
                                 _restore_prompt(w))
                             return
@@ -711,7 +700,7 @@ class SubWindowMixin:
                                                   digest=dl["digest"])
                 if not ok:
                     selfupdate.cleanup(staging)
-                    self._ui_q.put(lambda w=("已取消下载。" if stop_flag.is_set() else why):
+                    self._ui_q.put(lambda w=(texts.UPDW_CANCELLED if stop_flag.is_set() else why):
                                    _restore_prompt(w))
                     return
                 exe_path, werr = selfupdate.extract_exe(zip_path, staging)
@@ -740,18 +729,18 @@ class SubWindowMixin:
         def _stop():
             if state["stage"] == "download":
                 stop_flag.set()         # worker 收到就停：删 .part、清目录、回"已取消"
-                status.set("正在取消…")
+                status.set(texts.UPDW_CANCELLING)
             elif state["stage"] == "confirm":
                 # 下载完又不想装：清暂存回提示态，本机版本没动
                 _cleanup_staging()
                 state["stage"] = "prompt"
                 bar.pack_forget()
                 bar_var.set(0.0)
-                status.set("已取消，本机版本没有动。下载的文件已清掉。")
+                status.set(texts.UPDW_CANCEL_CONFIRM)
                 st_lab.configure(style="Note.TLabel")
-                btn_go.configure(text="立即更新",
+                btn_go.configure(text=texts.UPDW_GO,
                                  state="normal" if exe_here else "disabled")
-                btn_stop.configure(text="暂不", state="normal")
+                btn_stop.configure(text=texts.UPDW_LATER, state="normal")
             else:
                 _close()
 

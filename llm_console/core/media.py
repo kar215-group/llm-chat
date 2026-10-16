@@ -24,6 +24,7 @@ import threading
 from . import config, sdprofile
 from .models import (IMAGE_SUBDIR, _is_mmproj, find_vl_pairs, scan_models,
                      scan_video_models, video_scan_dirs)
+from .. import texts
 
 # 配套槽位拼进命令行的先后顺序。Qwen-Image 的实测 argv 是 vae→llm，保持不变；
 # 视频侧反过来（llm→vae→audio-vae）也是为了与 MiniMax-H3 改造前的 argv 逐字相同。
@@ -133,7 +134,7 @@ def _local_out_dir(cfg, key, sub):
     d = str((cfg or {}).get(key, "") or "").strip()
     if d:
         return d if os.path.isabs(d) else os.path.join(config.APP_DIR, d)
-    return os.path.join(config.output_root(cfg), "本地", sub)
+    return os.path.join(config.output_root(cfg), texts.MED_A1, sub)
 
 
 def img_out_dir(cfg):
@@ -208,7 +209,7 @@ def resolve_img_files(cfg, diffusion_path=None, family=None):
     if isinstance(family, (tuple, list)) and len(family) == 3:
         fid, basis, why = family
     elif family:
-        fid, basis, why = str(family), "user", "调用方指定了模型族"
+        fid, basis, why = str(family), "user", texts.MED_L2
     else:
         fid, basis, why = family_of(cfg, diffusion_path, "image", "img_family")
     folders = _folders_for(cfg, diffusion_path, include_models_dir=False)
@@ -233,7 +234,7 @@ def _note_with_manual(why, files):
     mm = files.get("manual_missing") or []
     if not mm:
         return why
-    add = "；".join("人工指定的%s没找到：%s" % (sdprofile.slot_name(s), w)
+    add = "；".join(texts.MED_CAT % (sdprofile.slot_name(s), w)
                    for s, w in mm)
     return (why + "｜" + add) if why else add
 
@@ -254,7 +255,7 @@ def plan_ref_images(refs, mode):
     if str(mode or "") == sdprofile.EDIT_MODE_REF:
         return paths, 0, ""
     if len(paths) > 1:
-        return paths[:1], len(paths) - 1, "底图重绘一次只认一张，多出来的没送进去"
+        return paths[:1], len(paths) - 1, texts.MED_L2_2
     return paths, 0, ""
 
 
@@ -272,7 +273,7 @@ def plan_ref_images(refs, mode):
 # ⚠ **兜底是 heavy = `img_strength`（现状值）**：实测只有这一档真会执行提示词，
 #   判不出来时替用户降到 0.65 = 既改不动指令、又把原图改坏（两头不讨好）。
 STRENGTH_TIERS = ("light", "mid", "heavy")
-TIER_LABEL = {"light": "小改", "mid": "普通改", "heavy": "大幅"}
+TIER_LABEL = {"light": texts.MED_DLIGHT, "mid": texts.MED_DMID, "heavy": texts.MED_DHEAVY}
 TIER_DEFAULT = "heavy"
 # 档位 → 取值用的配置键。heavy 复用既有键 `img_strength`：出厂值不变 ⇒ 老配置零迁移、
 # 判不出的提示词行为与分档上线前逐字一致。
@@ -283,42 +284,42 @@ TIER_KEY = {"light": "img_strength_light", "mid": "img_strength_mid",
 # 裁决顺序（`match_strength_tier`）：明示保结构 → 小改；重画/换风格 → 大幅；
 # 再质感修复 → 小改；再属性/局部 → 普通改；都没有 → 大幅（兜底）。
 # 一句话取向：**"别改坏"优先于"改到位"** —— W 报的原始症状就是小改被重绘成另一张图。
-_ST_KEEP = ("保持不变", "保持原样", "保持原图", "保持构图", "保持主体", "主体不变",
-            "人物不变", "背景不变", "其余不变", "其它不变", "其他不变", "剩下的不变",
-            "不要改变", "不要改", "别改变", "不要动", "都别动", "别动", "不动",
-            "原样", "只改", "只换", "仅改", "保留原", "维持原",
+_ST_KEEP = (texts.MED_L0, texts.MED_L1, texts.MED_L2_3, texts.MED_L3, texts.MED_L4, texts.MED_L5,
+            texts.MED_L6, texts.MED_L7, texts.MED_L8, texts.MED_L9, texts.MED_L10, texts.MED_L11,
+            texts.MED_L12, texts.MED_L13, texts.MED_L14, texts.MED_L15, texts.MED_L16, texts.MED_L17, texts.MED_L18,
+            texts.MED_L19, texts.MED_L20, texts.MED_L21, texts.MED_L22, texts.MED_L23, texts.MED_L24,
             "keep unchanged", "keep the same", "unchanged", "don't change",
             "do not change", "keep everything", "everything else stays",
             "rest unchanged", "keep composition", "same composition", "preserve",
             "only change", "nothing else")
 # 只动画质 / 修图：主体与构图都要留
 _ST_LIGHT = (
-    "变清晰", "更清晰", "清晰一点", "清晰化", "提高清晰度", "清晰度", "高清", "超清",
-    "锐化", "去模糊", "消除模糊", "去雾", "变清楚", "去噪", "降噪", "减少噪点",
-    "去颗粒", "噪点", "修复", "翻新", "老照片", "提高分辨率", "超分", "放大",
-    "补光", "调亮", "变亮", "调色", "校色", "白平衡", "上色", "增强", "画质",
-    "美颜", "磨皮", "去瑕疵", "修补", "补全",
+    texts.MED_L0_2, texts.MED_L1_2, texts.MED_L2_4, texts.MED_L3_2, texts.MED_L4_2, texts.MED_L5_2, texts.MED_L6_2, texts.MED_L7_2,
+    texts.MED_L8_2, texts.MED_L9_2, texts.MED_L10_2, texts.MED_L11_2, texts.MED_L12_2, texts.MED_L13_2, texts.MED_L14_2, texts.MED_L15_2,
+    texts.MED_L16_2, texts.MED_L17_2, texts.MED_L18_2, texts.MED_L19_2, texts.MED_L20_2, texts.MED_L21_2, texts.MED_L22_2, texts.MED_L23_2,
+    texts.MED_L24_2, texts.MED_L25, texts.MED_L26, texts.MED_L27, texts.MED_L28, texts.MED_L29, texts.MED_L30, texts.MED_L31, texts.MED_L32,
+    texts.MED_L33, texts.MED_L34, texts.MED_L35, texts.MED_L36, texts.MED_L37,
     "sharpen", "deblur", "unblur", "denoise", "reduce noise", "upscale",
     "super resolution", "enhance quality", "restore", "old photo", "colorize",
 )
 # 改属性 / 局部增删：构图要留，但确实动了画面内容
 _ST_MID = (
-    "抠图", "抠出来", "提取主体", "去背景", "去掉背景", "移除背景", "删除背景",
-    "换背景", "背景换", "换个背景", "透明背景", "换成透明", "透明底", "去底",
-    "白底", "纯白背景", "纯色背景",
+    texts.MED_L0_3, texts.MED_L1_3, texts.MED_L2_5, texts.MED_L3_3, texts.MED_L4_3, texts.MED_L5_3, texts.MED_L6_3,
+    texts.MED_L7_3, texts.MED_L8_3, texts.MED_L9_3, texts.MED_L10_3, texts.MED_L11_3, texts.MED_L12_3, texts.MED_L13_3,
+    texts.MED_L14_3, texts.MED_L15_3, texts.MED_L16_3,
     "remove background", "background removal", "cut out", "cutout",
     "transparent background", "white background",
-    "去掉", "去除", "删掉", "移除", "擦除", "去水印", "去字幕", "去马赛克",
-    "去反光", "去阴影", "加上", "添加一个", "补一个",
+    texts.MED_L23_3, texts.MED_L24_3, texts.MED_L25_2, texts.MED_L26_2, texts.MED_L27_2, texts.MED_L28_2, texts.MED_L29_2, texts.MED_L30_2,
+    texts.MED_L31_2, texts.MED_L32_2, texts.MED_L33_2, texts.MED_L34_2, texts.MED_L35_2,
     "remove watermark", "remove object", "erase", "inpaint", "touch up",
 )
 _ST_HEAVY = (
-    "重新画", "重画", "再画一张", "改画", "大幅修改", "大改", "彻底改", "完全改成",
-    "换成另一种", "换个风格", "换风格", "改风格", "风格化", "动漫风", "变成动漫",
-    "卡通风", "卡通化", "油画", "水彩", "水墨", "像素风", "手绘", "素描", "插画风",
-    "赛博朋克", "3d渲染", "三维渲染", "换成夜景", "变成夜景", "换个场景", "换场景",
-    "变成另一个人", "换个脸", "换装", "变成年轻", "变成老年", "以这张为参考",
-    "参考这张重新", "重新生成",
+    texts.MED_L0_4, texts.MED_L1_4, texts.MED_L2_6, texts.MED_L3_4, texts.MED_L4_4, texts.MED_L5_4, texts.MED_L6_4, texts.MED_L7_4,
+    texts.MED_L8_4, texts.MED_L9_4, texts.MED_L10_4, texts.MED_L11_4, texts.MED_L12_4, texts.MED_L13_4, texts.MED_L14_4,
+    texts.MED_L15_4, texts.MED_L16_4, texts.MED_L17_3, texts.MED_L18_3, texts.MED_L19_3, texts.MED_L20_3, texts.MED_L21_3, texts.MED_L22_3, texts.MED_L23_4,
+    texts.MED_L24_4, texts.MED_L25_3, texts.MED_L26_3, texts.MED_L27_3, texts.MED_L28_3, texts.MED_L29_3, texts.MED_L30_3,
+    texts.MED_L31_3, texts.MED_L32_3, texts.MED_L33_3, texts.MED_L34_3, texts.MED_L35_3, texts.MED_L36_2,
+    texts.MED_L37_2, texts.MED_L38,
     "redraw", "repaint", "re-imagine", "reimagine", "restyle", "stylize",
     "anime style", "cartoon style", "oil painting", "watercolor", "pixel art",
     "in the style of", "convert to", "transform into", "different scene",
@@ -401,16 +402,16 @@ def edit_strength(cfg, prompt, tier=""):
         tier = ""
     if not bool(cfg.get("img_strength_auto", True)):
         if not tier:
-            return TIER_DEFAULT, strength_value(cfg, TIER_DEFAULT), "固定档"
+            return TIER_DEFAULT, strength_value(cfg, TIER_DEFAULT), texts.MED_L2_7
     elif not tier:
         tier, hit, clash = match_strength_tier(prompt)
-        why = "自动·%s" % TIER_LABEL[tier]
+        why = texts.MED_CAT_2 % TIER_LABEL[tier]
         if clash and tier == "light":
-            why += "（提示词也要重画）"
+            why += texts.MED_AUG
         elif not hit and tier == TIER_DEFAULT:
-            why += "（判不出改动幅度）"
+            why += texts.MED_AUG_2
         return tier, strength_value(cfg, tier), why
-    return tier, strength_value(cfg, tier), "手动指定·%s" % TIER_LABEL[tier]
+    return tier, strength_value(cfg, tier), texts.MED_CAT_3 % TIER_LABEL[tier]
 
 
 def mask_hint(tier, auto=True, has_mask=False):
@@ -424,7 +425,7 @@ def mask_hint(tier, auto=True, has_mask=False):
     """
     if has_mask or str(tier or "") != "light" or not auto:
         return ""
-    return "｜只改局部：点图片涂遮罩"
+    return texts.MED_RET
 
 
 # ------------------------------------------------- EXIF 方向：交给引擎前拍平一份
@@ -881,9 +882,9 @@ def vid_out_dir(cfg):
 
 
 def _video_component_missing_label(name):
-    return {"diffusion": "视频扩散主体（MiniMax-H3 量化 GGUF）",
-            "llm": "文本编码器（sd-cli --llm）",
-            "vae": "视频 VAE（sd-cli --vae）"}[name]
+    return {"diffusion": texts.MED_DDIFFUSION,
+            "llm": texts.MED_DLLM,
+            "vae": texts.MED_DVAE}[name]
 
 
 def resolve_video_files(cfg, diffusion_path=None):

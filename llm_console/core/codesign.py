@@ -23,6 +23,7 @@ import re
 import subprocess
 
 from . import selfupdate
+from .. import texts
 
 # 读签名 / 列信任状态 / 写入信任都走本机系统自带的 PowerShell 与 certutil（都随 Windows 分发）
 _TIMEOUT = 60
@@ -59,7 +60,7 @@ def _humanize_tool_output(out, code):
     掩掉、截断到 6 行 / 400 字——certutil / PowerShell 报错会把它们原样倒出来。"""
     s = str(out or "").strip()
     if not s:
-        return "系统工具返回了错误（退出码 %s）。" % code
+        return texts.CS_CAT % code
     s = re.sub(r"(?i)([a-z]:[\\/]users[\\/])[^\\/\s]+", r"\1…", s)
     lines = [ln for ln in s.splitlines() if ln.strip()][:6]
     s = "\n".join(lines)
@@ -141,20 +142,20 @@ def read_cert_detail(exe=None, runner=None):
     try:
         code, out = _run(_read_script(path), runner)
     except Exception as e:                                     # 工具没跑起来
-        return None, "系统工具调不动（%s）" % e
+        return None, texts.CS_CAT_2 % e
     out = (out or "").strip()
     if not out:
-        return None, "系统工具没有任何输出"
+        return None, texts.CS_L1
     if out == _UNSIGNED:
         return None, ""
     if code != 0:
-        return None, "系统工具返回错误（退出码 %s）" % code
+        return None, texts.CS_CAT_3 % code
     try:
         info = json.loads(out)
     except Exception:
-        return None, "结果认不出来（可能被安全策略拦了）"
+        return None, texts.CS_L1_2
     if not isinstance(info, dict) or not info.get("thumbprint"):
-        return None, "结果缺了指纹（可能被安全策略拦了）"
+        return None, texts.CS_L1_3
     info["trusted"] = bool(info.get("trusted"))
     info["trusted_machine"] = bool(info.get("trusted_machine"))
     return info, ""
@@ -177,16 +178,16 @@ def trust(exe=None, runner=None):
     """
     path = exe or self_exe()
     if not path or not os.path.isfile(path):
-        return False, "拿不到本程序自己的 exe（源码运行时没有可签名的文件）。"
+        return False, texts.CS_L1_4
     try:
         code, out = _run(_trust_script(path), runner)
     except Exception as e:                                     # 系统工具没跑起来
-        return False, "调用系统工具失败：%s" % e
+        return False, texts.CS_CAT_4 % e
     out = (out or "").strip()
     if code == 0 and out.endswith("TRUSTED"):
         return True, ""
     if out == _UNSIGNED:
-        return False, "本程序这份 exe 没有签名，没有可列入的证书。"
+        return False, texts.CS_L1_5
     return False, _humanize_tool_output(out, code)
 
 
@@ -199,18 +200,18 @@ def trust_machine(exe=None, runner=None):
     """
     path = exe or self_exe()
     if not path or not os.path.isfile(path):
-        return False, "拿不到本程序自己的 exe（源码运行时没有可签名的文件）。"
+        return False, texts.CS_L1_4
     try:
         code, out = _run(_trust_machine_script(path), runner)
     except Exception as e:
-        return False, "调用系统工具失败：%s" % e
+        return False, texts.CS_CAT_4 % e
     out = (out or "").strip()
     if code == 0 and out.endswith("TRUSTED"):
         return True, ""
     if out == _UNSIGNED:
-        return False, "本程序这份 exe 没有签名，没有可列入的证书。"
+        return False, texts.CS_L1_5
     if out == "UAC-DENIED":
-        return False, "管理员授权被取消，本机信任名单没有改动。"
+        return False, texts.CS_L1_6
     if out == "NOT-INSTALLED":
-        return False, "写入没有生效（可能被系统策略拒绝）。"
+        return False, texts.CS_L1_7
     return False, _humanize_tool_output(out, code)

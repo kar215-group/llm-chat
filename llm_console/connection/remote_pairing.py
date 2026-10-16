@@ -17,14 +17,15 @@ import threading
 import time
 
 from .remote_net import is_loopback
+from .. import texts
 
 PAIR_TTL_S = 300          # 配对码有效期（W 拍板：5 分钟）
 # 同一个配对码被试错这么多次 → **该码作废**（W 2026-10-12 定"按码限次"）
 PAIR_TRIES_MAX = 5
 # W 2026-10-12 逐字批准的两句原话（拟稿：手机端 B / 设置页 A）
-PAIR_BURNED_MSG = "配对码已被试错作废——在电脑端刷新配对码再试。"
-PAIR_BURNED_PAGE = "上一码被连续试错，已作废——点「刷新配对码」重出"
-PAIR_BAD_MSG = "配对码不对或已过期，请在电脑端刷新后重试。"
+PAIR_BURNED_MSG = texts.RPAIR_PAIR_BURNED_MSG
+PAIR_BURNED_PAGE = texts.RPAIR_PAIR_BURNED_PAGE
+PAIR_BAD_MSG = texts.RPAIR_PAIR_BAD_MSG
 
 class PairGate:
     """一次性配对码 + 按码限次的状态机（全部不变量由同一把锁保护）。

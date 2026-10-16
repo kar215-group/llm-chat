@@ -7,6 +7,7 @@ import time
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog, font as tkfont
 
+from .. import texts
 from ..core import capability, localmodels, modelreq, providers, secrets
 from ..core.config import cfg_lock, save_config
 from ..core.hardware import detect_gpu, detect_ram_gb
@@ -22,7 +23,8 @@ from . import widgets
 
 # 「没选上模型」在按钮上的说法。以前这种情况跟着能力判据写成「（纯文本）」，
 # 用户读到的是"这个模型只能纯文本"，而真相是"一个模型都还没得选"。
-NO_MODEL_LABEL = "（无可用模型）"
+# 文案在 texts.MDL_NO_MODEL；此名保留给 app.py 的既有 import。
+NO_MODEL_LABEL = texts.MDL_NO_MODEL
 
 
 def model_missing(cfg):
@@ -112,12 +114,10 @@ class ModelsMixin:
             name = providers.display_of_cloud(self.cfg, got["id"])
         else:
             name = display_name(self.cfg, got["id"])
-        what = {"chat": "点「启动服务」加载后即可对话",
-                "image": "无需启动服务，直接发提示词和参考图（可选）即可",
-                "video": "无需启动服务，直接发提示词和首帧（可选）即可"}[got["kind"]]
-        self._append("\n[模型] 已自动选中第一个可用的模型：%s —— %s。\n"
-                     "（换模型点顶部模型名；这条自动选择只发生一次，删光全部模型后才会再来一次。）\n"
-                     % (name, what), "meta")
+        what = {"chat": texts.MDL_AUTO_CHAT,
+                "image": texts.MDL_AUTO_IMAGE,
+                "video": texts.MDL_AUTO_VIDEO}[got["kind"]]
+        self._append(texts.MDL_AUTO_PICKED % (name, what), "meta")
 
     def _update_model_label(self):
         # 附件条右侧「带图方式」区跟着模型走：仅生图模型显示、置灰态随家族/服务商刷新。
@@ -146,8 +146,8 @@ class ModelsMixin:
             # 以前只看有没有配对的 mmproj，用户手工声明支持（或云端实测过）时标签不改，
             # 现在三种来源都会反映；"未确认"单独标出来，免得和"确认不支持"混为一谈。
             v = capability.resolve(self.cfg)["verdict"]
-            tag = {capability.YES: "", capability.NO: "（纯文本）",
-                   capability.UNKNOWN: "（看图未确认）"}[v]
+            tag = {capability.YES: "", capability.NO: texts.MDL_TAG_TEXT,
+                   capability.UNKNOWN: texts.MDL_TAG_VL_UNKNOWN}[v]
         # 顶栏限长只在这一处生效（core.models.short_alias）：模型菜单那边仍用完整的
         # display_name —— 菜单一行放得下 30 字，砍短反而认不出模型（W 2026-10-03）。
         self.model_var.set(short_alias(display_name(self.cfg, cur)) + tag + "  ▾")
@@ -179,34 +179,24 @@ class ModelsMixin:
         if not chat and not images and not vids and not any(cloud.values()):
             if n_hid:
                 # 文件在，只是都被"不进主菜单"勾掉了 —— 这跟目录是空的完全是两回事
-                messagebox.showinfo("模型列表", "本地模型都在，但都被「不进主菜单」勾掉了：\n"
-                                            "去 设置 → 本地模型 → 模型文件与引擎 里的「管理本地模型…」勾回来。")
+                messagebox.showinfo(texts.MDL_MENU_TITLE, texts.MDL_ALL_HIDDEN)
                 return
             if not (engine_ready(self.cfg, "chat") or engine_ready(self.cfg, "media")):
                 # 一个引擎都没就位：先说引擎，别让用户以为模型没扫到
                 messagebox.showinfo(
-                    "模型列表",
-                    "还没就位的引擎：\n· %s（本地对话）\n· %s（本地生图 / 生视频）\n\n"
-                    "去 设置 → 本地模型 → 模型文件与引擎 点「检查更新 → 更新引擎」装一份，"
-                    "或用「手动定向」指到本机已有的那一份（进那一屏也会自动找一遍）；\n"
-                    "只想用云端：在 设置 → 云端模型 → 服务商与密钥 填密钥，"
-                    "再到「选择模型」里勾上要用那几个。"
-                    % (ENGINE_LABEL["llama"], ENGINE_LABEL["sd"]))
+                    texts.MDL_MENU_TITLE,
+                    texts.MDL_NO_ENGINE % (ENGINE_LABEL["llama"], ENGINE_LABEL["sd"]))
                 return
-            messagebox.showinfo("模型列表", "模型文件夹里没有找到 .gguf 文件：\n%s\n\n"
-                                "可在 设置 → 服务参数 → models_dir 修改目录；"
-                                "生图模型放在其下的「生图」子文件夹，"
-                                "视频组件放在「生视频」子文件夹；"
-                                "云端模型在 设置 → 云端模型 → 服务商与密钥 里配置。" % d)
+            messagebox.showinfo(texts.MDL_MENU_TITLE, texts.MDL_NO_GGUF % d)
             return
         menu = tk.Menu(self.root, tearoff=0, font=("Microsoft YaHei UI", 10))
         cur = os.path.basename(self.cfg["model"])
         cur_id = self.cfg.get("model") if providers.is_cloud(self.cfg) else None
         # 分组里一项都没有时那句提示：引擎没装要说清是引擎的事（不然用户去翻模型目录）
-        no_llm = "" if engine_ready(self.cfg, "chat") else "：还没就位 %s" % ENGINE_LABEL["llama"]
-        no_sd = "" if engine_ready(self.cfg, "sd") else "：还没就位 %s" % ENGINE_LABEL["sd"]
-        no_vid = ("（无：把视频组件的 .gguf 放进模型目录下的「生视频」文件夹）"
-                  if not no_sd else "（无%s）" % no_sd)
+        no_llm = "" if engine_ready(self.cfg, "chat") else texts.MDL_NOT_READY % ENGINE_LABEL["llama"]
+        no_sd = "" if engine_ready(self.cfg, "sd") else texts.MDL_NOT_READY % ENGINE_LABEL["sd"]
+        no_vid = (texts.MDL_EMPTY_VIDEO
+                  if not no_sd else texts.MDL_EMPTY_GROUP % no_sd)
 
         def add_cloud(kind):
             """把某个能力下的云模型追加进当前分组。
@@ -236,9 +226,9 @@ class ModelsMixin:
                 def item(parent, m):
                     mark = "●  " if cur_id == providers.make_cloud_id(pid, m) else "○  "
                     parent.add_command(
-                        label="%s%s（云）%s" % (mark, labels.get(m, m),
+                        label=texts.MDL_CLOUD_ITEM % (mark, labels.get(m, m),
                                             "" if secrets.has_api_key(pid)
-                                            else "（缺密钥）"),
+                                            else texts.MDL_CLOUD_NO_KEY),
                         command=lambda a=pid, b=m, c=kind: self.pick_cloud_model(a, b, c))
 
                 def cascade(key, members, rest=False):
@@ -252,7 +242,7 @@ class ModelsMixin:
                         item(sub, m)
                     hit = any(cur_id == providers.make_cloud_id(pid, m) for m in members)
                     menu.add_cascade(
-                        label="%s%s · %d 个 ▸" % ("●  " if hit else "", key, len(members)),
+                        label=texts.MDL_GROUP_CASCADE % ("●  " if hit else "", key, len(members)),
                         menu=sub)
 
                 if many and flat:
@@ -265,7 +255,7 @@ class ModelsMixin:
 
         # 三组一律给出组头（原来文本组没内容时整组消失，用户看不到"这台机器缺什么"）：
         # 空组用一行「（无：还没就位 …）」占位，与生图 / 生视频那两组同一形状。
-        menu.add_command(label="—— 文本模型 ——", state="disabled")
+        menu.add_command(label=texts.MDL_GROUP_CHAT, state="disabled")
         if chat or cloud[providers.KIND_TEXT]:
             _pairs = find_vl_pairs(self.cfg)
             _rec = self.cfg.get("model_mmproj") or {}
@@ -279,13 +269,13 @@ class ModelsMixin:
                 v = capability.resolve_key(self.cfg, p)["verdict"]
                 menu.add_command(label=mark + display_name(self.cfg, p)
                                  + ("" if v == capability.YES else
-                                    "（纯文本）" if v == capability.NO else "（看图未确认）"),
+                                    texts.MDL_TAG_TEXT if v == capability.NO else texts.MDL_TAG_VL_UNKNOWN),
                                  command=lambda pp=p: self.pick_model(pp))
             add_cloud(providers.KIND_TEXT)
         else:
-            menu.add_command(label="（无%s）" % no_llm, state="disabled")
+            menu.add_command(label=texts.MDL_EMPTY_GROUP % no_llm, state="disabled")
         menu.add_separator()
-        menu.add_command(label="—— 生图模型 ——", state="disabled")
+        menu.add_command(label=texts.MDL_GROUP_IMAGE, state="disabled")
         if images or cloud[providers.KIND_IMAGE]:
             for p in images:
                 b = os.path.basename(p)
@@ -294,9 +284,9 @@ class ModelsMixin:
                                  command=lambda pp=p: self.pick_model(pp))
             add_cloud(providers.KIND_IMAGE)
         else:
-            menu.add_command(label="（无%s）" % no_sd, state="disabled")
+            menu.add_command(label=texts.MDL_EMPTY_GROUP % no_sd, state="disabled")
         menu.add_separator()
-        menu.add_command(label="—— 生视频模型 ——", state="disabled")
+        menu.add_command(label=texts.MDL_GROUP_VIDEO, state="disabled")
         if vids or cloud[providers.KIND_VIDEO]:
             for p in vids:
                 b = os.path.basename(p)
@@ -310,7 +300,7 @@ class ModelsMixin:
             # 一句就够：让人知道菜单是被过滤过的、去哪儿放开（否则"我的模型不见了"
             # 只会让人以为程序扫错了目录）
             menu.add_separator()
-            menu.add_command(label="另有 %d 个未列入 · 设置 → 模型文件与引擎 里可放开" % n_hid,
+            menu.add_command(label=texts.MDL_MORE_HIDDEN % n_hid,
                              state="disabled")
         try:
             menu.tk_popup(self.model_btn.winfo_rootx(),
@@ -329,9 +319,7 @@ class ModelsMixin:
         if self._any_busy():
             # 四标志统一判（坑 19）：生图 / 生视频 / 服务操作期间切模型会让
             # cfg["model"] 与在跑任务、顶栏显示三方错位（文案 2026-10-07 已报 W 复核）
-            messagebox.showinfo("切换模型",
-                                "当前有任务正在进行（生成 / 生图 / 生视频 / 服务操作），\n"
-                                "请等任务结束再切换模型。")
+            messagebox.showinfo(texts.MDL_SWITCH_TITLE, texts.MDL_BUSY_LOCAL)
             return
         disp = display_name(self.cfg, path)
         # 类型判定：以"是否出现在对应扫描列表"为准（视频组件 → 生视频；生图目录内的
@@ -351,21 +339,17 @@ class ModelsMixin:
         self._update_model_label()
         self._render_status(self._server_alive_flag, self._server_ready_flag)
         if kind == "image":
-            self._append("\n[服务] 已选择生图模型：%s。无需启动服务，直接发提示词和"
-                         "参考图（可选）即可；聊天请切回语言模型。\n" % disp, "meta")
+            self._append(texts.MDL_PICK_IMAGE % disp, "meta")
         elif kind == "video":
             missing = resolve_video_files(self.cfg)["missing"]
-            self._append("\n[服务] 已选择生视频模型：%s%s。无需启动服务，直接发提示词和"
-                         "首帧（可选）即可；聊天请切回语言模型。\n"
-                         % (disp, "（还缺：%s）" % "、".join(missing) if missing else ""),
+            self._append(texts.MDL_PICK_VIDEO
+                         % (disp, texts.MDL_VIDEO_MISSING % "、".join(missing) if missing else ""),
                          "meta")
         elif self._server_alive_flag:
-            self._append("\n[服务] 已选择模型：%s（GPU 层数 %d）。服务仍在跑原模型，"
-                         "点「重启服务」即可加载。\n"
+            self._append(texts.MDL_PICK_RUNNING
                          % (disp, current_ngl(self.cfg)), "meta")
         else:
-            self._append("\n[服务] 已选择模型：%s（GPU 层数 %d）。点「启动服务」加载，"
-                         "状态变 ● 运行中 后即可对话。\n"
+            self._append(texts.MDL_PICK_START
                          % (disp, current_ngl(self.cfg)), "meta")
 
     def pick_cloud_model(self, pid, model, kind=None):
@@ -378,9 +362,7 @@ class ModelsMixin:
         if providers.is_cloud(self.cfg) and self.cfg.get("model") == mid:
             return
         if self._any_busy():
-            messagebox.showinfo("切换模型",
-                                "当前有任务正在进行（生成 / 生图 / 生视频 / 服务操作），\n"
-                                "请等任务结束再切换模型。")
+            messagebox.showinfo(texts.MDL_SWITCH_TITLE, texts.MDL_BUSY_LOCAL)
             return
         self.cfg["model"] = mid
         self.cfg["model_provider"] = pid
@@ -395,21 +377,20 @@ class ModelsMixin:
         self._render_status(self._server_alive_flag, self._server_ready_flag)
         p = providers.get_provider(self.cfg, pid) or {}
         key_note = ("" if secrets.has_api_key(pid)
-                    else "（还没填 API Key：设置 → 云端模型 → 服务商与密钥 → 密钥）")
+                    else texts.MDL_KEY_MISSING)
         if kind == providers.KIND_TEXT:
-            note = "无需启动服务，直接发消息即可；不影响正在运行的本地服务。"
+            note = texts.MDL_CLOUD_TEXT_NOTE
         else:
-            what = "生图" if kind == providers.KIND_IMAGE else "生视频"
+            what = texts.CHAT_ACTION_IMG if kind == providers.KIND_IMAGE else texts.CHAT_ACTION_VID
             if not providers.supports_media(p, kind):
-                note = "「%s」没有可用的原生%s接口，发送前会拦下；可改选本地那组。" % (
-                    p.get("name") or pid, what)
+                note = texts.MDL_CLOUD_NO_NATIVE % (p.get("name") or pid, what)
             elif kind == providers.KIND_VIDEO:
                 # 只留一条不能省的：先建单 + 按秒计费 + 运行中取消不掉。
                 # 轮询/下载/24 小时/首帧这些细节都在设置页与 README，别在选模型时罗列
-                note = "异步任务，按秒计费，开始运行后就取消不了（发送前确认一次费用）。"
+                note = texts.MDL_VIDEO_BILLING
             else:
-                note = "无需启动服务，直接发提示词和参考图（可选）即可。"
-        self._append("\n[云端] 已选择 %s · %s%s。%s\n"
+                note = texts.MDL_CLOUD_IMAGE_NOTE
+        self._append(texts.MDL_CLOUD_PICKED
                      % (providers.short_of(model), p.get("name") or pid, key_note, note),
                      "meta")
 
@@ -431,7 +412,7 @@ class ModelsMixin:
         cur_base = os.path.basename(os.path.normpath(str(self.cfg.get("model", "") or "")))
         win = tk.Toplevel(host)
         win.withdraw()          # 先藏起来，摆正了再显示（否则左上角闪一下）
-        win.title("管理本地模型")
+        win.title(texts.MDL_MANAGE_TITLE)
         theme.style_toplevel(win)   # 经典背景 + 标题栏两件套（坑 186）
         # 780 宽（W 2026-10-06）：640 时"勾选框 + 文件名 + 右侧说明"这种长行被压得
         # 只剩截断；窗口行有 fit_text 兜底（<Configure> 按新宽度重裁），加宽即恢复全文
@@ -449,8 +430,8 @@ class ModelsMixin:
         # ---- 顶部说明（定长：状态类 Label 拼长文案会引发整页重排，见坑 92）----
         head = ttk.Frame(win)
         head.pack(fill="x", padx=12, pady=(10, 2))
-        ttk.Label(head, text="不勾选则不显示于主页面").pack(anchor="w")
-        dir_lbl = ttk.Label(head, text="模型目录：%s" % (inv["dir"] or "（未设置）"),
+        ttk.Label(head, text=texts.MDL_MANAGE_HINT).pack(anchor="w")
+        dir_lbl = ttk.Label(head, text=texts.MDL_MANAGE_DIR % (inv["dir"] or texts.MDL_MANAGE_DIR_UNSET),
                             style="Dim.TLabel")
         dir_lbl.pack(anchor="w", fill="x")
         # 路径只占一行的话，长了就被窗口右沿硬切掉（无滚动条）：跟着可用宽度换行
@@ -474,12 +455,12 @@ class ModelsMixin:
             got = [e for e in inv["chat"] if e.get("companion_of")]
             for e in got:
                 var(e["base"]).set(False)
-            note.set("已把 %d 个配套编码器移出菜单（点「确定」生效）" % len(got)
-                     if got else "没有发现配套编码器")
+            note.set(texts.MDL_COMPANIONS_MOVED % len(got)
+                     if got else texts.MDL_NO_COMPANIONS)
 
-        theme.button(bot, text="确定", command=apply).pack(side="right", padx=(6, 0))
-        theme.button(bot, text="取消", command=win.destroy).pack(side="right")
-        theme.button(bot, text="把配套编码器移出菜单",
+        theme.button(bot, text=texts.BTN_OK, command=apply).pack(side="right", padx=(6, 0))
+        theme.button(bot, text=texts.BTN_CANCEL, command=win.destroy).pack(side="right")
+        theme.button(bot, text=texts.MDL_BTN_HIDE_COMPANIONS,
                    command=hide_companions).pack(side="right")
 
         page = widgets.ScrollPage(win)
@@ -557,7 +538,7 @@ class ModelsMixin:
             reserved = _PADX + _CK_PAD + indent
             if info:
                 # 当前选中的模型单独标出来：它被移出菜单后顶栏仍显示它，得让人看出来
-                txt = ("* 当前  " if base == cur_base else "") + info
+                txt = (texts.MDL_CURRENT_MARK if base == cur_base else "") + info
                 ttk.Label(f, text=txt, style="Hint.TLabel").pack(side="right")
                 reserved += _font.measure(txt) + 8
             fit(cb, label, reserved)
@@ -574,7 +555,7 @@ class ModelsMixin:
 
         def sync_note():
             n = sum(1 for v in vars_.values() if not v.get())
-            note.set("将隐藏 %d 个，点「确定」生效" % n if n else "")
+            note.set(texts.MDL_WILL_HIDE % n if n else "")
 
         def sub_rows(parent, e, row_no):
             """生图 / 生视频主体下面的零件行（缩进一格）。
@@ -587,20 +568,20 @@ class ModelsMixin:
             for s in e["slots"]:
                 txt = "%s：%s" % (s["label"], s["base"])
                 if s.get("menu"):
-                    f = row(parent, s["base"], txt, "配套编码器", indent=18)
+                    f = row(parent, s["base"], txt, texts.MDL_COMPANION_KIND, indent=18)
                     f.grid(row=row_no, column=0, sticky="w")
                     row_no += 1
                     continue
                 if s.get("no_chat"):
-                    txt += "（不可对话）"
+                    txt += texts.MDL_NO_CHAT
                 row_no = plain(parent, "○ " + txt,
                                theme.c("warndeep") if s.get("no_chat") else theme.c("softgray"), row_no)
             # 可选件缺失 = 不影响出图出片、只是少个功能：弱提示，不进主页面拦截
             for o in e.get("optional_missing") or []:
-                row_no = plain(parent, "○ 可选：%s" % o["label"], theme.c("faintgray"), row_no)
+                row_no = plain(parent, texts.MDL_OPTIONAL % o["label"], theme.c("faintgray"), row_no)
             # 必需件缺失 = 现在就用不了：主页面发提示词时也会拦下并点名，这里同步列出来
             for miss in e["missing"][:3]:
-                row_no = plain(parent, "○ 缺：%s" % miss, theme.c("errlit"), row_no)
+                row_no = plain(parent, texts.MDL_MISSING % miss, theme.c("errlit"), row_no)
             return row_no
 
         def section(title, entries, kind):
@@ -621,9 +602,9 @@ class ModelsMixin:
             tail.pack(fill="x")
 
             def head_text():
-                return "%s %s · %d 个%s" % (
+                return texts.MDL_SECTION_HEAD % (
                     "▾" if state["open"] else "▸", title, len(entries),
-                    "（隐藏 %d）" % n_hid if n_hid else "")
+                    texts.MDL_HIDDEN_N % n_hid if n_hid else "")
 
             head_lbl.configure(text=head_text())
 
@@ -675,16 +656,16 @@ class ModelsMixin:
                     if opened["v"]:
                         inner.pack_forget()
                         opened["v"] = False
-                        gl.configure(text="▸ %s · %d 个" % (g["key"], len(g["items"])))
+                        gl.configure(text=texts.MDL_GROUP_COLLAPSED % (g["key"], len(g["items"])))
                         return
                     for w in inner.winfo_children():
                         w.destroy()
                     draw_entries(inner, g["items"])
                     inner.pack(fill="x")
                     opened["v"] = True
-                    gl.configure(text="▾ %s · %d 个" % (g["key"], len(g["items"])))
+                    gl.configure(text=texts.MDL_GROUP_EXPANDED % (g["key"], len(g["items"])))
 
-                gl.configure(text="▸ %s · %d 个" % (g["key"], len(g["items"])))
+                gl.configure(text=texts.MDL_GROUP_COLLAPSED % (g["key"], len(g["items"])))
                 gl.bind("<Button-1>", draw_group)
                 if g["key"] == providers.REST_KEY:
                     draw_group()      # 「其他」默认展开：里面本来就是要露面的零散模型
@@ -703,22 +684,22 @@ class ModelsMixin:
                 # 传全路径不传 basename：配对表的键是绝对路径（与模型菜单同一处修，R-26）
                 verdict = capability.resolve_key(
                     self.cfg, e.get("path") or e["base"], kind="chat")["verdict"]
-                bits.append({capability.YES: "看图",
-                             capability.NO: "纯文本"}.get(verdict, "看图未确认"))
+                bits.append({capability.YES: texts.MDL_VL_YES,
+                             capability.NO: texts.MDL_VL_NO}.get(verdict, texts.MDL_VL_UNKNOWN))
                 if e.get("companion_of"):
-                    bits.append("配套：%s" % "、".join(e["companion_of"][:1]))
+                    bits.append(texts.MDL_COMPANION_OF % "、".join(e["companion_of"][:1]))
             elif e["kind"] in ("image", "video"):
-                bits.append(e["family"] or "通用")
+                bits.append(e["family"] or texts.MDL_FAMILY_GENERIC)
                 # 两类缺失分开写：必需件缺 = 现在就用不了；可选件缺 = 只是少个功能
                 if e["missing"]:
-                    bits.append("缺 %d 件·用不了" % len(e["missing"]))
+                    bits.append(texts.MDL_MISS_N % len(e["missing"]))
                 elif e.get("optional_missing"):
-                    bits.append("可选缺 %d" % len(e["optional_missing"]))
+                    bits.append(texts.MDL_OPTIONAL_N % len(e["optional_missing"]))
             return "｜".join(bits)
 
-        section("文本模型", inv["chat"], "chat")
-        section("生图模型", inv["image"], "image")
-        section("生视频模型", inv["video"], "video")
+        section(texts.MDL_SEC_CHAT, inv["chat"], "chat")
+        section(texts.MDL_SEC_IMAGE, inv["image"], "image")
+        section(texts.MDL_SEC_VIDEO, inv["video"], "video")
         sync_note()
         widgets.center_on(win, host)   # 摆到触发它的窗口正中，别落在屏幕左上角
         return win
@@ -776,9 +757,7 @@ class ModelsMixin:
             # GPU 层数按 0（纯 CPU）推算、ctx 由内存预算推导（compute_ngl / auto_ctx
             # 同一口径）。手动路径提一句，自动路径不出声（例行输出不上对话区）。
             if not quiet:
-                self._sq.put(("note",
-                              "未探测到显存容量：新模型按纯 CPU（GPU 层数 0）推算；"
-                              "有独立显卡时可在 设置 → 服务参数 → 显存(GB) 手动填写。"))
+                self._sq.put(("note", texts.MDL_NO_VRAM))
         _d, chat, images = scan_models(self.cfg)
         # 补全结果先攒在内存里，最后**一次性**落盘：原来每补一项就 save_config 一次
         # （首跑 N 个模型 = 2N+1 次写盘，每次一份 .tmp + os.replace）。这一步跑在后台
@@ -803,8 +782,7 @@ class ModelsMixin:
                 _dirty["v"] = True
                 if not quiet:
                     self._sq.put(("note",
-                                  "已识别可看图模型 %s（自动配对视觉投影器）。"
-                                  % display_name(self.cfg, mp)))
+                                  texts.MDL_VL_PAIRED % display_name(self.cfg, mp)))
         for p in chat:
             if self._closing:
                 _flush()
@@ -825,8 +803,7 @@ class ModelsMixin:
                     self._sq.put(("ngl", b, res))
                 else:
                     self._sq.put(("note",
-                                  "模型 %s 无法解析 GGUF 元数据，GPU 层数沿用当前设置"
-                                  "（可手动在设置里指定）。" % display_name(self.cfg, p)))
+                                  texts.MDL_GGUF_FAIL % display_name(self.cfg, p)))
             if need_ctx:
                 ctxs = auto_ctx_for_model(self.cfg, p)
                 if ctxs:
@@ -836,8 +813,7 @@ class ModelsMixin:
                     _dirty["v"] = True
                     if not quiet:
                         self._sq.put(("note",
-                                      "已为模型 %s 匹配 context：主页面 %d / agent %d"
-                                      "（可在设置中调整）。"
+                                      texts.MDL_CTX_MATCHED
                                       % (display_name(self.cfg, p),
                                          ctxs["main"], ctxs["agent"])))
 
@@ -869,9 +845,7 @@ class ModelsMixin:
     def _manual_scan(self, force=False):
         if force:
             if not messagebox.askyesno(
-                    "全部重新计算",
-                    "将清空所有模型的 层数/context/mmproj 自动记录并重新计算，\n"
-                    "手动调整过的值也会被覆盖。确定继续？"):
+                    texts.MDL_RECALC_TITLE, texts.MDL_RECALC_Q):
                 return
             # 清空与落盘持锁：上一轮自动补全线程可能还在跑，裸改嵌套键会与它的
             # 写/序列化竞争（R-12 同款）
@@ -880,8 +854,8 @@ class ModelsMixin:
                           "perf_reported"):
                     self.cfg[k] = {}
                 save_config(self.cfg)
-        self._append("\n[模型管理] 开始%s…\n"
-                     % ("全部重新计算模型参数" if force else "补全缺失项"), "meta")
+        self._append(texts.MDL_MM_BEGIN
+                     % (texts.MDL_RECALC_ALL if force else texts.MDL_RECALC_MISSING), "meta")
         threading.Thread(target=self._scan_and_fill, args=(force,),
                          daemon=True).start()
 
@@ -894,9 +868,7 @@ class ModelsMixin:
         `models.extra_sources`，扫描侧 `scan_models` / `video_scan_dirs` 会认）。
         """
         if self._any_busy():
-            messagebox.showinfo("手动定向模型",
-                                "当前有任务正在进行（生成 / 生图 / 生视频 / 服务操作），\n"
-                                "请等任务结束、服务停止后再加入模型来源。")
+            messagebox.showinfo(texts.MDL_POINT_TITLE, texts.MDL_BUSY_POINT)
             return
         host = self.root
         w = getattr(self, "_settings_win", None)
@@ -907,36 +879,35 @@ class ModelsMixin:
             host = self.root
         d = tk.Toplevel(host)
         d.withdraw()                    # 先藏起来，摆正了再显示（否则左上角闪一下）
-        d.title("手动定向模型")
+        d.title(texts.MDL_POINT_TITLE)
         theme.style_toplevel(d)   # 经典背景 + 标题栏两件套（坑 186）
-        ttk.Label(d, text="加入一个模型来源（只登记路径，不移动文件）",
+        ttk.Label(d, text=texts.MDL_POINT_HEAD,
                   font=("Microsoft YaHei UI", 10, "bold")).pack(
             anchor="w", padx=14, pady=(12, 2))
-        ttk.Label(d, text="文件夹：把里面能聊天的 .gguf 与生图 / 生视频权重一起收进来；\n"
-                          "单个文件：按它自己的类型收进对应清单。",
+        ttk.Label(d, text=texts.MDL_POINT_HINT,
                   style="Hint.TLabel", justify="left",
                   font=("Microsoft YaHei UI", 9)).pack(anchor="w", padx=14)
 
         def _pick_dir():
-            p = filedialog.askdirectory(title="选择模型文件夹", parent=d)
+            p = filedialog.askdirectory(title=texts.MDL_PICK_DIR_TITLE, parent=d)
             if p:
                 d.destroy()
                 self._register_extra_model(p)
 
         def _pick_file():
             p = filedialog.askopenfilename(
-                title="选择模型文件", parent=d,
-                filetypes=[("模型文件", "*.gguf *.safetensors *.sft *.ckpt *.pt *.bin"),
-                           ("全部文件", "*.*")])
+                title=texts.MDL_PICK_FILE_TITLE, parent=d,
+                filetypes=[(texts.MDL_FT_MODEL, "*.gguf *.safetensors *.sft *.ckpt *.pt *.bin"),
+                           (texts.MDL_FT_ALL, "*.*")])
             if p:
                 d.destroy()
                 self._register_extra_model(p)
 
         bf = ttk.Frame(d)
         bf.pack(padx=14, pady=(10, 14), anchor="e")
-        theme.button(bf, text="选择文件夹…", command=_pick_dir).pack(side="left", padx=(0, 6))
-        theme.button(bf, text="选择模型文件…", command=_pick_file).pack(side="left", padx=(0, 6))
-        theme.button(bf, text="取消", command=d.destroy).pack(side="left")
+        theme.button(bf, text=texts.MDL_BTN_PICK_DIR, command=_pick_dir).pack(side="left", padx=(0, 6))
+        theme.button(bf, text=texts.MDL_BTN_PICK_FILE, command=_pick_file).pack(side="left", padx=(0, 6))
+        theme.button(bf, text=texts.BTN_CANCEL, command=d.destroy).pack(side="left")
         widgets.center_on(d, host)
         d.deiconify()
 
@@ -947,14 +918,14 @@ class ModelsMixin:
             return
         lst = list(self.cfg.get("extra_models") or [])
         if p in lst:
-            messagebox.showinfo("手动定向模型", "这个来源已经在列表里了：\n%s" % p)
+            messagebox.showinfo(texts.MDL_POINT_TITLE, texts.MDL_SOURCE_EXISTS % p)
             return
         lst.append(p)
         self.cfg["extra_models"] = lst
         save_config(self.cfg)
-        self._append("\n[模型管理] 已加入模型来源：%s\n" % p, "meta")
-        messagebox.showinfo("手动定向模型",
-                            "已加入：\n%s\n\n文件没有移动 —— 扫描与模型菜单会认它。" % p)
+        self._append(texts.MDL_SOURCE_NOTE % p, "meta")
+        messagebox.showinfo(texts.MDL_POINT_TITLE,
+                            texts.MDL_SOURCE_MSG % p)
         threading.Thread(target=self._scan_and_fill, args=(False,), daemon=True).start()
         # 加了来源就可能凑齐了"第一个可用模型" ⇒ 立刻切过去（坑 150）
         try:
@@ -974,30 +945,23 @@ class ModelsMixin:
 
     def _open_tidy_dialog(self):
         if self._any_busy():
-            messagebox.showinfo("整理模型文件夹",
-                                "当前有任务正在进行（生成 / 生图 / 生视频 / 服务操作），\n"
-                                "请等任务结束、服务停止后再整理文件。")
+            messagebox.showinfo(texts.MDL_TIDY_TITLE, texts.MDL_BUSY_TIDY)
             return
         moves, unpaired, info = plan_tidy(self.cfg)
         if info["status"] == "scattered":
             # "模型分散在多个文件夹"这个特殊情况（W 2026-10-08 定）：一个文件都不动，
             # 照实列出检测到的目录，并给收拢办法。
             messagebox.showinfo(
-                "整理模型文件夹",
-                "暂不整理：模型分散在多个文件夹里。\n\n装着模型的目录：\n%s\n\n"
-                "整理只在\"模型都放在同一个目录\"时生效，不会跨目录搬动文件。\n"
-                "想整理：先把手动定向来源收敛成一个目录，或在 设置 → 服务参数 → "
-                "models_dir 把模型目录指到那个目录。"
+                texts.MDL_TIDY_TITLE,
+                texts.MDL_TIDY_SCATTERED
                 % "\n".join("  · %s" % d for d in info["roots"]))
             return
         if not moves and not unpaired:
-            messagebox.showinfo("整理模型文件夹",
-                                "未发现需要整理的文件：\n"
-                                "顶层没有散落的模型（或它们已在各自文件夹内）。")
+            messagebox.showinfo(texts.MDL_TIDY_TITLE, texts.MDL_TIDY_EMPTY)
             return
         dlg = tk.Toplevel(self.root)
         dlg.withdraw()          # 同上
-        dlg.title("整理模型文件夹 - 预览")
+        dlg.title(texts.MDL_TIDY_PREVIEW_TITLE)
         theme.style_toplevel(dlg)   # 经典背景 + 标题栏两件套（坑 186）
         dlg.geometry("780x520")
         dlg.transient(self.root)
@@ -1012,7 +976,7 @@ class ModelsMixin:
         txt.pack(side="left", fill="both", expand=True, padx=10, pady=(10, 4))
         out = []
         if moves:
-            out.append("将创建子文件夹并移动以下文件（同盘操作，瞬时完成）：\n")
+            out.append(texts.MDL_TIDY_WILL_MOVE)
             # 标签列按**真实像素宽**补齐：中日韩字走字体回退，`%-18s` 与"宽字符算两格"
             # 的估算都会把列怼歪（坑 116 同款纪律 —— 折行/对齐都先 measure 再动手）
             _pf = tkfont.Font(family="Consolas", size=9)
@@ -1030,28 +994,26 @@ class ModelsMixin:
                 out.append("  [%s] %s" % (_col(kind), os.path.basename(src)))
                 out.append("  %22s -> %s\\\n" % ("", rel))
         if unpaired:
-            out.append("\n以下 mmproj 名称无法判断归属，将保持原位（请手动处理）：\n")
+            out.append(texts.MDL_TIDY_UNPAIRED)
             for p in unpaired:
                 out.append("  " + os.path.basename(p))
         _conflicts = info.get("conflicts") or []
         if _conflicts:
             # R-09：撞名检测已提前到计划阶段——这些文件不搬，预览必须说出来
-            out.append("\n以下文件与目标文件夹里的文件同名，不搬动（需人工处理）：\n")
+            out.append(texts.MDL_TIDY_CONFLICTS)
             for src, dst in _conflicts:
-                out.append("  %s  （目标：%s\\）"
+                out.append(texts.MDL_TIDY_TARGET
                            % (os.path.basename(src),
                               os.path.relpath(os.path.dirname(dst), info["root"])))
         _shared = info.get("shared_kept") or []
         _pinned = [s for s in _shared if s[2]]
         _unsafe = [s for s in _shared if not s[2]]
         if _pinned:
-            out.append("\n以下配套件被生图与生视频两组共用，不搬动；"
-                       "已把对应配置槽指向它的绝对路径：\n")
+            out.append(texts.MDL_TIDY_SHARED)
             for p, _tags, keys in _pinned:
                 out.append("  %s  （%s）" % (os.path.basename(p), "、".join(keys)))
         if _unsafe:
-            out.append("\n以下配套件被多组共用，但同名配置槽已被其它文件占用，"
-                       "自动指向会影响其它组——请在设置里手工指定：\n")
+            out.append(texts.MDL_TIDY_PINNED)
             for p, _tags, _keys in _unsafe:
                 out.append("  %s" % os.path.basename(p))
         txt.insert("1.0", "\n".join(out))
@@ -1126,18 +1088,18 @@ class ModelsMixin:
                     save_config(c)
             self._reindex_after_tidy()
             dlg.destroy()
-            msg = "整理完成：移动 %d 个文件。" % ok
+            msg = texts.MDL_TIDY_DONE % ok
             if fails:
-                msg += "\n\n未成功 %d 个：\n" % len(fails)
+                msg += texts.MDL_TIDY_FAILED_N % len(fails)
                 msg += "\n".join("  %s（%s）" % (os.path.basename(s), r)
                                  for s, r in fails[:10])
-            messagebox.showinfo("整理模型文件夹", msg)
-            self._append("\n[模型管理] 整理完成：移动 %d 个文件%s。\n"
-                         % (ok, ("，失败 %d 个" % len(fails)) if fails else ""),
+            messagebox.showinfo(texts.MDL_TIDY_TITLE, msg)
+            self._append(texts.MDL_TIDY_DONE_NOTE
+                         % (ok, (texts.MDL_TIDY_FAILED % len(fails)) if fails else ""),
                          "meta")
 
-        theme.button(bar, text="执行", command=do_exec).pack(side="right", padx=4)
-        theme.button(bar, text="取消", command=dlg.destroy).pack(side="right")
+        theme.button(bar, text=texts.MDL_BTN_EXEC, command=do_exec).pack(side="right", padx=4)
+        theme.button(bar, text=texts.BTN_CANCEL, command=dlg.destroy).pack(side="right")
         widgets.center_on(dlg, self.root)   # 摆到主窗口正中，别落在屏幕左上角
 
     # ---- 模型自动命名 ----
@@ -1149,4 +1111,4 @@ class ModelsMixin:
             save_config(self.cfg)
             self._sq.put(("alias", os.path.basename(path), alias))
         else:
-            self._sq.put(("note", "模型自动命名失败，该模型将继续显示完整文件名。"))
+            self._sq.put(("note", texts.MDL_ALIAS_FAIL))

@@ -22,6 +22,7 @@ import threading
 import tkinter as tk
 from tkinter import ttk
 
+from .. import texts
 from ..core import localmodels, models, promptopt, providers
 from ..core.config import save_config
 from ..connection import optimize
@@ -59,7 +60,7 @@ class PromptOptMixin:
         theme.tint(self._opt_star, fg="accent", bg="bg")   # 切主题跟着重涂
         self._opt_star.bind("<Button-1>", lambda _e: self._opt_star_clicked())
         self._opt_star_visible = False             # place/place_forget 的去重状态
-        widgets.bind_tip(self._opt_star, "优化提示词")
+        widgets.bind_tip(self._opt_star, texts.POPT_TIP)
         self.input.bind("<KeyRelease>", self._opt_on_key, add="+")
 
     # ---------------------------------------------------------------- 星星显隐
@@ -151,7 +152,7 @@ class PromptOptMixin:
     def _opt_ask_reuse(self):
         """「已有优化结果，是否再次优化？」→ "reuse" / "again" / None（取消）。"""
         win = tk.Toplevel(self.root)
-        win.title("提示词优化")
+        win.title(texts.POPT_WINDOW_TITLE)
         theme.style_toplevel(win)   # 经典背景 + 标题栏两件套（坑 186）
         win.resizable(False, False)
         win.withdraw()
@@ -162,13 +163,13 @@ class PromptOptMixin:
             out["v"] = v
             win.destroy()
 
-        ttk.Label(win, text="已有优化结果，是否再次优化？",
+        ttk.Label(win, text=texts.POPT_REUSE_Q,
                   font=("Microsoft YaHei UI", 10)).pack(padx=24, pady=(18, 12))
         box = ttk.Frame(win)
         box.pack(padx=24, pady=(0, 16))
-        theme.button(box, text="使用已有结果", width=14, bootstyle="primary",
+        theme.button(box, text=texts.POPT_USE_EXISTING, width=14, bootstyle="primary",
                      command=lambda: done("reuse")).pack(side="left", padx=4)
-        theme.button(box, text="再次优化", width=10,
+        theme.button(box, text=texts.POPT_RUN_AGAIN, width=10,
                      command=lambda: done("again")).pack(side="left", padx=4)
         win.bind("<Escape>", lambda e: done(None))
         win.protocol("WM_DELETE_WINDOW", lambda: done(None))
@@ -184,7 +185,7 @@ class PromptOptMixin:
         self._opt_scenario = scen
         self._opt_stop = threading.Event()
         self._opt_open_panel()
-        self._opt_head("正在优化提示词…（三路并行）")
+        self._opt_head(texts.POPT_RUNNING)
         self.send_btn.configure(state="disabled")
         self.attach_btn.configure(state="disabled")
         self._opt_star_refresh()
@@ -198,7 +199,7 @@ class PromptOptMixin:
             except Exception as e:      # 兜底：任何意外都要把界面从"优化中"放回来
                 out = {"ok": False, "scenario": scen, "model": "", "results": [],
                        "elapsed_ms": 0,
-                       "error": "优化出错：%s: %s" % (type(e).__name__, e)}
+                       "error": texts.POPT_ERR % (type(e).__name__, e)}
             self._ui_q.put(lambda: self._opt_done(out))
 
         threading.Thread(target=worker, daemon=True, name="promptopt-ui").start()
@@ -225,7 +226,7 @@ class PromptOptMixin:
                                        command=self._opt_close_clicked)
         self._opt_x_btn.pack(side="right")
         widgets.bind_tip(self._opt_x_btn,
-                         lambda: "停止优化" if self._opt_busy else "回退至原始输入")
+                         lambda: texts.POPT_TIP_STOP if self._opt_busy else texts.POPT_TIP_ROLLBACK)
 
         self._opt_rows = {}
         for s in promptopt.STRATEGIES:
@@ -245,7 +246,7 @@ class PromptOptMixin:
                             font=("Microsoft YaHei UI", 9))
             theme.tint(stat, bg="bg")
             stat.pack(side="left", padx=6)
-            retry = theme.button(top, text="重试", width=5,
+            retry = theme.button(top, text=texts.POPT_RETRY, width=5,
                                  command=lambda s=s: self._opt_retry_one(s))
             # 重试按钮只在失败行出现（先建好、不摆）
             prev = tk.Label(row, text="", wraplength=600, justify="left", anchor="w",
@@ -300,13 +301,13 @@ class PromptOptMixin:
         if row is None or self._opt_panel is None:
             return
         if state == "sent":
-            row["stat"].configure(text="请求中…", foreground=theme.c("muted"))
+            row["stat"].configure(text=texts.POPT_REQUESTING, foreground=theme.c("muted"))
         elif state == "done":
             row["stat"].configure(text="")
         elif state == "error":
-            row["stat"].configure(text="失败", foreground=theme.c("error"))
+            row["stat"].configure(text=texts.POPT_FAILED, foreground=theme.c("error"))
         elif state == "stopped":
-            row["stat"].configure(text="已停止", foreground=theme.c("muted"))
+            row["stat"].configure(text=texts.POPT_STOPPED, foreground=theme.c("muted"))
 
     def _opt_done(self, out):
         self._opt_busy = False
@@ -319,10 +320,9 @@ class PromptOptMixin:
                                "out": out}
         ok_n = sum(1 for r in out.get("results") or [] if r.get("ok"))
         if ok_n:
-            self._opt_head("点选一个版本替换输入；✕ 回退至原始输入（%s）"
-                           % (out.get("model") or ""))
+            self._opt_head(texts.POPT_PICK_HINT % (out.get("model") or ""))
         else:
-            self._opt_head("三路都失败了：%s" % (out.get("error") or "原因见各行"))
+            self._opt_head(texts.POPT_ALL_FAILED % (out.get("error") or texts.POPT_FAIL_REASONS))
         for r in out.get("results") or []:
             self._opt_render_row(r.get("strategy"), r)
         # 发送/附件保持禁用：面板还开着，输入框藏在它后面，放开「发送」会把
@@ -349,29 +349,28 @@ class PromptOptMixin:
             widgets.bind_tip(prev, lambda s=strategy: self._opt_tip_for(s))
             notes = []
             if r.get("suspect"):
-                notes.append("疑似偏离原意")
+                notes.append(texts.POPT_SUSPECT)
             if r.get("thinking_seen"):
-                notes.append("模型未关思考")
+                notes.append(texts.POPT_THINKING)
             if r.get("truncated"):
                 # 被 max_tokens 截断的结果**内容照旧可用**（不作废），但必须标清楚
                 # （R-51，W 2026-10-10 批）：原来 finish_reason 没人读，截断当"完成"
-                notes.append("完成 · 可能被截断")
+                notes.append(texts.POPT_TRUNCATED)
             stat.configure(text=" · ".join(notes),
                            foreground=theme.c("warn") if notes else theme.c("muted"))
             if r.get("truncated") and not r.get("suspect"):
                 widgets.bind_tip(
-                    stat, lambda: "结果被 max_tokens 截断，可能不完整；"
-                                  "可在 设置 → 生成参数 里调大 max_tokens 后重试")
+                    stat, lambda: texts.POPT_TRUNC_TIP)
             elif r.get("suspect"):
                 widgets.bind_tip(
-                    stat, lambda r=r: "可能丢了原文关键信息：%s"
-                    % ("、".join(r.get("missing") or []) or "（未列出）"))
+                    stat, lambda r=r: texts.POPT_MISSING_TIP
+                    % ("、".join(r.get("missing") or []) or texts.POPT_NOT_LISTED))
         else:
             row["ok"] = False
             row["full"] = ""
-            prev.configure(text=r.get("error") or "请求失败",
+            prev.configure(text=r.get("error") or texts.POPT_REQUEST_FAILED,
                            foreground=theme.c("error"), cursor="")
-            stat.configure(text="已停止" if r.get("stopped") else "失败",
+            stat.configure(text=texts.POPT_STOPPED if r.get("stopped") else texts.POPT_FAILED,
                            foreground=theme.c("muted") if r.get("stopped")
                            else theme.c("error"))
             if not r.get("stopped"):
@@ -429,10 +428,9 @@ class PromptOptMixin:
         self.attach_btn.configure(state="disabled")
         ok_n = sum(1 for r in out.get("results") or [] if r.get("ok"))
         if ok_n:
-            self._opt_head("点选一个版本替换输入；× 回退至原始输入（%s）"
-                           % (out.get("model") or ""))
+            self._opt_head(texts.POPT_PICK_HINT % (out.get("model") or ""))
         else:
-            self._opt_head("三路都失败了：%s" % (out.get("error") or "原因见各行"))
+            self._opt_head(texts.POPT_ALL_FAILED % (out.get("error") or texts.POPT_FAIL_REASONS))
         for r in out.get("results") or []:
             self._opt_render_row(r.get("strategy"), r)
         self._opt_star_refresh()
@@ -455,7 +453,7 @@ class PromptOptMixin:
         scen = self._opt_scenario or out.get("scenario") or "text"
         self._opt_busy = True
         self._opt_stop = threading.Event()
-        row["stat"].configure(text="请求中…", foreground=theme.c("muted"))
+        row["stat"].configure(text=texts.POPT_REQUESTING, foreground=theme.c("muted"))
         row["retry"].pack_forget()
         row["prev"].configure(text="", foreground=theme.c("body"))
         self.send_btn.configure(state="disabled")
@@ -479,7 +477,7 @@ class PromptOptMixin:
             except Exception as e:
                 r = {"ok": False, "text": "", "stopped": False, "thinking_seen": False,
                      "suspect": False, "missing": [],
-                     "error": "重试出错：%s: %s" % (type(e).__name__, e),
+                     "error": texts.POPT_RETRY_ERR % (type(e).__name__, e),
                      # 失败字典也要带 strategy（R-88）：缺它时重开候选面板那行
                      # 永远空白、重试按钮永久消失（_opt_reopen_cached 按它查行）
                      "strategy": strategy}

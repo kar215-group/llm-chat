@@ -12,6 +12,7 @@ import urllib.request
 from .config import api_headers, base_url, split_extra_args
 from .models import find_vl_pairs
 from .params import current_ngl
+from .. import texts
 
 
 _SERVER_PROC = None        # 本程序 Popen 出的 llama-server 句柄（有则零成本判活）
@@ -123,7 +124,7 @@ def _probe_snapshot():
                     break
         finally:
             k32.CloseHandle(snap)
-    raise OSError("进程表快照失败（GetLastError=%s）：本地服务判活不可用" % last)
+    raise OSError(texts.SRV_CAT % last)
 
 
 def _reset_alive_cache():
@@ -347,8 +348,7 @@ def start_server(cfg, ctx=None):
     global _SERVER_PROC
     if port_busy(cfg.get("port")):
         raise RuntimeError(
-            "端口 %s 已被占用——可能有别的 llama-server（或上一次启动的进程）还没退，"
-            "请先停止服务或换一个端口" % (cfg.get("port"),))
+            texts.SRV_CAT_2 % (cfg.get("port"),))
     flags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
     p = subprocess.Popen(build_server_cmd(cfg, ctx),
                          creationflags=flags,

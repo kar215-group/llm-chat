@@ -9,6 +9,7 @@ import time
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
 
+from .. import texts
 from ..core import capability, chatlog, history, media, providers, textfile
 from ..core.config import save_config
 from ..core.models import display_name
@@ -25,7 +26,7 @@ from . import widgets
 
 # 「选择附件」文件框里的图片过滤器（默认档是「所有文件」，见 textfile.file_dialog_types；
 # 这一个只是给"就想挑张图"的人省点滚动，不再当默认档）。
-_IMG_FILTER = ("图片", "*.png *.jpg *.jpeg *.webp *.bmp")
+_IMG_FILTER = (texts.CHAT_IMG_FILTER, "*.png *.jpg *.jpeg *.webp *.bmp")
 
 # 附件"高危名"判据（R-113）：只拦明显的密钥 / 凭据类命名，普通文件不受影响——
 # 命中先弹一句确认（弹窗文案在 `_attach_picked`）
@@ -70,16 +71,16 @@ def format_usage(u):
             reasoning = int(v)
     parts = []
     if inp is not None:
-        parts.append("输入 %d" % inp)
+        parts.append(texts.CHAT_USAGE_IN % inp)
     if out is not None:
-        parts.append("输出 %d" % out)
+        parts.append(texts.CHAT_USAGE_OUT % out)
     if reasoning:
-        parts.append("其中思考 %d" % reasoning)
+        parts.append(texts.CHAT_USAGE_REASON % reasoning)
     if tot is not None:
-        parts.append("合计 %d" % tot)
+        parts.append(texts.CHAT_USAGE_TOTAL % tot)
     elif parts:
-        parts.append("合计 %d" % ((inp or 0) + (out or 0)))
-    return ("、".join(parts) + " tokens") if parts else "本次未返回用量"
+        parts.append(texts.CHAT_USAGE_TOTAL % ((inp or 0) + (out or 0)))
+    return ("、".join(parts) + " tokens") if parts else texts.CHAT_USAGE_NONE
 
 
 class ChatMixin:
@@ -93,13 +94,8 @@ class ChatMixin:
     def _no_image_hint(self, res):
         """把"为什么现在不能发图"说清楚——尤其区分"确认不支持"与"还没确认"。"""
         if res["verdict"] == capability.UNKNOWN:
-            return ("这个模型的看图能力还没确认：云端的 /models 不带能力字段，光看名字不算数。\n\n"
-                    "要放开：设置 → 云端模型 → 服务商与密钥 →「选择模型…」→ 把「图片输入」改成"
-                    "「支持」，或点「验证图片输入」发一次最小请求让服务端自己回答。")
-        return ("当前模型不支持图片输入（%s）。\n"
-                "换成本地配了视觉投影器的模型（如 Qwen3VL-8B），"
-                "或在 设置 → 云端模型 → 服务商与密钥 →「选择模型…」里把「图片输入」改为「支持」。"
-                % res["note"])
+            return texts.CHAT_NOIMG_UNKNOWN
+        return texts.CHAT_NOIMG_UNSUPPORTED % res["note"]
 
     def pick_image(self):
         """📎 入口：按扩展名分派；路由规则全模式一致（W 2026-10-07 裁决）。
@@ -124,10 +120,9 @@ class ChatMixin:
                 # 云端生图能不能附图由 capability 判（判据 = 这一家的原生接口有没有
                 # 参考图字段）；生视频仍然只接文生。放行时不再重复弹说明，直接给文件框。
                 if capability.resolve(self.cfg)["verdict"] != capability.YES:
-                    messagebox.showinfo("云端生图 / 生视频",
+                    messagebox.showinfo(texts.CHAT_CLOUD_MEDIA_TITLE,
                                         capability.resolve(self.cfg)["note"] +
-                                        "\n\n要带参考图或首帧，请在模型菜单里切回本地的"
-                                        "〔生图〕〔生视频〕模型（走 sd.cpp 那条链路）。")
+                                        texts.CHAT_CLOUD_MEDIA_TAIL)
                     return
             # 生图模式：附图 = 参考图/底图；生视频模式：附图 = 首帧。
             # 这两类走引擎/接口的图像输入通路，跟"聊天模型能不能看图"是两回事，
@@ -137,15 +132,15 @@ class ChatMixin:
             # 文件框默认档 = 「所有文件」（W 2026-10-08）：任何类型都允许选，
             # 读不了的在挂附件那一刻给提示（走 _attach_picked → read_document）。
             picked = filedialog.askopenfilenames(
-                title=("选择首帧图片或文本附件（图片作为图生视频的第一帧）"
-                       if kind == "video" else "选择参考图或文本附件"),
+                title=(texts.CHAT_PICK_VIDEO
+                       if kind == "video" else texts.CHAT_PICK_REF),
                 filetypes=(list(textfile.file_dialog_types())
                            + [_IMG_FILTER]))
             for p in picked or ():
                 self._attach_picked(p)
             return
         picked = filedialog.askopenfilenames(
-            title="选择附件（图片或文本文件）",
+            title=texts.CHAT_PICK_ATTACH,
             filetypes=(list(textfile.file_dialog_types())
                        + ([_IMG_FILTER] if not cloud else [])))
         for p in picked or ():
@@ -163,15 +158,12 @@ class ChatMixin:
                     # 多选口径：说"不"就这一批都不再问（同单选时的 return）；说"是"
                     # 记为该模型支持后，后面几张走上面的快路不再弹。
                     if not messagebox.askyesno(
-                            "图片输入",
-                            self._no_image_hint(res) +
-                            "\n\n仍要按「支持图片输入」处理这个模型吗？\n"
-                            "（选「是」= 记为该模型支持，之后不再拦；"
-                            "可在 设置 → 云端模型 → 服务商与密钥 →「选择模型…」里改回「自动判断」）"):
+                            texts.CHAT_IMAGE_INPUT,
+                            self._no_image_hint(res) + texts.CHAT_FORCE_IMG):
                         return
                     capability.set_choice(self.cfg, capability.YES)
                     save_config(self.cfg)
-                    self._append("\n[模型] 已把「%s」标记为支持图片输入。\n"
+                    self._append(texts.CHAT_MARKED_IMG
                                  % capability.model_key(self.cfg), "meta")
                     self._update_model_label()
                 self.set_attachment(p)
@@ -188,10 +180,8 @@ class ChatMixin:
         if not _SENSITIVE_NAME_RE.search(base):
             return True
         return bool(messagebox.askyesno(
-            "这个文件可能含密钥",
-            "「%s」看起来可能包含密钥 / 凭据。\n"
-            "继续发送会把文件内容交给模型处理（云端模型还会上传到服务商）。\n\n"
-            "确定继续吗？" % base))
+            texts.CHAT_SENSITIVE_TITLE,
+            texts.CHAT_SENSITIVE_BODY % base))
 
     def _attach_picked(self, p):
         """📎 选果的统一路由：图片进参考图列表，其余走文档附件（全模式同一规则）。
@@ -218,10 +208,10 @@ class ChatMixin:
         """
         if not doc:
             return prompt
-        self._append("📄 已并进提示词 %s｜共 %d 行 / %d 字｜%s｜编码 %s\n"
+        self._append(texts.CHAT_DOC_MERGED
                      % (doc["name"], doc["total_lines"], doc["chars"],
-                        ("发出前 %d 行" % len(doc["kept"])) if doc["dropped"]
-                        else "全文", doc["encoding"]), "meta")
+                        (texts.CHAT_DOC_KEPT % len(doc["kept"])) if doc["dropped"]
+                        else texts.CHAT_DOC_FULL, doc["encoding"]), "meta")
         return textfile.render_block(doc["name"], doc["kept"], doc["total_lines"],
                                      doc["chars"], doc["dropped"], doc["encoding"],
                                      question=prompt, budget=doc.get("budget") or 0)
@@ -236,7 +226,7 @@ class ChatMixin:
         （本地引擎的 `-i`、云端参考图的 data URL、聊天模型的 base64），不受影响。
         """
         if not os.path.isfile(path):
-            messagebox.showwarning("图片", "这个文件不在了：\n%s" % path)
+            messagebox.showwarning(texts.CHAT_IMAGE_TITLE, texts.CHAT_FILE_MISSING % path)
             return
         if path not in self._attached_images:
             self._attached_images.append(path)
@@ -254,7 +244,7 @@ class ChatMixin:
         """
         doc = textfile.read_document(path)
         if not doc.get("ok"):
-            messagebox.showwarning("附件", doc.get("error") or "这个文件读不了。")
+            messagebox.showwarning(texts.CHAT_ATTACH_TITLE, doc.get("error") or texts.CHAT_FILE_UNREAD)
             return
         cloud = providers.is_cloud(self.cfg)
         budget = textfile.budget_tokens(self.cfg, cloud=cloud)
@@ -274,8 +264,8 @@ class ChatMixin:
         # 不能静默——聊天区留一句，说清哪些图不会被发送
         if dropped_imgs:
             names = "、".join(os.path.basename(p) for p in dropped_imgs[:3])
-            more = " 等" if len(dropped_imgs) > 3 else ""
-            self._append("\n[提示] 已切换为文本附件「%s」，之前选的图片（%s%s）不会一起发送。\n"
+            more = texts.CHAT_MORE if len(dropped_imgs) > 3 else ""
+            self._append(texts.CHAT_SWITCHED_DOC
                          % (doc["name"], names, more), "meta")
 
     def _show_attach_bar(self):
@@ -399,11 +389,11 @@ class ChatMixin:
             meta = self._attached_file or {}
             parts = [str(meta.get("name") or os.path.basename(path or ""))]
             if meta:
-                parts.append("%d 行 / %d 字｜编码 %s"
+                parts.append(texts.CHAT_TILE_META
                              % (meta.get("total_lines", 0), meta.get("chars", 0),
                                 meta.get("encoding", "")))
                 if meta.get("dropped"):
-                    parts.append("超出预算，只带前 %d 行（详见条下状态行）"
+                    parts.append(texts.CHAT_TILE_TRUNC
                                  % len(meta.get("kept") or []))
             return "\n".join(parts)
         parts = [os.path.basename(path or "")]
@@ -412,7 +402,7 @@ class ChatMixin:
         except Exception:
             pass
         if fallback:
-            parts.append("这个格式在这里画不出预览（不影响发送）")
+            parts.append(texts.CHAT_NO_PREVIEW)
         return "\n".join(parts)
 
     def _drop_attach_tile(self, kind, path):
@@ -549,8 +539,7 @@ class ChatMixin:
 
     def _strength_tip(self):
         c = self.cfg
-        return ("底图重绘时把原图改多少：越高越不像原图，自动＝按提示词判改动幅度"
-                "（小改 %s / 普通改 %s / 大幅 %s，在 设置 → 本地模型 → 生图（sd.cpp） 改）"
+        return (texts.CHAT_STRENGTH_TIP
                 % (media.strength_value(c, "light"), media.strength_value(c, "mid"),
                    media.strength_value(c, "heavy")))
 
@@ -577,8 +566,7 @@ class ChatMixin:
         img_edit = (str(self.cfg.get("model_kind") or "") == "image"
                     and self._effective_ref_mode() == capability.MODE_EDIT)
         if meta and meta.get("dropped"):
-            note = ("超出本次上下文预算（约 %d token），先只带前 %d 行；"
-                    "云端模型可在 设置 → 云端模型 → 文本模型 打开「让它自己决定读哪些行」。"
+            note = (texts.CHAT_NOTE_BUDGET
                     % (meta.get("budget", 0), len(meta.get("kept") or [])))
         elif img_edit and len(self._attached_images or []) > 1:
             # 与发送侧共用同一份取舍判断（media.plan_ref_images），说的和发的不会对不上
@@ -590,11 +578,9 @@ class ChatMixin:
             # 生图模式（本地 / 云端）的多图取舍在上一支或发送侧说，不在这里重复。
             _kind = str(self.cfg.get("model_kind") or "")
             if _kind == "video":
-                note = ("图生视频只用最后一张作首帧（已挂 %d 张）"
-                        % len(self._attached_images))
+                note = texts.CHAT_NOTE_VIDEO_MANY % len(self._attached_images)
             elif _kind == "chat":
-                note = ("聊天一次只发送最后一张（已挂 %d 张）"
-                        % len(self._attached_images))
+                note = texts.CHAT_NOTE_CHAT_MANY % len(self._attached_images)
         if self._attached_images and img_edit and not providers.is_cloud(self.cfg):
             # 已涂遮罩要看得见（遮罩是"看不见的输入"，不显示就成了静默行为）。
             # 状态行是"当前状态"不是"说明"，所以留在行内（ADR §5.2 判据④）。
@@ -604,7 +590,7 @@ class ChatMixin:
             #    "只认一张"把遮罩那句挤掉，多图时涂了遮罩也一个字不说。
             mp = self._mask_path_of(self._attached_images[0])
             if mp and os.path.isfile(mp):
-                mn = "已涂遮罩：只重绘涂抹区，其余保持不变（点图片可改）"
+                mn = texts.CHAT_NOTE_MASK
                 note = (note + "｜" + mn) if note else mn
         var.set(note)
         if note:
@@ -630,7 +616,7 @@ class ChatMixin:
         if img is None:
             # 只是"这个格式画不出来"（Pillow 缺席 / 文件损坏），**不是发送失败**：
             # 图已经按请求发出去了，所以这里用 meta 说一句，别标成红色错误（坑 132）
-            self._append("（这张图在对话里不显示预览：%s）\n" % os.path.basename(path),
+            self._append(texts.CHAT_IMG_NO_PREVIEW % os.path.basename(path),
                          "meta")
             return
         try:
@@ -667,25 +653,20 @@ class ChatMixin:
             # 用"中止"而不是"取消"：云端任务进入运行态后取消不掉，「停止生成」在那边
             # 只是"不再等它"（_cloud_cancel_task 会把实情说出来），这里别先给错承诺。
             if self._img_busy:
-                self._append("\n[提示] 生图进行中：点「停止生成」中止当前任务，或等它完成。\n",
-                             "meta")
+                self._append(texts.CHAT_BUSY_IMG, "meta")
             elif self._vid_busy:
-                self._append("\n[提示] 生视频进行中：点「停止生成」中止当前任务，或等它完成。\n",
-                             "meta")
+                self._append(texts.CHAT_BUSY_VID, "meta")
             elif self._remote_busy():
                 # 主页面那个「停止生成」停不掉远程任务（它只管本机这一轮），
                 # 所以指清出口在哪，别让人对着一个按了没反应的按钮试。
                 #  kinds 由 `_remote_busy_kind` 现算：手机那头可能是出图也可能是对话。
-                self._append("\n[提示] 手机端有一个远程%s在进行：等它完成，"
-                             "或在 设置 → 远程访问 点「停止远程任务」。\n"
-                             % self._remote_busy_kind(), "meta")
+                self._append(texts.CHAT_BUSY_REMOTE % self._remote_busy_kind(), "meta")
             elif self._svc_busy:
                 # 坑 268：服务启停 / 换载中按发送或回车不能静默吞掉
-                self._append("\n[提示] 服务正在启停或加载模型，等它完成再发。\n",
-                             "meta")
+                self._append(texts.CHAT_BUSY_SVC, "meta")
             else:
                 # 纯 _busy（理论上的边沿窗口）也给一句话，别让按键看着像坏了
-                self._append("\n[提示] 上一轮还在收尾，稍等一下再发。\n", "meta")
+                self._append(texts.CHAT_BUSY_TAIL, "meta")
             return
         text = self.input.get("1.0", "end").strip()
         if not text:
@@ -694,13 +675,11 @@ class ChatMixin:
             # 设计的，却被"空文本直接 return"挡成死代码——用户只会以为按钮坏了。
             # 生图 / 生视频必须要提示词；普通聊天文本与附件至少要有一样。
             if self.cfg.get("model_kind") in ("image", "video"):
-                self._append("\n[提示] 生图/生视频需要提示词：先写一句描述再发送。\n",
-                             "meta")
+                self._append(texts.CHAT_NEED_PROMPT, "meta")
                 return
             if not (self._attached_image or self._attached_images
                     or self._attached_file):
-                self._append("\n[提示] 还没有发送任何内容：先写点什么，或用 📎 挂一张图/"
-                             "一个文本文件（只发附件也可以）。\n", "meta")
+                self._append(texts.CHAT_NOTHING, "meta")
                 return
             # 有附件：空文本照发（正文由 _do_send 的兜底接手）
         kind = self.cfg.get("model_kind")
@@ -720,8 +699,8 @@ class ChatMixin:
                            providers.current_provider(self.cfg), refs,
                            mode=self._img_ref_mode or ""))
             if err:
-                self._append("\n[云端] %s%s\n" % (err, "" if not refs else
-                                                  "\n  图片已保留，不会丢。"), "error")
+                self._append(texts.CHAT_CLOUD_ERR_KEEP % (err, "" if not refs else
+                                                  texts.CHAT_CLOUD_KEEP), "error")
                 return
             if kind == "video" and not self._confirm_cloud_video_spend():
                 return
@@ -736,10 +715,7 @@ class ChatMixin:
                 # 原来图片被静默丢弃还照计全费（坑 256）。附件原样保留，
                 # 切回本地生视频模型即可直接重发。
                 if refs:
-                    self._append("\n[云端] 云端生视频目前只支持文生视频，"
-                                 "首帧图片不会被发送（图片已保留，不会丢）。\n"
-                                 "  要带首帧，请在模型菜单里切回本地的〔生视频〕模型。\n",
-                                 "error")
+                    self._append(texts.CHAT_CLOUD_VIDEO_NOFRAME, "error")
                     return
                 self._start_chat_video(text, doc=self._attached_file)
             return
@@ -748,7 +724,7 @@ class ChatMixin:
             # ⚠ "生成中再发一条 = 中止旧的再开新的"是**旧注释的死代码**：本函数开头
             # 的忙碌守卫（_img_busy 等）已经先一步拦住并给了提示（R-89），
             # 这里到不了。要改成"打断重发"语义得先动那个守卫，别只改注释。
-            choice = self._confirm_shared_vram("生图")
+            choice = self._confirm_shared_vram(texts.CHAT_ACTION_IMG)
             if choice == "cancel":
                 return                          # 输入内容与附图原样保留，什么都没发生
             if choice == "stop":
@@ -763,7 +739,7 @@ class ChatMixin:
         if self.cfg.get("model_kind") == "video":
             # 与生图同一套形态：输入即提示词，进度原位刷新，结果行带回调按钮。
             # 忙碌守卫在函数开头（见上面 image 分支同款说明，R-89）
-            choice = self._confirm_shared_vram("生视频")
+            choice = self._confirm_shared_vram(texts.CHAT_ACTION_VID)
             if choice == "cancel":
                 return
             if choice == "stop":
@@ -777,20 +753,20 @@ class ChatMixin:
             # 校验放在删输入框之前——失败时用户的文字一个字都不丢。
             err = providers.validate_for_send(self.cfg)
             if err:
-                self._append("\n[云端] %s\n" % err, "error")
+                self._append(texts.CHAT_CLOUD_ERR % err, "error")
                 return
             if self._attached_image and not capability.can_take_image(self.cfg):
                 # 云端只认"用户声明支持"或"实测收下过图"：各家多模态字段不一致，
                 # 光凭名字像视觉模型就放行，多半换来一个看不懂的 400。
                 # 附件保留不清除，声明/验证过之后直接再发一次即可。
-                self._append("\n[云端] %s\n图片已保留，处理完再发一次就行。\n"
+                self._append(texts.CHAT_CLOUD_NOIMG
                              % self._no_image_hint(capability.resolve(self.cfg)), "meta")
             self.input.delete("1.0", "end")
             self._opt_star_refresh()
             self._do_send(text, allow_image=capability.can_take_image(self.cfg))
             return
         if not self._server_ready_flag:
-            self._append("\n[提示] 服务未就绪：请先点「启动服务」，等状态变为 ● 运行中 再发送。\n", "error")
+            self._append(texts.CHAT_SVC_NOT_READY, "error")
             return
         want = os.path.basename(self.cfg["model"])
         serving = self._serving_model
@@ -806,7 +782,7 @@ class ChatMixin:
             self._opt_star_refresh()
             self._begin_svc()
             self.send_btn.configure(state="disabled")
-            self._append("\n[服务] 正在加载新模型 %s（GPU 层数 %d），就绪后自动发送你的消息…\n"
+            self._append(texts.CHAT_RELOADING
                          % (display_name(self.cfg, self.cfg["model"]),
                             current_ngl(self.cfg)), "meta")
 
@@ -819,14 +795,14 @@ class ChatMixin:
                 try:
                     self._proc = start_server(self.cfg, ctx_for(self.cfg))
                 except Exception as e:
-                    self._finish_svc(False, "[服务] 启动失败: " + str(e), True)
+                    self._finish_svc(False, texts.SVC_START_FAIL_RAW + str(e), True)
                     self._sq.put(("reload_done", False))
                     return
                 ok = self._wait_ready()
-                self._finish_svc(ok, "[服务] 新模型 %s 就绪，继续对话（历史上下文已随消息携带）。"
+                self._finish_svc(ok, texts.CHAT_RELOAD_READY
                                  % display_name(self.cfg, self.cfg["model"])
                                  if ok else
-                                 "[服务] 加载失败或超时——请检查模型与参数（设置 → 服务参数）。",
+                                 texts.CHAT_RELOAD_FAIL,
                                  not ok, launched=launched)
                 self._sq.put(("reload_done", ok))
 
@@ -840,7 +816,7 @@ class ChatMixin:
                     # 并把暂存原文放回输入框（"你的消息已放回输入框"），一个字都不丢。
                     # （_svc_busy 属 ServiceMixin，这里不越界写它——结构检查第 [3] 段）
                     try:
-                        self._finish_svc(False, "[服务] 换载模型中断：%s" % e, True)
+                        self._finish_svc(False, texts.CHAT_RELOAD_INTERRUPT % e, True)
                     except Exception:
                         pass
                     self._sq.put(("reload_done", False))
@@ -868,13 +844,13 @@ class ChatMixin:
                 ext = (os.path.splitext(img_path)[1].lstrip(".").lower() or "png")
                 if ext == "jpg":
                     ext = "jpeg"
-                content = [{"type": "text", "text": text or "请描述这张图片。"},
+                content = [{"type": "text", "text": text or texts.CHAT_DESCRIBE_IMG},
                            {"type": "image_url",
                             "image_url": {"url": "data:image/%s;base64,%s" % (ext, b64)}}]
             except Exception as e:
-                self._append("\n[错误] 读取图片失败：%s\n" % e, "error")
+                self._append(texts.CHAT_READ_IMG_FAIL % e, "error")
                 return
-            self._append("\n【你】\n" + (text or "（图片）") + "\n", "user")
+            self._append(texts.MEDIA_USER_PREFIX + (text or texts.CHAT_IMAGE_ONLY) + "\n", "user")
             self._append_image(img_path, max_w=320)
             user_msg = {"role": "user", "content": content}
         elif file_meta:
@@ -884,14 +860,14 @@ class ChatMixin:
                 file_meta["name"], file_meta["kept"], file_meta["total_lines"],
                 file_meta["chars"], file_meta["dropped"], file_meta["encoding"],
                 question=text, budget=file_meta["budget"])
-            self._append("\n【你】\n%s\n" % (text or "（见附件）"), "user")
-            self._append("📄 已附上 %s｜共 %d 行 / %d 字｜%s｜编码 %s\n"
+            self._append(texts.CHAT_USER_DOC % (text or texts.CHAT_SEE_ATTACH), "user")
+            self._append(texts.CHAT_DOC_ATTACHED
                          % (file_meta["name"], file_meta["total_lines"], file_meta["chars"],
-                            ("发出前 %d 行" % len(file_meta["kept"])) if file_meta["dropped"]
-                            else "全文", file_meta["encoding"]), "meta")
+                            (texts.CHAT_DOC_KEPT % len(file_meta["kept"])) if file_meta["dropped"]
+                            else texts.CHAT_DOC_FULL, file_meta["encoding"]), "meta")
             user_msg = {"role": "user", "content": block}
         else:
-            self._append("\n【你】\n" + text + "\n", "user")
+            self._append(texts.MEDIA_USER_PREFIX + text + "\n", "user")
             user_msg = {"role": "user", "content": text}
         if allow_image or used_file:
             self.clear_attachment()      # 云端不带图时保留附件，方便切回本地 VL 模型再发
@@ -935,20 +911,20 @@ class ChatMixin:
             # 云端任务自己会说清楚"取消掉了"还是"只是不再等它"，这里就别再补一句
             # "已取消生成"——那种说法在任务仍在云端运行时是假的。
             if not self._cancel_chat_image():
-                self._append("🎨 [已取消生成]\n", "meta")
+                self._append(texts.IMG_CANCELLED, "meta")
                 self._append("────────────────\n", "meta")
             self._set_busy_ui(False)
             return
         # 聊天流生视频中：同一套取消语义
         if self._vid_busy:
             if not self._cancel_chat_video():
-                self._append("🎬 [已取消生成]\n", "meta")
+                self._append(texts.VID_CANCELLED, "meta")
                 self._append("────────────────\n", "meta")
             self._set_busy_ui(False)
             return
         if self._busy and self._stop_flag is not None and not self._stop_flag.is_set():
             self._stop_flag.set()
-            self.stop_gen_btn.configure(state="disabled", text="正在停止…")
+            self.stop_gen_btn.configure(state="disabled", text=texts.CHAT_STOPPING)
 
     # ---- 对话记录落盘（仅文本模型；本期只存不读，形状见 core/chatlog.py）----
     def _log_records(self):
@@ -1007,15 +983,14 @@ class ChatMixin:
             if quiet or self._announced_path == self._sess_path:
                 return True, ""
             self._announced_path = self._sess_path
-            return True, "对话记录已存：%s" % self._sess_path
+            return True, texts.CHAT_LOG_SAVED % self._sess_path
         if not self._sess_id:
             self._sess_id = chatlog.new_id()
         p, err = chatlog.save(self.cfg, self._sess_id, recs,
                               model=self.cfg.get("model", ""),
                               provider=self.cfg.get("model_provider", "local"))
         if err:
-            return False, "对话记录没能写入（%s）：目录可在 gui_config.json 的 " \
-                          "chat_log_dir 里改。" % err
+            return False, texts.CHAT_LOG_FAIL % err
         self._sess_path = p
         self._log_key = key
         self._sess_saved = True
@@ -1025,7 +1000,7 @@ class ChatMixin:
         if self._announced_path == p:
             return True, ""
         self._announced_path = p
-        return True, "对话记录已存：%s" % p
+        return True, texts.CHAT_LOG_SAVED % p
 
     def _finish_turn(self, error=False):
         self._busy = False
@@ -1058,11 +1033,11 @@ class ChatMixin:
                     cost = providers.text_cost_note(p, sp[1] if sp else "", usage)
                 except Exception:
                     cost = ""
-            self._append("\n〔用量〕%s%s\n" % (format_usage(usage), cost), "meta")
+            self._append(texts.CHAT_USAGE_LINE % (format_usage(usage), cost), "meta")
         # 每轮结束落一次盘：断电 / 强杀 / 关窗都只丢"正在跑的这一轮"
         _, note = self._save_chat_log()
         if note:
-            self._append("\n[记录] %s\n" % note, "meta")
+            self._append(texts.CHAT_LOG_LINE % note, "meta")
         if not error:
             self._append("\n\n────────────────\n", "meta")
         self.input.focus_set()
@@ -1072,7 +1047,7 @@ class ChatMixin:
         # 的对话区清掉，结果行再贴到清空后的开头，看着像"任务丢了"）
         if self._busy or self._svc_busy or self._img_busy or self._vid_busy:
             return
-        if not messagebox.askyesno("清空对话", "确定清空当前对话记录？"):
+        if not messagebox.askyesno(texts.CHAT_CLEAR_TITLE, texts.CHAT_CLEAR_Q):
             return
         # 先存再清：清空不该顺手毁掉一份已经聊出来的记录
         self._save_chat_log()
@@ -1090,8 +1065,8 @@ class ChatMixin:
         self.chat.delete("1.0", "end")
         self.chat.configure(state="disabled")
         self._img_photos.clear()      # 对话区已清：图片引用整表释放（R-80，不 clear 会一直占着）
-        self._append("对话已清空。%s\n"
-                     % (("原记录已存：%s" % kept) if kept else ""), "meta")
+        self._append(texts.CHAT_CLEARED
+                     % ((texts.CHAT_CLEARED_KEPT % kept) if kept else ""), "meta")
 
     def _flush_stream(self, chunks):
         """把本轮收到的流式片段合并后一次性写入（一次 insert + 一次滚动）。
@@ -1118,4 +1093,4 @@ class ChatMixin:
         except Exception:
             pass
         if self.api_hint_var is not None:
-            self.api_hint_var.set("已复制：%s" % label)
+            self.api_hint_var.set(texts.CHAT_COPIED % label)

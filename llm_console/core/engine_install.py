@@ -34,6 +34,7 @@ import zipfile
 
 from . import updater
 from .config import APP_DIR, USER_AGENT
+from .. import texts
 
 # ---------------------------------------------------------------------------
 # 引擎规格（只有"两个仓库口径不同"的部分才写死；档位清单是运行时从资产里推出来的）
@@ -41,7 +42,7 @@ from .config import APP_DIR, USER_AGENT
 
 ENGINES = {
     "llama": {
-        "label": "llama.cpp（对话引擎）",
+        "label": texts.ENG_DLABEL,
         "repo": "ggml-org/llama.cpp",
         "page": "https://github.com/ggml-org/llama.cpp/releases",
         # 发行包名前缀：`llama-b11382-bin-…` / sd 的是 `sd-master-3f8527a-bin-…`
@@ -51,7 +52,7 @@ ENGINES = {
         "dir": "llama",
     },
     "sd": {
-        "label": "stable-diffusion.cpp（生图 / 生视频引擎）",
+        "label": texts.ENG_DLABEL_2,
         "repo": "leejet/stable-diffusion.cpp",
         "page": "https://github.com/leejet/stable-diffusion.cpp/releases",
         "bin_tag": "bin",
@@ -148,11 +149,11 @@ def build_key(tag):
 # 档位段的中间那截（平台段与 arch 段之间）译成中文。认不出的原样透出，
 # 这样上游新增档位时这一行不必跟着改（`07` §5 规则 8：最小表达）。
 _FLAVOR_LABEL = {
-    "base": "CPU（无后端限定词，纯 CPU）",
-    "cpu": "CPU（不占显卡，最慢）",
-    "vulkan": "Vulkan（含 AMD / Intel 核显）",
-    "sycl": "SYCL（Intel 核显）",
-    "blas": "BLAS（纯 CPU）",
+    "base": texts.ENG_DBASE,
+    "cpu": texts.ENG_DCPU,
+    "vulkan": texts.ENG_DVULKAN,
+    "sycl": texts.ENG_DSYCL,
+    "blas": texts.ENG_DBLAS,
     "opencl-adreno": "OpenCL（Adreno）",
     "opencl-adreno-arm64": "OpenCL（Adreno）",
 }
@@ -172,7 +173,7 @@ def _flavor_label(flavor):
     m = re.match(r"^openvino-?([\d.]+)$", f)
     if m:
         return "OpenVINO %s" % m.group(1)
-    return f.upper() if f else "（未识别）"
+    return f.upper() if f else texts.ENG_ELSE
 
 
 def _split_asset(name, plat, archs):
@@ -381,9 +382,9 @@ def list_builds(engine, token="", fetch=None, timeout=updater.TIMEOUT):
     repo = spec.get("repo") or ""
     plat = platform_token()
     if not plat:
-        return [], "认不出本机在发布包名里长什么样（%s），这一屏不列档位。" % os.name
+        return [], texts.ENG_CAT % os.name
     if not repo:
-        return [], "这个引擎没登记发布地址。"
+        return [], texts.ENG_L1
     try:
         items = updater.fetch_releases(fetch=fetch, timeout=timeout, repo=repo,
                                        cache=_cache(repo), token=token)
@@ -522,7 +523,7 @@ def download(url, dest, emit=None, stop_flag=None, digest="", retries=RETRIES,
     for attempt in range(max(1, int(retries))):
         if stop_flag is not None and stop_flag.is_set():
             _discard(part)
-            return False, "已取消"
+            return False, texts.ENG_L1_2
         have = os.path.getsize(part) if os.path.isfile(part) else 0
         req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT}, method="GET")
         if have:
@@ -536,42 +537,42 @@ def download(url, dest, emit=None, stop_flag=None, digest="", retries=RETRIES,
                 total = int(r.headers.get("Content-Length") or 0) + have
                 mode = "ab" if have else "wb"
                 if emit:
-                    emit("正在下载 %s（%.0f MB）…" % (os.path.basename(dest),
+                    emit(texts.ENG_CAT_2 % (os.path.basename(dest),
                                                     (total or 0) / 1048576.0))
                 with open(part, mode) as f:
                     while True:
                         if stop_flag is not None and stop_flag.is_set():
                             _discard(part)
-                            return False, "已取消"
+                            return False, texts.ENG_L1_2
                         chunk = r.read(CHUNK)
                         if not chunk:
                             break
                         f.write(chunk)
                         have += len(chunk)
                         if emit:
-                            emit("正在下载 %s（%.1f / %.1f MB）…"
+                            emit(texts.ENG_CAT_3
                                  % (os.path.basename(dest), have / 1048576.0,
                                     (total or 0) / 1048576.0))
             if have < 1024:
                 _discard(part)
-                return False, "下载到的文件过小（%d 字节），判定为失败" % have
+                return False, texts.ENG_CAT_4 % have
             if want:
                 got = _sha256(part)
                 if got.lower() != want:
                     _discard(part)
                     if attempt + 1 < retries:
                         if emit:
-                            emit("校验不通过，正在重下…")
+                            emit(texts.ENG_A0)
                         continue
-                    return False, "校验不通过（sha256 与发布页写的不一致），已丢弃"
+                    return False, texts.ENG_L1_3
             elif expected_size and have != int(expected_size):
                 # 没有 digest 时按声称大小核对（R-96）
                 _discard(part)
                 if attempt + 1 < retries:
                     if emit:
-                        emit("大小不符（%d / %d 字节），正在重下…" % (have, expected_size))
+                        emit(texts.ENG_CAT_5 % (have, expected_size))
                     continue
-                return False, "下载不完整（%d / %d 字节），已丢弃" % (have, expected_size)
+                return False, texts.ENG_CAT_6 % (have, expected_size)
             os.replace(part, dest)
             return True, ""
         except Exception as e:
@@ -579,10 +580,10 @@ def download(url, dest, emit=None, stop_flag=None, digest="", retries=RETRIES,
             # 遇断电 / 网断是常态，见 `07` §5）。只有校验不过 / 文件过小 / 取消才删。
             if attempt + 1 >= retries:
                 _discard(part)
-                return False, "下载失败：%s" % e
+                return False, texts.ENG_CAT_7 % e
             if emit:
-                emit("下载中断（%s），正在续传（%d/%d）…" % (e, attempt + 2, retries))
-    return False, "下载失败：已重试 %d 次仍没成" % retries
+                emit(texts.ENG_CAT_8 % (e, attempt + 2, retries))
+    return False, texts.ENG_CAT_9 % retries
 
 
 # ---------------------------------------------------------------------------
@@ -626,7 +627,7 @@ def install(engine, files, dest_dir, emit=None, stop_flag=None, guard=None):
     try:
         os.makedirs(parent, exist_ok=True)
     except Exception as e:
-        return False, "建不了上级目录：%s" % e, ""
+        return False, texts.ENG_CAT_10 % e, ""
     stage = dest_dir + ".new"
     old = dest_dir + ".old"
     for p in (stage, old):
@@ -636,21 +637,21 @@ def install(engine, files, dest_dir, emit=None, stop_flag=None, guard=None):
         os.makedirs(stage, exist_ok=True)
         for f in files or []:
             if stop_flag is not None and stop_flag.is_set():
-                raise RuntimeError("已取消")
+                raise RuntimeError(texts.ENG_L1_2)
             if emit:
-                emit("正在解压 %s …" % f.get("name"))
+                emit(texts.ENG_CAT_11 % f.get("name"))
             with zipfile.ZipFile(f["path"]) as zf:
                 bad = next((n for n in zf.namelist() if _zip_member_unsafe(n)), None)
                 if bad is not None:
-                    raise RuntimeError("压缩包里的文件路径不对（%s），已拒收" % bad)
+                    raise RuntimeError(texts.ENG_CAT_12 % bad)
                 zf.extractall(stage)
             if stop_flag is not None and stop_flag.is_set():
-                raise RuntimeError("已取消")
+                raise RuntimeError(texts.ENG_L1_2)
         if not _flatten_for_exe(stage, exe):
-            raise RuntimeError("解压完了但没找到 %s（档位可能选错了）" % exe)
+            raise RuntimeError(texts.ENG_CAT_13 % exe)
     except Exception as e:
         shutil.rmtree(stage, ignore_errors=True)
-        return False, "解压失败：%s" % e, ""
+        return False, texts.ENG_CAT_14 % e, ""
 
     moved_old = False
     try:
@@ -665,7 +666,7 @@ def install(engine, files, dest_dir, emit=None, stop_flag=None, guard=None):
             except Exception:
                 pass
         shutil.rmtree(stage, ignore_errors=True)
-        return False, "换目录失败：%s" % e, ""
+        return False, texts.ENG_CAT_15 % e, ""
     shutil.rmtree(old, ignore_errors=True)
     return True, "", os.path.join(dest_dir, exe)
 
@@ -764,25 +765,25 @@ def merge_runtime(engine, zip_path, dest_dir, emit=None, stop_flag=None):
     自己那份冲掉，也没必要重下几百 MB 主包。`(ok, why, [实际并入的文件名])`。
     """
     if stop_flag is not None and stop_flag.is_set():
-        return False, "已取消", []
+        return False, texts.ENG_L1_2, []
     if not os.path.isdir(dest_dir):
-        return False, "引擎目录不存在：%s" % dest_dir, []
+        return False, texts.ENG_CAT_16 % dest_dir, []
     stage = staging_dir()
     try:
         if emit:
-            emit("正在解压 %s …" % os.path.basename(zip_path))
+            emit(texts.ENG_CAT_11 % os.path.basename(zip_path))
         try:
             with zipfile.ZipFile(zip_path) as zf:
                 bad = next((n for n in zf.namelist() if _zip_member_unsafe(n)), None)
                 if bad is not None:
-                    return False, "压缩包里的文件路径不对（%s），已拒收" % bad, []
+                    return False, texts.ENG_CAT_12 % bad, []
                 zf.extractall(stage)
         except Exception as e:
-            return False, "解压失败：%s" % e, []
+            return False, texts.ENG_CAT_14 % e, []
         if not _flatten_runtime(stage):
-            return False, "这个压缩包里没找到 cudart64 运行库（档位可能选错了）", []
+            return False, texts.ENG_L1_4, []
         if stop_flag is not None and stop_flag.is_set():
-            return False, "已取消", []
+            return False, texts.ENG_L1_2, []
         merged = []
         # 平铺后运行库就在 stage 根：**只并根这一层的文件**（包内若还有 LICENSE 等
         # 子目录，那些不影响运行，不往里拖，免得污染引擎目录）
@@ -793,13 +794,12 @@ def merge_runtime(engine, zip_path, dest_dir, emit=None, stop_flag=None):
             try:
                 shutil.copy2(src, os.path.join(dest_dir, name))
             except PermissionError:
-                return False, ("运行库文件被占用（引擎正在运行），请先在主页面"
-                               "停止服务再补全。"), merged
+                return False, (texts.ENG_L1_5), merged
             except OSError as e:
-                return False, "写入引擎目录失败：%s" % e, merged
+                return False, texts.ENG_CAT_17 % e, merged
             merged.append(name)
         if not merged:
-            return False, "压缩包里没有可合并的运行库文件", []
+            return False, texts.ENG_L1_6, []
         return True, "", merged
     finally:
         cleanup(stage)

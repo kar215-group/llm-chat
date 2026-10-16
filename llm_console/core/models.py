@@ -8,6 +8,7 @@ import re
 from . import engine_install, providers, sdprofile, secrets
 from .config import APP_DIR
 from .gguf import gguf_is_chat_capable, gguf_structure
+from .. import texts
 
 
 def make_alias(filename):
@@ -75,7 +76,7 @@ def display_name(cfg, path):
         return alias
     return make_alias(key)
 
-IMAGE_SUBDIR = "生图"             # models_dir 下存放生图大模型的子文件夹名
+IMAGE_SUBDIR = texts.MDS_IMAGE_SUBDIR             # models_dir 下存放生图大模型的子文件夹名
 
 # 生图目录里"不是模型本体"的文件名特征。原来这里写死了 `qwen3vl`（开发机那个文本编码器
 # 的名字），换一家模型就会把它当成扩散模型列进菜单。现在交给 sdprofile 的通用配套件
@@ -244,7 +245,7 @@ def auto_locate_models_dir(cfg, app_dir=None, max_depth=3):
     return cands[0][2]
 
 # ------------------------------------------------ 视频生成链路的组件判定
-VIDEO_SUBDIR = "生视频"            # models_dir 下存放视频模型的子文件夹（不存在时自动回退顶层扫描）
+VIDEO_SUBDIR = texts.MDS_VIDEO_SUBDIR            # models_dir 下存放视频模型的子文件夹（不存在时自动回退顶层扫描）
 
 def video_component_role(path):
     """视频链路组件类型：'video'（扩散主体）/ 'encoder'（文本编码器）/ None（不是视频链路）。
@@ -486,7 +487,7 @@ def chat_start_block(cfg):
 KIND_ENGINE = {"chat": "llama", "image": "sd", "video": "sd", "media": "sd"}
 # 直接说引擎名也认（`engine_ready(cfg, "sd")`），免得调用点把 "media" / "image" 记混。
 ENGINE_ALIAS = {"llama": "llama", "sd": "sd"}
-ENGINE_LABEL = {"llama": "llama 引擎", "sd": "sd 引擎"}
+ENGINE_LABEL = {"llama": texts.MDS_DLLAMA, "sd": texts.MDS_DSD}
 
 
 def engine_ready(cfg, kind):
@@ -717,7 +718,7 @@ def is_vl_model(cfg, path):
 # 时一个文件都不动，由界面给出说明。
 # 纪律：只移动不删除；名称无法判断归属的 mmproj 保持原位（交用户手动处理）。
 TIDY_DIR = "model"
-TIDY_CLASS_DIR = {"chat": "文本模型", "image": "生图模型", "video": "生视频模型"}
+TIDY_CLASS_DIR = {"chat": texts.MDS_DCHAT, "image": texts.MDS_DIMAGE, "video": texts.MDS_DVIDEO}
 
 # 配套槽位 → 全局配置键（跨类共享件"写绝对路径进配置"用，R-07；
 # 键名与 DEFAULT_CONFIG 的 img_*_file / vid_*_file 一一对应）
@@ -838,7 +839,7 @@ def _tidy_group_name(models_, enc=""):
     if len(pre) >= 3:
         return pre
     e = _safe_name(os.path.splitext(os.path.basename(enc or ""))[0])
-    return e or "共享编码器组"
+    return e or texts.MDS_N
 
 
 def plan_tidy(cfg):
@@ -1045,7 +1046,7 @@ def plan_tidy(cfg):
             _claim(m, t_dir, TIDY_CLASS_DIR["chat"])
             _claim(os.path.normpath(pj), t_dir, "mmproj")
         else:
-            _claim(m, t_dir, "%s（未找到 mmproj）" % TIDY_CLASS_DIR["chat"])
+            _claim(m, t_dir, texts.MDS_CAT % TIDY_CLASS_DIR["chat"])
 
     # ---- 5) 生图 / 生视频 → 各自类目录（≥2 个成员共用编码器的组进同一个子夹）----
     for kind, grps in groups.items():
@@ -1073,7 +1074,7 @@ def plan_tidy(cfg):
                     if os.path.normcase(os.path.normpath(p)) in cross_set:
                         continue    # 跨类共享件：留原位（见 3b），不进任何组
                     if slot == "llm":
-                        _claim(p, target, "文本编码器")
+                        _claim(p, target, texts.MDS_A2)
                         # 编码器自己的 mmproj（参考图编辑 --llm_vision 要用的那个）也进这一组
                         pj = pairs.get(p)
                         if pj and _in_root(pj):
@@ -1105,7 +1106,7 @@ def apply_tidy(moves, on_moved=None):
             os.makedirs(dst_dir, exist_ok=True)
             dst = os.path.join(dst_dir, os.path.basename(src))
             if os.path.exists(dst):
-                fails.append((src, "目标已存在，跳过"))
+                fails.append((src, texts.MDS_L1))
                 continue
             os.rename(src, dst)
         except Exception as e:

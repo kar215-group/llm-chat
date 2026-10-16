@@ -10,6 +10,7 @@ import time
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog, font as tkfont
 
+from .. import texts
 from ..core import (capability, codesign, cloudjobs, engine_install, hardware,
                     localmodels, media, providers, sdprofile, secrets, textfile, updater)
 from ..core.config import (APP_DIR, APP_VERSION, CFG_VERSION, DEFAULT_CONFIG,
@@ -35,8 +36,8 @@ from .service import START_BLOCK_TIP
 #     预算，两处同时亮长文案会出界 22px。所以那屏两个框都收短成「写法不合格」；
 #   · 云端视频分辨率的框（两处）也用短文案：档位标签（720P）是合法写法，
 #     "填 X*Y" 的提示对它本就半对半错，示例留在该行 "?" 气泡里。
-SIZE_WARN = "写法不合格，填 X*Y"
-SIZE_WARN_RES = "写法不合格"
+SIZE_WARN = texts.SET_SIZE_WARN
+SIZE_WARN_RES = texts.SET_SIZE_WARN_RES
 
 
 def _vidres_allow(t):
@@ -359,16 +360,10 @@ def _upd_help_text():
     知道我们多久问一次 GitHub、额度怎么算（那是省额度的事）。只留"它是什么、什么时候会自己
     查、查到会怎样"。后台定期查这条要留着：弹窗会在用户没动过手时冒出来，得让他知道正常。
     """
-    tail = "进入本页时会自动按「正式版」查一次"
+    tail = texts.SET_UPD_HELP_TEXT_TAIL
     if secrets.get_github_token():
-        tail += "；开发者模式下还会在后台定期查"
-    return ("检查更新：按右边选的通道向 GitHub 查最新 Release。\n"
-            "正式版 = 只看正式发布的 Release；测试版 = 把预发布一起算，给最新的那个。\n"
-            "查到新版本会弹「发现新版本」窗口，点「立即更新」就下载并替换本程序，"
-            "替换前会再确认一次（需要关闭程序）。\n"
-            "自动检查弹的窗被关掉后，同一个版本不再自动弹第二次；"
-            "手动点「检查更新」永远弹。\n"
-            "打开下载页 = 查到新版本时跳到它的下载页。\n" + tail + "。")
+        tail += texts.SET_UPD_HELP_TEXT_TAIL_2
+    return (texts.SET_UPD_HELP_TEXT_CAT + tail + "。")
 
 
 def _local_model_shown(cfg):
@@ -443,21 +438,21 @@ def _open_outdir(path, what, setting=""):
     """
     p = str(path or "").strip()
     if not p or not os.path.isabs(p):
-        msg = "还没设置%s。" % what
+        msg = texts.SET_OPEN_OUTDIR_CAT % what
         if setting:
-            msg += "\n  请在 设置 → %s 里填上目录。" % setting
-        messagebox.showwarning("输出目录", msg)
+            msg += texts.SET_OPEN_OUTDIR_CAT_2 % setting
+        messagebox.showwarning(texts.SET_OPEN_OUTDIR_A0, msg)
         return False
     try:
         os.makedirs(p, exist_ok=True)
         os.startfile(p)
         return True
     except Exception as e:
-        messagebox.showwarning("输出目录", "打不开 %s：\n  %s" % (p, e))
+        messagebox.showwarning(texts.SET_OPEN_OUTDIR_A0, texts.SWF_FILE_OPEN_FAIL % (p, e))
         return False
 
 
-NEW_PROVIDER_LABEL = "＋ 新建服务商…"      # 下拉里"还没建起来"那一项的标签
+NEW_PROVIDER_LABEL = texts.SET_NEW_PROVIDER_LABEL      # 下拉里"还没建起来"那一项的标签
 
 # 数值键的**可接受区间**：只列"填错了会静默出事"的那些 —— 端口填 99999 = 服务起不来、
 # ctx 填十亿 = 启动即 OOM、步数 0 = 引擎报错。不在这张表里的键只查"是不是数字"。
@@ -502,10 +497,10 @@ def _num_error(v):
         try:
             n = int(raw)
         except Exception:
-            return "「%s」要填整数（现在是 %r）。" % (k, raw[:20])
+            return texts.SET_NUM_ERROR_CAT % (k, raw[:20])
         lo, hi = _NUM_RANGE.get(k, (None, None))
         if lo is not None and not (lo <= n <= hi):
-            return "「%s」要填 %d ~ %d 之间的整数（现在是 %d）。" % (k, lo, hi, n)
+            return texts.SET_NUM_ERROR_CAT_2 % (k, lo, hi, n)
     for k in FLOAT_KEYS:
         if k not in v:
             continue
@@ -513,10 +508,10 @@ def _num_error(v):
         try:
             f = float(raw)
         except Exception:
-            return "「%s」要填数字（现在是 %r）。" % (k, raw[:20])
+            return texts.SET_NUM_ERROR_CAT_3 % (k, raw[:20])
         lo, hi = _FLOAT_RANGE.get(k, (None, None))
         if lo is not None and not (lo <= f <= hi):
-            return "「%s」要填 %.4g ~ %.4g 之间的数字（现在是 %.4g）。" % (k, lo, hi, f)
+            return texts.SET_NUM_ERROR_CAT_4 % (k, lo, hi, f)
     # 「agent 上下文长度」不在 INT_KEYS 里（它写的是按模型记录，不是配置键），这里补上
     # 等价校验——此前它绕过全部数值检查与区间夹取：填 99999999 照样保存，agent 场景
     # 下次启动直接按它拉起服务 OOM；填非数字则写回静默失败（排查报告 R-115）。
@@ -525,10 +520,10 @@ def _num_error(v):
         try:
             n = int(raw)
         except Exception:
-            return "「agent 上下文长度」要填整数（现在是 %r）。" % raw[:20]
+            return texts.SET_NUM_ERROR_CAT_5 % raw[:20]
         lo, hi = _NUM_RANGE["ctx"]
         if not (lo <= n <= hi):
-            return "「agent 上下文长度」要填 512 ~ 1048576 之间的整数（现在是 %d）。" % n
+            return texts.SET_NUM_ERROR_CAT_6 % n
     return ""
 
 
@@ -555,38 +550,30 @@ class SettingsMixin:
         return os.path.basename(chat[0]) if chat else ""
 
     def _api_config_text(self):
-        return ("服务类型: OpenAI 兼容 (Chat Completions)\n"
-                "Base URL: %s\n"
-                "API Key:  %s\n"
-                "模型名:   %s\n"
-                "—— 客户端填法 ——\n"
-                "在 agent 应用中选择 OpenAI Compatible / 自定义 OpenAI，逐项粘贴以上四项；\n"
-                "模型名支持模糊匹配（略写、带不带 .gguf 都可命中）。"
+        return (texts.SET_API_CONFIG_TEXT_CAT
                 % (self._api_base_url(), self.cfg.get("api_key", ""),
-                   self._api_model_name() or "（暂无可用聊天模型）"))
+                   self._api_model_name() or texts.SET_API_CONFIG_TEXT_N))
 
     def _gen_api_key(self):
         k = gen_api_key()
         self.cfg["api_key"] = k
         save_config(self.cfg)
         messagebox.showinfo("API Key",
-                            "已生成新的 API Key：\n\n%s\n\n"
-                            "注意：Key 是服务启动参数，需「重启服务」后生效。" % k)
+                            texts.SET_GEN_API_KEY_CAT % k)
         return k
 
     def _restart_proxy(self):
         self.proxy.stop()
         if not has_local_chat(self.cfg):
             self._proxy_usable = False
-            self._append("\n[API] 这台机器上还没有可转发的本地文本模型，代理不起 —— "
-                         "先在 设置 → 本地模型 备好引擎与模型。\n", "meta")
+            self._append(texts.SET_RESTART_PROXY_A0, "meta")
             return
         self._proxy_usable = True
         # 手动「重启代理」只看功能启用与否，不看「自启动」—— 自启动只管程序启动那一次
         if self.cfg.get("proxy_enabled"):
             self.proxy.start()
         else:
-            self._append("\n[API] 代理已停用（设置中可重新启用并重启代理）。\n", "meta")
+            self._append(texts.SET_RESTART_PROXY_A0_2, "meta")
 
     def open_settings(self, jump=""):
         """打开设置窗口。`jump` = 要直接定位到的导航叶子 key（输出栏那两个按钮用）。"""
@@ -600,7 +587,7 @@ class SettingsMixin:
             return
         win = tk.Toplevel(self.root)
         self._settings_win = win
-        win.title("设置")
+        win.title(texts.WDG_SETTINGS_TITLE)
         # 经典背景 + DWM 标题栏 / 框线两件套收在 theme.style_toplevel（坑 184/186）
         theme.style_toplevel(win)
         # 实测（DPI-aware，scaling≈2.0）滚动内容最宽一行需要 789px，左栏 232 + 边距
@@ -727,9 +714,9 @@ class SettingsMixin:
                 return
             keys = fold_keys.get(name) or []
             cut = sum(1 for k in keys if _changed(k))
-            tail = ("（%d · 已改 %d）" % (len(keys), cut)) if cut else ("（%d）" % len(keys))
+            tail = (texts.SET_RENDER_FOLD_CAT % (len(keys), cut)) if cut else ("（%d）" % len(keys))
             try:
-                head.configure(text="%s 高级参数%s" % ("▾" if open_ else "▸", tail))
+                head.configure(text=texts.SET_RENDER_FOLD_CAT_2 % ("▾" if open_ else "▸", tail))
             except Exception:
                 pass
 
@@ -912,16 +899,16 @@ class SettingsMixin:
                 r1["i"] += 1
                 v["show_reasoning"] = tk.BooleanVar(
                     value=bool(self.cfg.get("show_reasoning", True)))
-                theme.check(t1, text="展示思考过程",
+                theme.check(t1, text=texts.SET_LTGEN_N,
                                 variable=v["show_reasoning"]).grid(
                     row=i, column=0, columnspan=3, sticky="w", pady=8)
-                ent(t1, r1, "temperature", "随机性",
-                    "采样温度（0~2）：越高输出越发散有创意，越低越稳定保守；接近 0 时几乎固定。")
+                ent(t1, r1, "temperature", texts.SET_LTGEN_A3,
+                    texts.SET_LTGEN_A4)
                 i = r1["i"]
                 r1["i"] += 1
                 head = tk.Frame(t1, background=widgets.default_bg())
                 head.grid(row=i, column=0, sticky="nw", padx=(0, 8), pady=5)
-                ttk.Label(head, text="系统提示词", width=14, anchor="nw").pack(side="left")
+                ttk.Label(head, text=texts.SET_LTGEN_N_2, width=14, anchor="nw").pack(side="left")
                 # 边框必须显式给：裸 Text 的默认高亮环色与主题底色同灰，四边全部
                 # 融进背景（视觉上"下边框丢了"，实测四边都丢）；焦点态给主色，与
                 # 圆角输入框（Round.TEntry 的 focus 态）同一套语义
@@ -935,19 +922,18 @@ class SettingsMixin:
                 v["system_prompt"].insert("1.0", str(self.cfg.get("system_prompt", "")))
                 return
             ent(t1, r1, "temperature", "temperature",
-                "采样温度（0~2）：越高输出越发散有创意，越低越稳定保守；接近 0 时几乎固定。")
+                texts.SET_LTGEN_A4)
             ent(t1, r1, "top_p", "top_p",
-                "核采样（0~1）：只在累计概率达到 p 的候选词里抽样。")
+                texts.SET_LTGEN_A4_2)
             ent(t1, r1, "max_tokens", "max_tokens",
-                "单次回复上限（token）。注意：思考过程 + 正式回答共享该额度，"
-                "Qwen3 思考较长，建议 ≥4096；到上限会被截断并提示。",
-                hint="思考与回答共用")
+                texts.SET_LTGEN_A4_3,
+                hint=texts.SET_LTGEN_N_3)
             i = r1["i"]
             r1["i"] += 1
             head = tk.Frame(t1, background=widgets.default_bg())
             head.grid(row=i, column=0, sticky="nw", padx=(0, 8), pady=5)
             ttk.Label(head, text="system_prompt", width=14, anchor="nw").pack(side="left")
-            widgets.HelpDot(head, "系统提示词：给模型的人设与规则，自动放在每轮对话最前面。").pack(side="left", padx=(2, 0))
+            widgets.HelpDot(head, texts.SET_LTGEN_A1).pack(side="left", padx=(2, 0))
             # width 必须显式给：tk.Text 默认 80 字符，在高 DPI 下要 1080px，
             # 会把这一行顶出滚动可视区（横向不能滚，等于看不见）
             # 边框显式给（同上面 simple 分支：默认高亮环色与主题底色融合会隐形）
@@ -963,7 +949,7 @@ class SettingsMixin:
             i = r1["i"]
             r1["i"] += 1
             v["show_reasoning"] = tk.BooleanVar(value=bool(self.cfg.get("show_reasoning", True)))
-            theme.check(t1, text="在对话中显示模型的思考过程（reasoning，灰色斜体）",
+            theme.check(t1, text=texts.SET_LTGEN_N_4,
                             variable=v["show_reasoning"]).grid(
                 row=i, column=0, columnspan=3, sticky="w", pady=8)
 
@@ -971,12 +957,12 @@ class SettingsMixin:
             fold_gen = "local_text:gen"
             _fold_head(t1, r1, fold_gen, ("top_k", "repeat_penalty", "seed"))
             ent(t1, r1, "top_k", "top_k",
-                "每一步只在概率最高的 k 个词中选取，常用 40。", fold=fold_gen)
+                texts.SET_LTGEN_A4_4, fold=fold_gen)
             ent(t1, r1, "repeat_penalty", "repeat_penalty",
-                "重复惩罚（通常 1.0~1.3）：大于 1 抑制复读式重复，1.0 表示关闭。",
+                texts.SET_LTGEN_A4_5,
                 fold=fold_gen)
             ent(t1, r1, "seed", "seed",
-                "随机种子：-1 表示随机；填固定数字可复现同一次输出。", fold=fold_gen)
+                texts.SET_LTGEN_A4_6, fold=fold_gen)
 
         # ---- 区块 2：本地文本模型 / 服务参数 ----
         @section("local_text", "svc")
@@ -986,16 +972,14 @@ class SettingsMixin:
             # 原样回显会让本地参数里出现云端模型；写回语义见 _apply_settings。
             v["model"] = tk.StringVar(value=_local_model_shown(self.cfg))
             ent(t2, r2, "model", "model",
-                "当前**本地**模型 GGUF 完整路径（也可直接点主页模型名切换）。"
-                "选中云端模型时这一栏留空；填了并保存即切回本地。", width=30)
+                texts.SET_LTSVC_A4, width=30)
             ent(t2, r2, "models_dir", "models_dir",
-                "模型文件夹：主页模型下拉列表扫描此目录下所有 .gguf 文件。", width=30)
+                texts.SET_LTSVC_A4_2, width=30)
             # ngl：显示/修改的是"当前模型"的值（按模型分别记忆）
             v["ngl"] = tk.StringVar(value=str(current_ngl(self.cfg)))
             e_ngl = theme.entry(t2, textvariable=v["ngl"], width=8)
             row(t2, r2, "n-gpu-layers", e_ngl,
-                "放进显存的层数（当前模型）。新模型会按显存与模型大小自动计算并按模型分别记忆；"
-                "此处修改仅对当前模型生效。0 = 全部放 CPU。")
+                texts.SET_LTSVC_A4_3)
             # ctx：与 ngl 同一口径 —— 显示/修改的是"当前模型"的值（按模型记忆）。
             # 原来这里预填的是全局兜底 cfg["ctx"]，而保存又无条件写进当前模型的记录，
             # 于是"打开任意一页点保存"就会把该模型自动算出的 context 覆盖掉（坑 130）
@@ -1006,24 +990,19 @@ class SettingsMixin:
             v["_svc_snap"] = os.path.basename(str(self.cfg.get("model", "")))
             e_ctx = theme.entry(t2, textvariable=v["ctx"], width=8)
             _row(t2, r2, "context (-c)", e_ctx,
-                 "上下文长度（token）：容纳 系统提示 + 全部对话 + 工具定义 + 回答。"
-                 "按模型分别记忆，切换模型时自动带上各自的值；新模型会按显存与内存预算"
-                 "自动推算一个安全值。KV 成本差别很大：35B-A3B 约 2.5GB / 64K，"
-                 "而 27B（大 head_dim）约 16GB / 64K —— 后者请适当降低，"
-                 "否则占用大量内存/显存（启动时界面会显示 KV 预估）。",
-                 hint="按模型记忆")
+                 texts.SET_LTSVC_A4_4,
+                 hint=texts.SET_LTSVC_N)
             ent(t2, r2, "port", "port",
-                "API 端口，默认 8080。")
+                texts.SET_LTSVC_A4_5)
             # 这里**不放 api_key**：那是「本地模型 API」那一页的事（生成 / 复制 / 撤销都在一处），
             # 摆在服务参数里会让人以为改完要重启服务，也会和那页的只读回显对不上
             v["reasoning_mode"] = tk.StringVar(value=str(self.cfg.get("reasoning_mode", "default")))
             cb = theme.comb(t2, textvariable=v["reasoning_mode"],
                               values=["default", "off", "budget"], width=8, state="readonly")
             row(t2, r2, "reasoning", cb,
-                "思考模式：default 跟随模型模板；off 关闭思考（更快、不吃 max_tokens 额度）；"
-                "budget 限制思考 token 数。")
-            ent(t2, r2, "exe", "server 路径",
-                "llama-server.exe 完整路径。", width=30)
+                texts.SET_LTSVC_A4_6)
+            ent(t2, r2, "exe", texts.SET_LTSVC_A3,
+                texts.SET_LTSVC_A4_7, width=30)
 
             # 「高级参数」：硬件属性（自动探测预填，平时不用看）、线程数、
             # 思考预算（只在 reasoning=budget 时用）、附加命令行 —— 都是"配一次就不管"的，
@@ -1032,21 +1011,19 @@ class SettingsMixin:
             _fold_head(t2, r2, fold_svc,
                        ("gpu_name", "vram_gb", "ram_gb", "threads",
                         "reasoning_budget", "extra_args"))
-            ent(t2, r2, "gpu_name", "GPU 型号",
-                "显卡型号（首次启动自动探测预填，可手动修改）。", width=32, fold=fold_svc)
-            ent(t2, r2, "vram_gb", "显存 (GB)",
-                "显存容量：新模型 GPU 层数自动计算直接使用此值，不再临时询问系统；"
-                "探测失败或多卡时可手动填写。", width=8, fold=fold_svc)
-            ent(t2, r2, "ram_gb", "内存 (GB)",
-                "系统内存总量（首次启动自动探测预填，可修改）。"
-                "加入 / 启动模型的性能分级用它判「装不装得下」。", width=8,
+            ent(t2, r2, "gpu_name", texts.SET_LTSVC_A3_2,
+                texts.SET_LTSVC_A4_8, width=32, fold=fold_svc)
+            ent(t2, r2, "vram_gb", texts.SET_LTSVC_A3_3,
+                texts.SET_LTSVC_A4_9, width=8, fold=fold_svc)
+            ent(t2, r2, "ram_gb", texts.SET_LTSVC_A3_4,
+                texts.SET_LTSVC_A4_10, width=8,
                 fold=fold_svc)
             ent(t2, r2, "threads", "threads",
-                "CPU 线程数，0 = 自动。一般留 0。", fold=fold_svc)
+                texts.SET_LTSVC_A4_11, fold=fold_svc)
             ent(t2, r2, "reasoning_budget", "budget tokens",
-                "思考预算：reasoning=budget 时，思考最多用多少 token。", fold=fold_svc)
+                texts.SET_LTSVC_A4_12, fold=fold_svc)
             ent(t2, r2, "extra_args", "extra_args",
-                "附加命令行参数（高级）：空格分隔，原样追加给 llama-server。", width=24,
+                texts.SET_LTSVC_A4_13, width=24,
                 fold=fold_svc)
 
         # ---- 区块 3：本地图像与视频 / 生图 ----
@@ -1060,24 +1037,20 @@ class SettingsMixin:
                 # 普通用户模式（2026-10-07 W 定）：分辨率 + 输出目录 + 打开输出目录 三件；
                 # 引擎目录 / 模型文件夹 / 模型族 / 步数 / CFG 与全部配套件都在高级模式
                 # （程序按扫描与模型族表自动安排，普通用户不需要碰）。
-                _size_entry(t3, r3, "img_size", "分辨率",
-                    "宽x高，如 1024x1024；填 832*480、832，480 也认，会自动归一成 x。"
-                    "分辨率越高越慢。会自动补到本族要求的倍数"
-                    "（SD 系 8 的倍数、Flux/SD3/Wan 16 的倍数），不合适的尺寸会被抬上去。",
-                    width=12, hint="宽x高")
-                ent(t3, r3, "img_output_dir", "输出目录",
-                    "本地生图的落地目录；留空 = 产物文件夹下的 本地\\image。"
-                    "填相对路径时按程序目录解析。",
-                    width=30, hint="留空=产物文件夹")
+                _size_entry(t3, r3, "img_size", texts.SET_LMIMG_A3,
+                    texts.SET_LMIMG_A4,
+                    width=12, hint=texts.SET_LMIMG_N)
+                ent(t3, r3, "img_output_dir", texts.SET_OPEN_OUTDIR_A0,
+                    texts.SET_LMIMG_A4_2,
+                    width=30, hint=texts.SET_LMIMG_N_2)
                 fr_i = ttk.Frame(t3)
-                theme.button(fr_i, text="打开输出目录",
+                theme.button(fr_i, text=texts.SET_LMIMG_N_3,
                            command=lambda: _open_outdir(
                                media.img_out_dir(self.cfg),
-                               "生图输出目录",
-                               "本地生图 → 输出目录")).pack(side="left")
+                               texts.SET_LMIMG_A1,
+                               texts.SET_LMIMG_A2)).pack(side="left")
                 row(t3, r3, "", fr_i,
-                    "生成结果写在「输出目录」指定的文件夹（留空 = 产物文件夹\\本地\\image）"
-                    "下的 img_时间戳.png。")
+                    texts.SET_LMIMG_A4_3)
                 return
 
             def _fill_state(var):
@@ -1088,19 +1061,18 @@ class SettingsMixin:
                 except Exception:
                     n = 0
                 if n:
-                    var.set("生图模型：认出 %d 个" % n)
+                    var.set(texts.SET_LMIMG_CAT % n)
                 else:
-                    var.set("还没认到生图模型：先填下面两项，或去「模型文件与引擎」扫描")
+                    var.set(texts.SET_LMIMG_A0)
 
             img_state = tk.StringVar(value="")
             _state_row(t3, r3, img_state, _fill_state, img_state)
-            ent(t3, r3, "sd_dir", "引擎目录",
-                "sd.cpp 引擎所在目录（内含 sd-cli.exe / sd-server.exe）。", width=30)
-            ent(t3, r3, "image_model_dir", "生图模型文件夹",
-                "扩散模型与它的配套件（VAE、文本编码器、视觉投影器 mmproj）都放这里；"
-                "留空 = 模型目录下的「生图」子文件夹。", width=30)
-            ent(t3, r3, "img_model_file", "默认生图模型",
-                "默认选中的扩散模型文件名（.gguf / .safetensors / .ckpt 都行）。", width=30)
+            ent(t3, r3, "sd_dir", texts.SET_LMIMG_A3_2,
+                texts.SET_LMIMG_A4_4, width=30)
+            ent(t3, r3, "image_model_dir", texts.SET_LMIMG_A3_3,
+                texts.SET_LMIMG_A4_5, width=30)
+            ent(t3, r3, "img_model_file", texts.SET_LMIMG_A3_4,
+                texts.SET_LMIMG_A4_6, width=30)
             # 模型族：识别结果只决定"拼哪些参数、要哪些配套件"，参数值仍来自下面这些设置
             _fam_opts = sdprofile.family_choices("image")
             _code2label = {c: t for c, t in _fam_opts}
@@ -1111,8 +1083,8 @@ class SettingsMixin:
                                   width=24, values=[t for _c, t in _fam_opts])
             img_note = tk.StringVar(value="")
             _fam_row = r3["i"]
-            row(t3, r3, "模型族", fam_cb,
-                "按权重文件里的张量名与文件名自动认这一族；认错了在这里手动指定。")
+            row(t3, r3, texts.SET_LMIMG_A2_2, fam_cb,
+                texts.SET_LMIMG_A4_7)
             # 「识别为…」与下拉同排、贴它右侧（W 2026-10-03）：状态回显归控件那一侧，
             # 不另起一行占版心
             ttk.Label(t3, textvariable=img_note, style="Note.TLabel",
@@ -1128,23 +1100,19 @@ class SettingsMixin:
                 fid, _basis, _ = sdprofile.detect_file(path, kind="image", forced=code)
                 # 只留族名：「通用（只喂文件）」那半句是给下拉看的说明，贴进状态行
                 # 会把这一行顶出右边界（坑 76）
-                img_note.set("识别为：%s" % sdprofile.label_of(fid).split("（")[0])
+                img_note.set(texts.SET_LMIMG_CAT_2 % sdprofile.label_of(fid).split("（")[0])
 
             v["img_family"].trace_add("write", refresh_img_note)
             # 开页这次回显要读模型文件头，延到开页之后（_idle_fill）；下拉联动那次仍即时算
             _idle_fill(t3, refresh_img_note)
-            ent(t3, r3, "img_steps", "默认步数",
-                "默认采样步数（1~200）：少 = 快、多 = 细节更多，耗时大致与步数成正比"
-                "（8 步与 20 步差两倍多）。具体到某个模型族的推荐值，看它自己页面的说明。",
-                hint="8 步最快")
-            _size_entry(t3, r3, "img_size", "默认分辨率",
-                "宽x高，如 1024x1024；填 832*480、832，480 也认，会自动归一成 x。"
-                "分辨率越高越慢。会自动补到本族要求的倍数"
-                "（SD 系 8 的倍数、Flux/SD3/Wan 16 的倍数），不合适的尺寸会被抬上去。",
-                width=12, hint="宽x高")
-            ent(t3, r3, "img_cfg", "默认 CFG",
-                "提示词服从度。Qwen-Image 官方推荐 2.5；Flux dev/schnell 常给 1.0，"
-                "SDXL/SD1.5 常给 6~8。切族时记得改这一档。")
+            ent(t3, r3, "img_steps", texts.SET_LMIMG_A3_5,
+                texts.SET_LMIMG_A4_8,
+                hint=texts.SET_LMIMG_N_4)
+            _size_entry(t3, r3, "img_size", texts.SET_LMIMG_A3_6,
+                texts.SET_LMIMG_A4,
+                width=12, hint=texts.SET_LMIMG_N)
+            ent(t3, r3, "img_cfg", texts.SET_LMIMG_A3_7,
+                texts.SET_LMIMG_A4_9)
             fold_img = "local_media:img"
             _fold_head(t3, r3, fold_img,
                        ("img_vae_file", "img_llm_file", "img_clip_l_file",
@@ -1154,93 +1122,77 @@ class SettingsMixin:
                         "img_strength_auto", "img_strength_light", "img_strength_mid",
                         "img_strength",
                         "img_guide_scale", "img_ref_args"))
-            ent(t3, r3, "img_output_dir", "输出目录",
-                "本地生图的落地目录；留空 = 产物文件夹下的 本地\\image"
-                "（产物文件夹在 设置 → 云端模型 → 生图 / 生视频 的「修改产物位置」里改）。"
-                "填相对路径时按程序目录解析。",
-                width=30, hint="留空=产物文件夹", fold=fold_img)
-            ent(t3, r3, "img_vae_file", "VAE 文件",
-                "留空 = 在本族要求的目录里自动找（按文件名含 vae / ae）。放了多个家族"
-                "的权重又挑错时，在这里指名。", width=30, hint="留空=自动", fold=fold_img)
-            ent(t3, r3, "img_llm_file", "LLM 编码器",
-                "LLM 文本编码器的 .gguf（Qwen-Image、FLUX.2 这类要用）。CLIP 系的模型不用填。",
-                width=30, hint="留空=自动", fold=fold_img)
+            ent(t3, r3, "img_output_dir", texts.SET_OPEN_OUTDIR_A0,
+                texts.SET_LMIMG_A4_10,
+                width=30, hint=texts.SET_LMIMG_N_2, fold=fold_img)
+            ent(t3, r3, "img_vae_file", texts.SET_LMIMG_A3_8,
+                texts.SET_LMIMG_A4_11, width=30, hint=texts.SET_LMIMG_N_5, fold=fold_img)
+            ent(t3, r3, "img_llm_file", texts.SET_LMIMG_A3_9,
+                texts.SET_LMIMG_A4_12,
+                width=30, hint=texts.SET_LMIMG_N_5, fold=fold_img)
             ent(t3, r3, "img_clip_l_file", "CLIP-L",
-                "clip_l.safetensors 之类（Flux / SD3 必需）。", width=30, hint="留空=自动",
+                texts.SET_LMIMG_A4_13, width=30, hint=texts.SET_LMIMG_N_5,
                 fold=fold_img)
             ent(t3, r3, "img_clip_g_file", "CLIP-G",
-                "clip_g.safetensors 之类（SDXL / Flux 用）。", width=30, hint="留空=自动",
+                texts.SET_LMIMG_A4_14, width=30, hint=texts.SET_LMIMG_N_5,
                 fold=fold_img)
             ent(t3, r3, "img_t5_file", "T5-XXL",
-                "t5xxl_fp16.safetensors 之类（Flux / SD3 必需）。", width=30, hint="留空=自动",
+                texts.SET_LMIMG_A4_15, width=30, hint=texts.SET_LMIMG_N_5,
                 fold=fold_img)
-            ent(t3, r3, "img_negative", "负向提示词",
-                "留空 = 不传给引擎（Qwen-Image 本来就不带这一项）。SD/SDXL/Wan 这类"
-                "支持负向提示词的模型可以自己填。", width=30, hint="留空=不传", fold=fold_img)
-            ent(t3, r3, "img_seed", "默认种子",
-                "-1 随机；固定数字可复现同一次输出。", fold=fold_img)
-            ent(t3, r3, "img_backend", "组件后端",
-                "sd-cli --backend。留空 = 用该族默认（LLM 系走 te=cpu,diffusion=cuda0,vae=cuda0，"
-                "CLIP 系走 clip=cpu,…）。8GB 显存装不下时可以试 diffusion=cpu 或 vae=cpu。",
-                width=30, hint="留空=默认", fold=fold_img)
-            ent(t3, r3, "img_params_backend", "权重后端",
-                "sd-cli --params-backend。留空 = 引擎 auto-fit 自己安排；显存吃紧可填 "
-                "diffusion=disk 从内存/磁盘流式取权重。", width=30, hint="留空=自动",
+            ent(t3, r3, "img_negative", texts.SET_LMIMG_A3_10,
+                texts.SET_LMIMG_A4_16, width=30, hint=texts.SET_LMIMG_N_6, fold=fold_img)
+            ent(t3, r3, "img_seed", texts.SET_LMIMG_A3_11,
+                texts.SET_LMIMG_A4_17, fold=fold_img)
+            ent(t3, r3, "img_backend", texts.SET_LMIMG_A3_12,
+                texts.SET_LMIMG_A4_18,
+                width=30, hint=texts.SET_LMIMG_N_7, fold=fold_img)
+            ent(t3, r3, "img_params_backend", texts.SET_LMIMG_A3_13,
+                texts.SET_LMIMG_A4_19, width=30, hint=texts.SET_LMIMG_N_5,
                 fold=fold_img)
-            ent(t3, r3, "img_extra_args", "附加参数",
-                "原样拼到命令行末尾，是「识别没覆盖到」的人工出口。例如 "
-                "--scheduler karras --prediction eps 或 --taesd <路径> 做快速预览。",
-                width=30, hint="可留空", fold=fold_img)
+            ent(t3, r3, "img_extra_args", texts.SET_LMIMG_A3_14,
+                texts.SET_LMIMG_A4_20,
+                width=30, hint=texts.SET_LMIMG_N_8, fold=fold_img)
             # 底图重绘的强度分档（2026-10-11）：判据与取值口径只有 core/media.edit_strength
             # 那一处，这里只是把三档的值交给人。`img_strength`（常规档）以前**页面根本没有
             # 入口**，只能改配置文件 —— 顺带补上。
             v["img_strength_auto"] = tk.BooleanVar(
                 value=bool(self.cfg.get("img_strength_auto", True)))
-            cb_auto_st = theme.check(t3, text="按提示词自动调整",
+            cb_auto_st = theme.check(t3, text=texts.SET_LMIMG_N_9,
                                      variable=v["img_strength_auto"])
-            row(t3, r3, "自动分档", cb_auto_st,
-                "底图重绘时按提示词判改动幅度选强度：只动画质的走小改，改背景或某个东西的走普通改，"
-                "重画换风格与判不出的走大幅；关掉则恒用大幅档。只对本地 sd.cpp 的底图重绘生效。",
+            row(t3, r3, texts.SET_LMIMG_A2_3, cb_auto_st,
+                texts.SET_LMIMG_A4_21,
                 fold=fold_img)
-            ent(t3, r3, "img_strength_light", "重绘强度·小改",
-                "提示词只动画质（变清晰 / 修复 / 抠图）或明说「保持不变」时发出去的 "
-                "sd-cli --strength；越低越保得住原图，太低就几乎不改画面。",
-                hint="越低越保真", fold=fold_img)
-            ent(t3, r3, "img_strength_mid", "重绘强度·普通改",
-                "提示词要改属性或局部（换背景 / 去掉或加上某个东西）时发出去的 sd-cli --strength；"
-                "构图还在，但人脸、衣服这类细节会开始被重画。",
-                hint="构图在、细节漂", fold=fold_img)
-            ent(t3, r3, "img_strength", "重绘强度·大幅",
-                "提示词要换主体 / 重画 / 换风格时发出去的 sd-cli --strength，"
-                "也是判不出改动幅度时的兜底值；取值 0~1，留空或填 0 会退回出厂值。",
-                hint="兜底档", fold=fold_img)
+            ent(t3, r3, "img_strength_light", texts.SET_LMIMG_A3_15,
+                texts.SET_LMIMG_A4_22,
+                hint=texts.SET_LMIMG_N_10, fold=fold_img)
+            ent(t3, r3, "img_strength_mid", texts.SET_LMIMG_A3_16,
+                texts.SET_LMIMG_A4_23,
+                hint=texts.SET_LMIMG_N_11, fold=fold_img)
+            ent(t3, r3, "img_strength", texts.SET_LMIMG_A3_17,
+                texts.SET_LMIMG_A4_24,
+                hint=texts.SET_LMIMG_N_12, fold=fold_img)
 
             # 带图两档各自专属的可调项（W 2026-10-06：先收进折叠区，日后随高级选项
             # 一起搬去独立页）。参数名以 sd-cli --help 为准（坑 95：没实测就写明依据）：
             #   --img-cfg-scale  default: same as --cfg-scale（底图重绘那一路的原文）
             #   --ref-image-args empty = 按模型权重自动判断（主体参考那一路的原文）
-            ent(t3, r3, "img_guide_scale", "图像引导强度",
-                "底图重绘档专用：sd-cli --img-cfg-scale，管**图像条件**对结果的影响力，"
-                "与「默认 CFG」（管提示词服从度）是两件事。0 = 不传，--help 原文 "
-                "default: same as --cfg-scale。参数名按 --help，数值未实测（坑 95）。",
-                hint="0=跟 CFG", fold=fold_img)
-            ent(t3, r3, "img_ref_args", "参考图参数",
-                "主体参考档专用：sd-cli --ref-image-args，键值对串原样拼进命令行"
-                "（例如 strength=0.8）。--help 写明留空 = 按模型权重自动判断，"
-                "留空就不传。参数名按 --help，数值未实测（坑 95）。",
-                width=30, hint="留空=自动", fold=fold_img)
+            ent(t3, r3, "img_guide_scale", texts.SET_LMIMG_A3_18,
+                texts.SET_LMIMG_A4_25,
+                hint=texts.SET_LMIMG_N_13, fold=fold_img)
+            ent(t3, r3, "img_ref_args", texts.SET_LMIMG_A3_19,
+                texts.SET_LMIMG_A4_26,
+                width=30, hint=texts.SET_LMIMG_N_5, fold=fold_img)
 
             # 「输出目录」这一行与生视频那块**同一形状**（标签 + 打开按钮 + 一句说明），
             # 两块的尾巴长得一样，扫一眼就知道哪儿开文件夹
             fr_i = ttk.Frame(t3)
-            theme.button(fr_i, text="打开图片输出文件夹",
+            theme.button(fr_i, text=texts.SET_LMIMG_N_14,
                        command=lambda: _open_outdir(
                            media.img_out_dir(self.cfg),
-                           "生图输出目录",
-                           "生图（sd.cpp） → 高级参数 → 输出目录")).pack(side="left")
-            row(t3, r3, "输出目录", fr_i,
-                "生成结果写在「输出目录」指定的文件夹（留空 = 产物文件夹\\本地\\image）"
-                "下的 img_时间戳.png；引擎每次按需拉起，进程退出即释放显存。")
+                           texts.SET_LMIMG_A1,
+                           texts.SET_LMIMG_A2_4)).pack(side="left")
+            row(t3, r3, texts.SET_OPEN_OUTDIR_A0, fr_i,
+                texts.SET_LMIMG_A4_27)
             refresh_img_note()
 
         # ---- 区块 4：本地图像与视频 / 生视频 ----
@@ -1253,28 +1205,24 @@ class SettingsMixin:
             if simple:
                 # 普通用户模式（2026-10-07 W 定）：分辨率 / 帧率 / 帧数 / 输出目录 /
                 # 打开输出目录 五件；主体文件 / 模型族 / 步数 / CFG 与全部配套件在高级模式。
-                _size_entry(t3b, r3b, "vid_size", "分辨率",
-                    "宽x高，如 512x512；填 832*480、832，480 也认，会自动归一成 x。"
-                    "视频分辨率对显存和耗时都很敏感，先小后大。", width=12)
-                ent(t3b, r3b, "vid_fps", "帧率",
-                    "每秒帧数。MiniMax-H3 的参考视频按 24fps 组织。")
-                ent(t3b, r3b, "vid_frames", "帧数",
-                    "视频长度 = 帧数 ÷ 帧率。**不需要自己凑 4n+1**：引擎会自行对齐到合法帧数"
-                    "（例如填 17 会按 22 帧出片），估算时长也按对齐之后的算。",
-                    hint="引擎自动对齐")
-                ent(t3b, r3b, "vid_output_dir", "输出目录",
-                    "本地生视频的落地目录；留空 = 产物文件夹下的 本地\\video。"
-                    "填相对路径时按程序目录解析。",
-                    width=30, hint="留空=产物文件夹")
+                _size_entry(t3b, r3b, "vid_size", texts.SET_LMIMG_A3,
+                    texts.SET_LMVID_A4, width=12)
+                ent(t3b, r3b, "vid_fps", texts.SET_LMVID_A3,
+                    texts.SET_LMVID_A4_2)
+                ent(t3b, r3b, "vid_frames", texts.SET_LMVID_A3_2,
+                    texts.SET_LMVID_A4_3,
+                    hint=texts.SET_LMVID_N)
+                ent(t3b, r3b, "vid_output_dir", texts.SET_OPEN_OUTDIR_A0,
+                    texts.SET_LMVID_A4_4,
+                    width=30, hint=texts.SET_LMIMG_N_2)
                 fr_v = ttk.Frame(t3b)
-                theme.button(fr_v, text="打开输出目录",
+                theme.button(fr_v, text=texts.SET_LMIMG_N_3,
                            command=lambda: _open_outdir(
                                media.vid_out_dir(self.cfg),
-                               "生视频输出目录",
-                               "本地生视频 → 输出目录")).pack(side="left")
+                               texts.SET_LMVID_A1,
+                               texts.SET_LMVID_A2)).pack(side="left")
                 row(t3b, r3b, "", fr_v,
-                    "生成结果写在「输出目录」指定的文件夹（留空 = 产物文件夹\\本地\\video）"
-                    "下的 vid_时间戳.webm。")
+                    texts.SET_LMVID_A4_5)
                 return
 
             def _fill_state(var):
@@ -1285,19 +1233,17 @@ class SettingsMixin:
                 except Exception:
                     n = 0
                 if n:
-                    var.set("视频模型：认出 %d 个" % n)
+                    var.set(texts.SET_LMVID_CAT % n)
                 else:
-                    var.set("还没认到视频模型：先填下面两项，或去「模型文件与引擎」扫描")
+                    var.set(texts.SET_LMVID_A0)
 
             vid_state = tk.StringVar(value="")
             _state_row(t3b, r3b, vid_state, _fill_state, vid_state)
-            ent(t3b, r3b, "video_model_dir", "视频模型文件夹",
-                "视频组件存放目录：扩散主体 + 文本编码器（LLM 或 T5-XXL）+ 视频 VAE，"
-                "MiniMax-H3 与 Wan 都是这套摆法。"
-                "该目录不存在时会自动改扫 models_dir 顶层与各子目录，所以文件散放在模型库里也能识别。",
+            ent(t3b, r3b, "video_model_dir", texts.SET_LMVID_A3_3,
+                texts.SET_LMVID_A4_6,
                 width=30)
-            ent(t3b, r3b, "vid_model_file", "扩散主体文件名",
-                "留空 = 用扫描到的第一个视频扩散 GGUF。", width=30)
+            ent(t3b, r3b, "vid_model_file", texts.SET_LMVID_A3_4,
+                texts.SET_LMVID_A4_7, width=30)
             _vf_opts = sdprofile.family_choices("video")
             _vf2code = {t: c for c, t in _vf_opts}
             v["vid_family"] = tk.StringVar(
@@ -1307,8 +1253,8 @@ class SettingsMixin:
                                     width=24, values=[t for _c, t in _vf_opts])
             vid_note = tk.StringVar(value="")
             _vfam_row = r3b["i"]
-            row(t3b, r3b, "模型族", vfile_cb,
-                "同一套 sd-cli 可以跑多个视频家族；认错了在这里手动指定。")
+            row(t3b, r3b, texts.SET_LMIMG_A2_2, vfile_cb,
+                texts.SET_LMVID_A4_8)
             ttk.Label(t3b, textvariable=vid_note, style="Note.TLabel",
                       font=("Microsoft YaHei UI", 9)).grid(
                 row=_vfam_row, column=2, sticky="w", padx=(0, 10), pady=5)
@@ -1327,23 +1273,20 @@ class SettingsMixin:
                     except Exception:
                         path = ""
                 fid, _basis, _ = sdprofile.detect_file(path, kind="video", forced=code)
-                vid_note.set("识别为：%s" % sdprofile.label_of(fid).split("（")[0])
+                vid_note.set(texts.SET_LMIMG_CAT_2 % sdprofile.label_of(fid).split("（")[0])
 
             v["vid_family"].trace_add("write", refresh_vid_note)
-            _size_entry(t3b, r3b, "vid_size", "分辨率",
-                "宽x高，如 512x512；填 832*480、832，480 也认，会自动归一成 x。"
-                "视频分辨率对显存和耗时都很敏感，先小后大。", width=12)
-            ent(t3b, r3b, "vid_frames", "帧数",
-                "视频长度 = 帧数 ÷ 帧率。**不需要自己凑 4n+1**：引擎会自行对齐到合法帧数"
-                "（例如填 17 会按 22 帧出片），估算时长也按对齐之后的算。",
-                hint="引擎自动对齐")
-            ent(t3b, r3b, "vid_fps", "帧率",
-                "每秒帧数。MiniMax-H3 的参考视频按 24fps 组织。")
-            ent(t3b, r3b, "vid_steps", "采样步数",
-                "步数直接决定耗时；链路先通再逐步加大。")
+            _size_entry(t3b, r3b, "vid_size", texts.SET_LMIMG_A3,
+                texts.SET_LMVID_A4, width=12)
+            ent(t3b, r3b, "vid_frames", texts.SET_LMVID_A3_2,
+                texts.SET_LMVID_A4_3,
+                hint=texts.SET_LMVID_N)
+            ent(t3b, r3b, "vid_fps", texts.SET_LMVID_A3,
+                texts.SET_LMVID_A4_2)
+            ent(t3b, r3b, "vid_steps", texts.SET_LMVID_A3_5,
+                texts.SET_LMVID_A4_9)
             ent(t3b, r3b, "vid_cfg", "CFG",
-                "提示词服从度。MiniMax-H3 用 5.0 就行；Wan 的官方区间是 3~6。"
-                "大于 1 时引擎会去编码负向提示词，H3 那一族下面那栏就不能留空。")
+                texts.SET_LMVID_A4_10)
 
             fold_vid = "local_media:vid"
             _fold_head(t3b, r3b, fold_vid,
@@ -1352,59 +1295,51 @@ class SettingsMixin:
                         "vid_audio_vae_file", "vid_neg_prompt", "vid_format",
                         "vid_seed", "vid_backend", "vid_params_backend",
                         "vid_extra_args", "vid_output_dir"))
-            ent(t3b, r3b, "vid_output_dir", "输出目录",
-                "本地生视频的落地目录；留空 = 产物文件夹下的 本地\\video"
-                "（产物文件夹在 设置 → 云端模型 → 生图 / 生视频 的「修改产物位置」里改）。"
-                "填相对路径时按程序目录解析。",
-                width=30, hint="留空=产物文件夹", fold=fold_vid)
-            ent(t3b, r3b, "vid_llm_file", "文本编码器文件名",
-                "留空 = 自动取与扩散主体配套的编码器（按文件名匹配，通常名字里带 vl / llm）。",
+            ent(t3b, r3b, "vid_output_dir", texts.SET_OPEN_OUTDIR_A0,
+                texts.SET_LMVID_A4_11,
+                width=30, hint=texts.SET_LMIMG_N_2, fold=fold_vid)
+            ent(t3b, r3b, "vid_llm_file", texts.SET_LMVID_A3_6,
+                texts.SET_LMVID_A4_12,
                 width=30, fold=fold_vid)
-            ent(t3b, r3b, "vid_vae_file", "视频 VAE 文件名",
-                "留空 = 在主体所在目录里按文件名含 vae 自动找（不含 audio 的那个）。",
+            ent(t3b, r3b, "vid_vae_file", texts.SET_LMVID_A3_7,
+                texts.SET_LMVID_A4_13,
                 width=30, fold=fold_vid)
-            ent(t3b, r3b, "vid_t5_file", "T5-XXL 文件名",
-                "Wan / LTX / HunyuanVideo 的文本编码器（--t5xxl）。MiniMax-H3 不用填这一项。",
-                width=30, hint="留空=自动", fold=fold_vid)
-            ent(t3b, r3b, "vid_tokenizer_file", "tokenizer 文件",
-                "部分家族要 tokenizer.json（引擎的 --tokenizer）。留空 = 不传。",
-                width=30, hint="多数不用填", fold=fold_vid)
-            ent(t3b, r3b, "vid_high_noise_file", "高噪段模型",
-                "Wan2.2 的 MoE 版是**两个**扩散文件（高噪段 + 低噪段），这里填高噪段那个"
-                "（--high-noise-diffusion-model）。5B 版与单文件模型留空即可。",
-                width=30, hint="MoE 才要", fold=fold_vid)
-            ent(t3b, r3b, "vid_audio_vae_file", "音频 VAE",
-                "只有想要**有声视频**才需要；没有它照样出片，只是没有声音。"
-                "留空 = 按文件名含 audio + vae 自动找。", width=30, hint="留空=自动",
+            ent(t3b, r3b, "vid_t5_file", texts.SET_LMVID_A3_8,
+                texts.SET_LMVID_A4_14,
+                width=30, hint=texts.SET_LMIMG_N_5, fold=fold_vid)
+            ent(t3b, r3b, "vid_tokenizer_file", texts.SET_LMVID_A3_9,
+                texts.SET_LMVID_A4_15,
+                width=30, hint=texts.SET_LMVID_N_2, fold=fold_vid)
+            ent(t3b, r3b, "vid_high_noise_file", texts.SET_LMVID_A3_10,
+                texts.SET_LMVID_A4_16,
+                width=30, hint=texts.SET_LMVID_N_3, fold=fold_vid)
+            ent(t3b, r3b, "vid_audio_vae_file", texts.SET_LMVID_A3_11,
+                texts.SET_LMVID_A4_17, width=30, hint=texts.SET_LMIMG_N_5,
                 fold=fold_vid)
-            ent(t3b, r3b, "vid_neg_prompt", "负向提示词",
-                "MiniMax-H3 在 CFG>1 时**必须能编码出负向提示词**，留空会报 "
-                "failed to encode negative video prompt 并退出码 1 —— 这一族留空时代码会用"
-                "内置兜底值。Wan / LTX 不要求，留空就不传给引擎。",
-                width=30, hint="H3 不能留空", fold=fold_vid)
-            ent(t3b, r3b, "vid_format", "输出容器",
-                "webm / avi / webp（sd-cli 单文件视频输出只支持这三种）。", width=10,
+            ent(t3b, r3b, "vid_neg_prompt", texts.SET_LMIMG_A3_10,
+                texts.SET_LMVID_A4_18,
+                width=30, hint=texts.SET_LMVID_N_4, fold=fold_vid)
+            ent(t3b, r3b, "vid_format", texts.SET_LMVID_A3_12,
+                texts.SET_LMVID_A4_19, width=10,
                 fold=fold_vid)
-            ent(t3b, r3b, "vid_seed", "种子", "-1 随机。", fold=fold_vid)
-            ent(t3b, r3b, "vid_backend", "组件后端",
-                "sd-cli --backend：各组件跑在哪。默认把文本编码器放 CPU、扩散与 VAE 放显卡，"
-                "与生图一致。", width=30, fold=fold_vid)
-            ent(t3b, r3b, "vid_params_backend", "权重后端",
-                "sd-cli --params-backend：权重放哪。显存吃紧时可填 diffusion=disk 让引擎从内存/磁盘流式取权重。",
+            ent(t3b, r3b, "vid_seed", texts.SET_LMVID_A3_13, texts.SET_LMVID_A4_20, fold=fold_vid)
+            ent(t3b, r3b, "vid_backend", texts.SET_LMIMG_A3_12,
+                texts.SET_LMVID_A4_21, width=30, fold=fold_vid)
+            ent(t3b, r3b, "vid_params_backend", texts.SET_LMIMG_A3_13,
+                texts.SET_LMVID_A4_22,
                 width=30, fold=fold_vid)
-            ent(t3b, r3b, "vid_extra_args", "附加参数",
-                "原样拼进命令行。默认开了 --vae-tiling --temporal-tiling 分块解码来压显存。",
+            ent(t3b, r3b, "vid_extra_args", texts.SET_LMIMG_A3_14,
+                texts.SET_LMVID_A4_23,
                 width=30, fold=fold_vid)
 
             fr_v = ttk.Frame(t3b)
-            theme.button(fr_v, text="打开视频输出文件夹",
+            theme.button(fr_v, text=texts.SET_LMVID_N_5,
                        command=lambda: _open_outdir(
                            media.vid_out_dir(self.cfg),
-                           "生视频输出目录",
-                           "生视频（sd.cpp） → 高级参数 → 输出目录")).pack(side="left")
-            row(t3b, r3b, "输出目录", fr_v,
-                "生成结果写在「输出目录」指定的文件夹（留空 = 产物文件夹\\本地\\video）"
-                "下的 vid_时间戳.webm；引擎每次按需拉起，进程退出即释放显存。")
+                           texts.SET_LMVID_A1,
+                           texts.SET_LMVID_A2_2)).pack(side="left")
+            row(t3b, r3b, texts.SET_OPEN_OUTDIR_A0, fr_v,
+                texts.SET_LMVID_A4_24)
             # 开页这次回显可能要扫视频目录，延到开页之后（_idle_fill）；下拉联动那次仍即时算
             _idle_fill(t3b, refresh_vid_note)
 
@@ -1416,10 +1351,10 @@ class SettingsMixin:
             api_key_var = tk.StringVar(value=str(self.cfg.get("api_key", "")))
             # 模型名回显要读一次盘（服务没在跑时走 scan_models），延到开页之后填：
             # 别挡在"点一下左栏"这一下上（_idle_fill）
-            api_model_var = tk.StringVar(value="（读取中…）")
+            api_model_var = tk.StringVar(value=texts.SET_API_N)
 
             def _fill_api_model(var=api_model_var):
-                var.set(self._api_model_name() or "（暂无）")
+                var.set(self._api_model_name() or texts.SET_API_N_2)
 
             _idle_fill(t4, _fill_api_model)
             # 没有本地可转发的文本模型 = 这个功能开不起来：默认关、复选框锁住、顶上说明原因
@@ -1427,14 +1362,14 @@ class SettingsMixin:
             self._proxy_usable = usable
 
             running = self.proxy.running()
-            ttk.Label(t4, text=("已启用 · 端口 %s" % self.cfg.get("proxy_port", 8081))
-                      if running else "未启用（在本页开启后，agent 才能连上）",
+            ttk.Label(t4, text=(texts.SET_API_CAT % self.cfg.get("proxy_port", 8081))
+                      if running else texts.SET_API_N_3,
                       style="OkLit.TLabel" if running else "Muted.TLabel",
                       font=("Microsoft YaHei UI", 10, "bold")).grid(
                 row=0, column=0, columnspan=3, sticky="w", pady=(0, 8))
             r4["i"] = 1
             if not usable:
-                ttk.Label(t4, text="这个功能要有本地文本模型才能用：先在 设置 → 本地模型 备好引擎与模型。",
+                ttk.Label(t4, text=texts.SET_API_N_4,
                           style="ErrLit.TLabel", wraplength=740, justify="left",
                           font=("Microsoft YaHei UI", 9)).grid(
                     row=r4["i"], column=0, columnspan=3, sticky="w", pady=(0, 8))
@@ -1445,25 +1380,23 @@ class SettingsMixin:
             # 一个事实只写一处，两个入口各查各的迟早走偏）。这一页的 usable 本来就是
             # has_local_chat，置灰只是把它也落到这个按钮上；悬停文案与顶栏共用一份表。
             blk = chat_start_block(self.cfg)
-            svc_btn = theme.button(fr, text="启动 / 重启服务（给 agent 用）", width=22,
+            svc_btn = theme.button(fr, text=texts.SET_API_N_5, width=22,
                        command=self.on_start_restart_agent,
                        state="disabled" if blk else "normal")
             widgets.bind_tip(svc_btn, lambda: START_BLOCK_TIP.get(blk, ""))
             svc_btn.pack(side="left", padx=(0, 6))
-            theme.button(fr, text="停止服务", width=10,
+            theme.button(fr, text=texts.APP_BTN_STOP_SVC, width=10,
                        command=self.stop_server_async).pack(side="left", padx=(0, 6))
-            theme.button(fr, text="重启代理", width=10,
+            theme.button(fr, text=texts.SET_API_N_6, width=10,
                        command=self._restart_proxy).pack(side="left")
-            row(t4, r4, "服务控制", fr,
-                "与主页面是同一个服务，只是按下面那个 context 启动；"
-                "agent 要的模型或 context 与当前不一致时，会自动停掉再重启。")
+            row(t4, r4, texts.SET_API_A2, fr,
+                texts.SET_API_A4)
 
             self.agent_ctx_var = tk.StringVar(
                 value=str(ctx_for(self.cfg, agent=True)))
-            row(t4, r4, "agent 上下文长度",
+            row(t4, r4, texts.SET_API_A2_2,
                 theme.entry(t4, textvariable=self.agent_ctx_var, width=10),
-                "agent 通过下面那个地址调用时，服务用这个上下文长度启动"
-                "（默认 35B=131072、27B=32768；改完对下次启动生效）。")
+                texts.SET_API_A4_2)
             v["agent_ctx"] = self.agent_ctx_var
             # 建页时的"当前模型"快照（与服务参数页同一理由，见 _svc_snap；R-114/R-115）
             v["_api_snap"] = os.path.basename(str(self.cfg.get("model", "")))
@@ -1471,64 +1404,61 @@ class SettingsMixin:
             fr = ttk.Frame(t4)
             v_bu = tk.StringVar(value=self._api_base_url())
             theme.entry(fr, textvariable=v_bu, width=25, state="readonly").pack(side="left", padx=(0, 6))
-            theme.button(fr, text="复制", width=6,
+            theme.button(fr, text=texts.SET_API_N_7, width=6,
                        command=lambda: self._copy_text(v_bu.get(), "Base URL")).pack(side="left")
-            row(t4, r4, "地址与 Key", fr,
-                "别的软件（agent / 脚本）填这一行：地址是本机的 OpenAI 兼容入口，"
-                "Key 一起给它。不要填 8080 —— 那个是后端服务，填了会连不上。")
+            row(t4, r4, texts.SET_API_A2_3, fr,
+                texts.SET_API_A4_3)
 
             fr = ttk.Frame(t4)
             theme.entry(fr, textvariable=api_key_var, width=20, state="readonly").pack(
                 side="left", padx=(0, 6))
-            theme.button(fr, text="复制", width=6,
+            theme.button(fr, text=texts.SET_API_N_7, width=6,
                        command=lambda: self._copy_text(api_key_var.get(), "API Key")).pack(
                 side="left", padx=(0, 6))
-            theme.button(fr, text="重新生成", width=10,
+            theme.button(fr, text=texts.SET_API_N_8, width=10,
                        command=lambda: (api_key_var.set(self._gen_api_key()),
                                         self.api_hint_var.set(
-                                            "已生成新 Key，重启服务后生效"))).pack(side="left")
-            row(t4, r4, "API Key", fr, "鉴权密钥（随机生成）；修改后需重启服务生效。")
+                                            texts.SET_API_A0))).pack(side="left")
+            row(t4, r4, "API Key", fr, texts.SET_API_A4_4)
 
             fr = ttk.Frame(t4)
             theme.entry(fr, textvariable=api_model_var, width=25, state="readonly").pack(
                 side="left", padx=(0, 6))
-            theme.button(fr, text="复制", width=6,
-                       command=lambda: self._copy_text(api_model_var.get(), "模型名")).pack(side="left")
-            row(t4, r4, "模型名", fr, "建议填写值（实时取服务加载的模型）；支持模糊匹配，略写也能命中。")
+            theme.button(fr, text=texts.SET_API_N_7, width=6,
+                       command=lambda: self._copy_text(api_model_var.get(), texts.SET_API_A1)).pack(side="left")
+            row(t4, r4, texts.SET_API_A1, fr, texts.SET_API_A4_5)
 
             fr = ttk.Frame(t4)
-            theme.button(fr, text="复制完整配置（含填法说明）", width=24,
-                       command=lambda: self._copy_text(self._api_config_text(), "完整配置")).pack(side="left")
-            row(t4, r4, "一键复制", fr, "粘贴到任意 agent 应用的自定义模型配置即可接入。")
+            theme.button(fr, text=texts.SET_API_N_9, width=24,
+                       command=lambda: self._copy_text(self._api_config_text(), texts.SET_API_A1_2)).pack(side="left")
+            row(t4, r4, texts.SET_API_A2_4, fr, texts.SET_API_A4_6)
 
-            ent(t4, r4, "proxy_port", "代理端口",
-                "agent 接入端口（默认 8081）；改动后点「重启代理」生效，"
-                "并且要同步改 agent 里填的端口——8080 是后端服务端口，不是给 agent 的。",
-                width=8, hint="重启生效")
+            ent(t4, r4, "proxy_port", texts.SET_API_A3,
+                texts.SET_API_A4_7,
+                width=8, hint=texts.SET_API_N_10)
             # 启用与自启动是两个开关（2026-10-07 W 定）：
             #   启用   = 这个功能开不开（默认关；普通用户模式整页不出现，切回去也不会被关）
             #   自启动 = 程序启动时自动把代理服务带起来；不勾 = 要用时在本页手动启动
             v_px = tk.BooleanVar(value=bool(self.cfg.get("proxy_enabled")) and usable)
-            cb_px = theme.check(t4, text="启用本地模型 API", variable=v_px,
+            cb_px = theme.check(t4, text=texts.SET_API_N_11, variable=v_px,
                                     state="normal" if usable else "disabled")
-            row(t4, r4, "启用", cb_px,
-                "关闭后 agent 无法接入；改动后点「重启代理」生效。" if usable else
-                "现在锁着：这台机器上还没有能转发的本地文本模型。")
+            row(t4, r4, texts.SET_API_A2_5, cb_px,
+                texts.SET_API_N_12 if usable else
+                texts.SET_API_N_13)
             v["proxy_enabled"] = v_px
             v_auto = tk.BooleanVar(value=bool(self.cfg.get("proxy_autostart", True)))
-            cb_auto = theme.check(t4, text="自启动（打开本程序时自动开启这个服务）",
+            cb_auto = theme.check(t4, text=texts.SET_API_N_14,
                                       variable=v_auto,
                                       state="normal" if usable else "disabled")
-            row(t4, r4, "自启动", cb_auto,
-                "只在「启用」勾着时算数；不勾就要每次在本页手动「启动 / 重启服务」。")
+            row(t4, r4, texts.SET_API_A2_6, cb_auto,
+                texts.SET_API_A4_8)
             v["proxy_autostart"] = v_auto
 
             ttk.Label(t4, textvariable=self.api_hint_var, style="OkLit.TLabel",
                       font=("Microsoft YaHei UI", 9)).grid(
                 row=r4["i"], column=1, columnspan=2, sticky="w", pady=4)
             r4["i"] += 1
-            ttk.Label(t4, text=("提示：agent 应用的请求通常包含系统提示与工具定义，上下文较长——"
-                                "当前 context=%s，建议 ≥ 16384（在 设置 → 服务参数 调整后重启服务）。"
+            ttk.Label(t4, text=(texts.SET_API_CAT_2
                                 # 这一页是 agent 场景，显示 agent 那一份（与上面那个输入框同源）；
                                 # 原来显示全局兜底 cfg["ctx"]，与按模型记忆的实际值对不上（坑 130）
                                 % ctx_for(self.cfg, agent=True)),
@@ -1536,9 +1466,7 @@ class SettingsMixin:
                       font=("Microsoft YaHei UI", 9)).grid(
                 row=r4["i"], column=0, columnspan=3, sticky="w", pady=(8, 2))
             r4["i"] += 1
-            ttk.Label(t4, text=("这个代理只转发本地文本模型：生图 / 生视频不经这里调用"
-                                "（云端那两条在应用内直连服务商原生接口，"
-                                "本地那两条走 sd-cli；agent 用不到图像接口）。"),
+            ttk.Label(t4, text=(texts.SET_API_N_15),
                       style="ErrLit.TLabel", wraplength=740, justify="left",
                       font=("Microsoft YaHei UI", 9)).grid(
                 row=r4["i"], column=0, columnspan=3, sticky="w", pady=(8, 2))
@@ -1553,10 +1481,10 @@ class SettingsMixin:
                 try:
                     new = (int(str(v["proxy_port"].get()).strip()), bool(v_px.get()))
                 except Exception:
-                    return False, "代理端口要是数字，改好再保存。"
+                    return False, texts.SET_API_L1
                 if new != init_proxy:
                     self._restart_proxy()
-                    self.api_hint_var.set("代理已按新设置重启（端口 %s）。" % new[0])
+                    self.api_hint_var.set(texts.SET_API_CAT_3 % new[0])
                 return True, ""
 
             save_hooks[t4] = _api_hook
@@ -1578,8 +1506,8 @@ class SettingsMixin:
                 vars_[k] = tk.StringVar()
             # 「原生接口协议」下拉里摆的是中文标签，存进配置的是代码（auto/none/aliyun/…）：
             # 域名认不出来的自建代理只能靠这一项手动指过去
-            _ma_opts = [("auto", "自动判断（按域名识别）"),
-                        ("none", "不接（这个服务商只用文本）")] + [
+            _ma_opts = [("auto", texts.SET_PROV_L1),
+                        ("none", texts.SET_PROV_L1_2)] + [
                 (c, providers.MEDIA_LABEL[c]) for c in providers.MEDIA_APIS
                 if c not in ("auto", "none")]
             _ma_text = {t: c for c, t in _ma_opts}
@@ -1616,17 +1544,17 @@ class SettingsMixin:
 
             def refresh_url(*_a):
                 if st["builtin"] and not providers.builtin_base_editable(st["pid"]):
-                    url_lbl.set("请求地址：%s"
+                    url_lbl.set(texts.SET_PROV_CAT
                                 % providers.chat_completions_url(
                                     providers.builtin(st["pid"])))
                 else:
-                    url_lbl.set("请求地址：%s"
+                    url_lbl.set(texts.SET_PROV_CAT
                                 % providers.chat_completions_url(
                                     {"base_url": vars_["base_url"].get()}))
 
             def refresh_key(*_a):
                 m = secrets.mask(secrets.get_api_key(st["pid"])) if st["pid"] else ""
-                key_lbl.set("该服务商已存密钥：%s" % m if m else "该服务商还没有密钥")
+                key_lbl.set(texts.SET_PROV_CAT_2 % m if m else texts.SET_PROV_N)
 
             def refresh_media(*_a):
                 """回显"这个服务商能不能走云端生图/生视频"，省得用户猜。
@@ -1638,12 +1566,11 @@ class SettingsMixin:
                 api, root = providers.media_api(p), providers.media_api_root(p)
                 # 只在"这条接不了 / 要你手填"时才占一行（W 2026-10-03）；认出来了不说话
                 if str(p.get("media_api") or "auto") == "none":
-                    media_lbl.set("云端生图 / 生视频：这条不接（服务商只用文本对话）。")
+                    media_lbl.set(texts.SET_PROV_A0)
                 elif not api:
-                    media_lbl.set("云端生图 / 生视频：这条不接原生接口；"
-                                  "自建网关可手动选协议或填「原生接口地址」。")
+                    media_lbl.set(texts.SET_PROV_A0_2)
                 elif not root:
-                    media_lbl.set("云端生图 / 生视频：请填「原生接口地址」。")
+                    media_lbl.set(texts.SET_PROV_A0_3)
                 else:
                     media_lbl.set("")
 
@@ -1652,12 +1579,12 @@ class SettingsMixin:
                 try:
                     pend = cloudjobs.unfinished()
                 except Exception as e:
-                    jobs_lbl.set("云端任务台账读不了：%s" % e)
+                    jobs_lbl.set(texts.SET_PROV_CAT_3 % e)
                     return
                 if not pend:
-                    jobs_lbl.set("云端任务台账：没有等着取回的任务。")
+                    jobs_lbl.set(texts.SET_PROV_A0_4)
                     return
-                jobs_lbl.set("云端任务台账：%d 个结果还没落地 ｜ %s"
+                jobs_lbl.set(texts.SET_PROV_CAT_4
                              % (len(pend),
                                 "；".join(cloudjobs.describe(j) for j in pend[:3])))
 
@@ -1672,9 +1599,9 @@ class SettingsMixin:
                         lab.get(m, m))
                     lb.insert("end", row_label)
                     lb_map[row_label] = m
-                menu_lbl.set("加入主页面的模型：%d 个（模型菜单里就出现这些）"
+                menu_lbl.set(texts.SET_PROV_CAT_5
                              % len(st["models"]))
-                cat_lbl.set("该服务商已知模型：%d 个（勾选界面里可选，缓存着不重复请求）"
+                cat_lbl.set(texts.SET_PROV_CAT_6
                             % len(providers.catalog(
                                 {"models": st["models"],
                                  "model_kinds": st["kinds"]})))
@@ -1715,9 +1642,7 @@ class SettingsMixin:
                     # 字段本来已经收起，"名称与 base_url：内置"纯属重复
                     if editable:
                         built_note.configure(
-                            text="这一条能改成你自己账号的专属域名：把 base_url 换成 "
-                                 "https://你的WorkspaceId.cn-beijing.maas.aliyuncs.com/"
-                                 "compatible-mode/v1（密钥与域名配套，不能混用）。")
+                            text=texts.SET_PROV_N_2)
                         built_note.grid()
                     else:
                         built_note.grid_remove()
@@ -1757,13 +1682,13 @@ class SettingsMixin:
                         "media_base_url": vars_["media_base_url"].get(),
                         "media_api": _ma_text.get(vars_["media_api"].get(), "auto")})
                     if not ok:
-                        msg_lbl.set("保存失败：%s" % err)
+                        msg_lbl.set(texts.SET_PROV_CAT_7 % err)
                         return False, err      # 半填的新服务商：留着窗口让用户补
                     st["pid"] = base_id
                     save_config(self.cfg)
                     refresh_combo(keep=base_id)
                     if not silent:
-                        msg_lbl.set("已新建服务商「%s」。" % (name or base_id))
+                        msg_lbl.set(texts.SET_PROV_CAT_8 % (name or base_id))
                     self._update_model_label()
                     return True, ""
                 data = {"name": vars_["name"].get(), "base_url": vars_["base_url"].get(),
@@ -1774,11 +1699,11 @@ class SettingsMixin:
                         "media_base_url": vars_["media_base_url"].get(),
                         "media_api": _ma_text.get(vars_["media_api"].get(), "auto")}
                 if not providers.update_provider(self.cfg, st["pid"], data):
-                    msg_lbl.set("保存失败：provider「%s」不存在。" % st["pid"])
-                    return False, "provider 不存在，可能刚被删除。"
+                    msg_lbl.set(texts.SET_PROV_CAT_9 % st["pid"])
+                    return False, texts.SET_PROV_L1_3
                 save_config(self.cfg)
                 if not silent:
-                    msg_lbl.set("已保存「%s」（主页面模型 %d 个）。"
+                    msg_lbl.set(texts.SET_PROV_CAT_10
                                 % (st["pid"], len(st["models"])))
                 self._update_model_label()
                 return True, ""
@@ -1787,19 +1712,19 @@ class SettingsMixin:
                 """密钥/模型选择/测试都要先有个能用的 provider id。"""
                 ok, msg = commit(silent=True)
                 if not ok:
-                    messagebox.showwarning("先保存", msg)
+                    messagebox.showwarning(texts.SET_PROV_A0_5, msg)
                 return ok
 
             def do_delete():
                 pid = st["pid"]
                 if not pid:
-                    msg_lbl.set("没有选中要删除的服务商。")
+                    msg_lbl.set(texts.SET_PROV_A0_6)
                     return
-                tip = ("「%s」是内置服务商，删掉后下次启动会按内置定义重新出现。"
+                tip = (texts.SET_PROV_CAT_11
                        % providers.provider_label_for(self.cfg, pid)) if providers.is_builtin(pid) \
-                    else "删除「%s」？" % providers.provider_label_for(self.cfg, pid, vars_["name"].get())
-                if not messagebox.askyesno("删除服务商",
-                                           tip + "\n\n模型清单会一起删除，已存密钥也会被清掉。"):
+                    else texts.SET_PROV_CAT_12 % providers.provider_label_for(self.cfg, pid, vars_["name"].get())
+                if not messagebox.askyesno(texts.SET_PROV_A0_7,
+                                           tip + texts.SET_PROV_CAT_13):
                     return
                 providers.remove_provider(self.cfg, pid)
                 secrets.set_api_key(pid, "")
@@ -1813,7 +1738,7 @@ class SettingsMixin:
                     self._render_status(self._server_alive_flag, self._server_ready_flag)
                 save_config(self.cfg)
                 refresh_combo()
-                msg_lbl.set("已删除。")
+                msg_lbl.set(texts.SET_PROV_A0_8)
 
             # ---------------- 密钥 ----------------
             def do_key_dialog():
@@ -1823,11 +1748,11 @@ class SettingsMixin:
                 d.title("API Key")
                 d.transient(win)
                 pname = (providers.builtin(st["pid"]).get("name")
-                         or vars_["name"].get() or st["pid"] or "新的服务商")
-                widgets.panel_label(d, text="给「%s」填写 API Key" % pname,
+                         or vars_["name"].get() or st["pid"] or texts.SET_PROV_N_3)
+                widgets.panel_label(d, text=texts.SET_PROV_CAT_14 % pname,
                                     font=("Microsoft YaHei UI", 10, "bold")).pack(
                     anchor="w", padx=14, pady=(12, 4))
-                widgets.panel_label(d, fg_key="hint", text="密钥只写进 secrets.json，留在你这台机器上；界面与配置文件里都只显示掩码。",
+                widgets.panel_label(d, fg_key="hint", text=texts.SET_PROV_N_4,
                                     wraplength=420, justify="left",
                                     font=("Microsoft YaHei UI", 9)).pack(anchor="w", padx=14)
                 e = theme.entry(d, width=40, show="●")
@@ -1849,11 +1774,11 @@ class SettingsMixin:
                         # 密钥要有 id 才能落进 secrets.json
                         ok, err = commit(silent=True)
                         if not ok:
-                            messagebox.showwarning("API Key", err or "先填名称与 base_url。")
+                            messagebox.showwarning("API Key", err or texts.SET_PROV_N_5)
                             return
                     secrets.set_api_key(st["pid"], k)
                     refresh_key()
-                    msg_lbl.set("已保存「%s」的密钥。" % st["pid"])
+                    msg_lbl.set(texts.SET_PROV_CAT_15 % st["pid"])
                     d.destroy()
                     # 填完密钥可能就凑齐了"第一个可用模型"（这台机器没装任何引擎的
                     # 常见情形）⇒ 立刻切过去（坑 150）
@@ -1863,15 +1788,15 @@ class SettingsMixin:
                         pass
 
                 def clear():
-                    if st["pid"] and messagebox.askyesno("API Key", "清除「%s」的已存密钥？"
+                    if st["pid"] and messagebox.askyesno("API Key", texts.SET_PROV_CAT_16
                                                          % st["pid"]):
                         secrets.set_api_key(st["pid"], "")
                         refresh_key()
                     d.destroy()
 
-                theme.button(bf, text="清除", width=8, command=clear).pack(side="left", padx=4)
-                theme.button(bf, text="取消", width=8, command=d.destroy).pack(side="left", padx=4)
-                theme.button(bf, text="保存密钥", width=10, command=save).pack(side="left")
+                theme.button(bf, text=texts.SET_PROV_N_6, width=8, command=clear).pack(side="left", padx=4)
+                theme.button(bf, text=texts.BTN_CANCEL, width=8, command=d.destroy).pack(side="left", padx=4)
+                theme.button(bf, text=texts.SET_PROV_N_7, width=10, command=save).pack(side="left")
                 e.focus_set()
                 widgets.center_on(d, win)   # 摆到设置页正中，别落在屏幕左上角
 
@@ -1879,7 +1804,7 @@ class SettingsMixin:
             def open_picker(fetch=None, explain=""):
                 """独立的模型勾选界面：勾中的才进主页面菜单；可手填模型名并"试一试"。"""
                 if not st["pid"]:
-                    messagebox.showwarning("选择模型", "先保存这个服务商，再选模型。")
+                    messagebox.showwarning(texts.SET_PROV_A0_9, texts.SET_PROV_A1)
                     return
                 pid = st["pid"]
                 known = providers.catalog({"models": st["models"],
@@ -1889,7 +1814,7 @@ class SettingsMixin:
                     fetch = not known
                 d = tk.Toplevel(win)
                 d.withdraw()          # 先藏起来，摆正了再显示（否则左上角闪一下）
-                d.title("选择模型 · %s"
+                d.title(texts.SET_PROV_CAT_17
                         % (providers.get_provider(self.cfg, pid) or {}).get("name", pid))
                 theme.style_toplevel(d)
                 d.geometry("560x520")
@@ -1913,12 +1838,12 @@ class SettingsMixin:
                 # 顶部只放说明文字，按钮一律挪到底部：窄窗口里左右对撞会互相盖住
                 head = ttk.Frame(d)
                 head.pack(side="top", fill="x", padx=12, pady=(10, 2))
-                hint_lbl = ttk.Label(head, text="勾中并点「确定」才进主页面菜单。",
+                hint_lbl = ttk.Label(head, text=texts.SET_PROV_N_8,
                                      style="Hint.TLabel", wraplength=520, justify="left",
                                      font=("Microsoft YaHei UI", 9))
                 hint_lbl.pack(side="left")
                 status = tk.StringVar(value=explain or
-                                      ("表里是已知的 %d 个模型；点「刷新清单」可向接口重新索取。"
+                                      (texts.SET_PROV_CAT_18
                                        % len(known)))
                 st_lbl = ttk.Label(d, textvariable=status, style="Hint.TLabel",
                                    wraplength=600, justify="left",
@@ -1962,7 +1887,7 @@ class SettingsMixin:
                 hdr = ttk.Frame(d, height=20)
                 hdr.pack(side="top", fill="x", padx=12, before=wrap)
                 hdr_lbl = {txt: ttk.Label(hdr, text=txt, font=HDR)
-                           for txt in ("模型", "图片输入", "模型类型")}
+                           for txt in (texts.COST_LBL_MODEL, texts.CHAT_IMAGE_INPUT, texts.SET_PROV_L2)}
                 for txt in hdr_lbl:
                     hdr_lbl[txt].place(x=0, y=1)
                 # 表头框高度按真实字号给：写死的数字在高 DPI 下会把标题切一半
@@ -2041,8 +1966,8 @@ class SettingsMixin:
                         for w in (cb, ic, kc):
                             w.grid()
                         table.update_idletasks()
-                    for lbl, w in ((hdr_lbl["模型"], cb), (hdr_lbl["图片输入"], ic),
-                                   (hdr_lbl["模型类型"], kc)):
+                    for lbl, w in ((hdr_lbl[texts.COST_LBL_MODEL], cb), (hdr_lbl[texts.CHAT_IMAGE_INPUT], ic),
+                                   (hdr_lbl[texts.SET_PROV_L2], kc)):
                         lbl.place(x=max(w.winfo_rootx() - base, 0), y=1)
                     if not was:
                         for w in (cb, ic, kc):
@@ -2166,8 +2091,8 @@ class SettingsMixin:
                 def group_text(key, models, open_):
                     """组名带上"里面有没有我当前勾中的"：收起时也能看见这组有几个要用的。"""
                     n_on = sum(1 for m in models if rows[m][0].get())
-                    return "%s %s · %d 个%s" % ("▾" if open_ else "▸", key, len(models),
-                                            ("（已勾 %d）" % n_on) if n_on else "")
+                    return texts.MDL_SECTION_HEAD % ("▾" if open_ else "▸", key, len(models),
+                                            (texts.SET_PROV_CAT_19 % n_on) if n_on else "")
 
                 def sync_folds():
                     for ent in spec:
@@ -2260,7 +2185,7 @@ class SettingsMixin:
                     """向接口拉 /models；拉到的补进列表（勾选状态保留）。"""
                     if not force and not fetch:
                         return
-                    status.set("正在向接口取模型清单…")
+                    status.set(texts.SET_PROV_A0_10)
 
                     snap = provider_snapshot()          # Tk 变量只能在主线程读
                     key = secrets.get_api_key(pid)
@@ -2274,7 +2199,7 @@ class SettingsMixin:
                     if not d.winfo_exists():
                         return
                     if not okk:
-                        status.set("没能取到清单：%s\n也可以在下面填模型名，用「测试连接并加入」验证。"
+                        status.set(texts.SET_PROV_CAT_20
                                    % text)
                         return
                     added = 0
@@ -2286,7 +2211,7 @@ class SettingsMixin:
                     if new:
                         add_models(new)     # 一次并进来：整批重算缩写 + 重排一次
                     # 顶部说明已经讲过"勾中并点确定"，这里只报接口给了多少，不重复
-                    status.set("接口给了 %d 个模型（新增 %d 个）。" % (len(ids), added))
+                    status.set(texts.SET_PROV_CAT_21 % (len(ids), added))
 
                 def try_add():
                     """"这名字服务端认不认"只有**对话模型**能零成本问出来。
@@ -2298,13 +2223,12 @@ class SettingsMixin:
                     """
                     m = e_new.get().strip()
                     if not m:
-                        status.set("先输入模型名。")
+                        status.set(texts.SET_PROV_A0_11)
                         return
                     if providers.guess_kind(m) != "text":
-                        manual_add("这个名字看着像媒体模型，对话接口验不了它"
-                                   "（原生媒体接口一试就计费）")
+                        manual_add(texts.SET_PROV_A0_12)
                         return
-                    status.set("正在用「%s」试一次最小请求（服务端会点名说这个名字认不认）…" % m)
+                    status.set(texts.SET_PROV_CAT_22 % m)
 
                     snap = provider_snapshot()          # 同上：主线程取值，子线程只用数据
                     key = secrets.get_api_key(pid)
@@ -2319,7 +2243,7 @@ class SettingsMixin:
                         return
                     if okk:
                         add_models([(m, providers.guess_kind(m), True)])
-                        status.set("✅ %s：%s（已勾上）" % (m, text))
+                        status.set(texts.SET_PROV_CAT_23 % (m, text))
                     else:
                         status.set("❌ %s：%s" % (m, text))
 
@@ -2331,10 +2255,10 @@ class SettingsMixin:
                     """
                     m = e_new.get().strip()
                     if not m:
-                        status.set("先输入模型名。")
+                        status.set(texts.SET_PROV_A0_11)
                         return False
                     if m in rows:
-                        status.set("表里已经有「%s」了。" % m)
+                        status.set(texts.SET_PROV_CAT_24 % m)
                         return False
                     k = providers.guess_kind(m)
                     add_models([(m, k, True)])
@@ -2342,9 +2266,9 @@ class SettingsMixin:
                     if k != "text":
                         p = providers.get_provider(self.cfg, pid) or {}
                         if not providers.supports_media(p, k):
-                            extra = "；注意：这一家还没接%s的原生接口，发送前会被拦下" \
+                            extra = texts.SET_PROV_CAT_25 \
                                 % providers.KIND_LABEL[k]
-                    status.set("%s已按名字加入「%s」（能力：%s；觉得不对在那一行右边改）%s。"
+                    status.set(texts.SET_PROV_CAT_26
                                % ((why + "，") if why else "", m,
                                   providers.KIND_LABEL[k], extra))
                     e_new.delete(0, "end")
@@ -2354,7 +2278,7 @@ class SettingsMixin:
                 # 窗口再矮也是压表格，不会把按钮挤掉
                 botf = ttk.Frame(d)
                 botf.pack(side="bottom", fill="x", padx=12, pady=(4, 2), before=wrap)
-                ttk.Label(botf, text="模型名", style="Hint.TLabel",
+                ttk.Label(botf, text=texts.SET_API_A1, style="Hint.TLabel",
                           font=("Microsoft YaHei UI", 9)).pack(side="left", padx=(0, 4))
                 e_new = theme.entry(botf, width=16)
                 e_new.pack(side="left", fill="x", expand=True)
@@ -2362,19 +2286,19 @@ class SettingsMixin:
                 # 看起来就是"加不进去"（W 实测报的那条）。
                 e_new.bind("<Return>", lambda _e: manual_add())
                 e_new.bind("<KP_Enter>", lambda _e: manual_add())
-                theme.button(botf, text="测试连接并加入", width=14,
+                theme.button(botf, text=texts.SET_PROV_N_9, width=14,
                            command=try_add).pack(side="left", padx=(6, 0))
-                theme.button(botf, text="直接加入", width=10,
+                theme.button(botf, text=texts.SET_PROV_N_10, width=10,
                            command=lambda: manual_add()).pack(side="left", padx=(6, 0))
                 # 最下沿：左边两个动作按钮，右边确定/取消，一行装得下 470px 的最小宽度
                 bf2 = ttk.Frame(d)
                 bf2.pack(side="bottom", fill="x", padx=12, pady=(2, 12), before=botf)
-                theme.button(bf2, text="刷新清单", width=9,
+                theme.button(bf2, text=texts.SET_PROV_N_11, width=9,
                            command=lambda: pull(True)).pack(side="left")
-                theme.button(bf2, text="验证图片输入", width=12,
+                theme.button(bf2, text=texts.SET_PROV_N_12, width=12,
                            command=lambda: do_verify()).pack(side="left", padx=(6, 0))
-                theme.button(bf2, text="取消", width=8, command=d.destroy).pack(side="right")
-                theme.button(bf2, text="确定", width=10,
+                theme.button(bf2, text=texts.BTN_CANCEL, width=8, command=d.destroy).pack(side="right")
+                theme.button(bf2, text=texts.BTN_OK, width=10,
                            command=lambda: ok_apply(d)).pack(side="right", padx=6)
 
                 def ok_apply(dlg):
@@ -2396,9 +2320,9 @@ class SettingsMixin:
                     # 完整清单本来就在上面那个 Listbox 里，一条都没少。
                     # 缩写直接复用 add_models 已经算好的 labels，不再重算一遍。
                     if not picked:
-                        msg_lbl.set("已写入主页面模型：（没勾任何模型）")
+                        msg_lbl.set(texts.SET_PROV_A0_13)
                     else:
-                        msg_lbl.set("已写入主页面模型：%d 个（%s%s）"
+                        msg_lbl.set(texts.SET_PROV_CAT_27
                                     % (len(picked),
                                        "、".join(labels.get(m, m) for m in picked[:2]),
                                        " …" if len(picked) > 2 else ""))
@@ -2415,11 +2339,11 @@ class SettingsMixin:
                     """实测：发一张 1x1 图问服务端收不收。比按名字猜可靠，但要花一次最小请求。"""
                     targets = [m for m, (kv, _k, _i) in rows.items() if kv.get()][:5]
                     if not targets:
-                        status.set("先勾几个模型再验证（一次最多测 5 个）。")
+                        status.set(texts.SET_PROV_A0_14)
                         return
                     key = secrets.get_api_key(pid)
                     snap = provider_snapshot()
-                    status.set("正在向服务端确认 %d 个模型的图片输入能力（每个发一次最小请求）…"
+                    status.set(texts.SET_PROV_CAT_28
                                % len(targets))
 
                     def work():
@@ -2429,7 +2353,7 @@ class SettingsMixin:
                                 out.append((m,) + cloud.probe_image_input(
                                     self.cfg, provider=snap, api_key=key, model=m))
                             except Exception as e:
-                                out.append((m, capability.UNKNOWN, "探测出错：%s" % e))
+                                out.append((m, capability.UNKNOWN, texts.SET_PROV_CAT_29 % e))
                         self._ui_q.put(lambda: verified(out))
                     threading.Thread(target=work, daemon=True).start()
 
@@ -2443,9 +2367,9 @@ class SettingsMixin:
                             rows[m][2].set(lab)
                             lines.append("%s → %s" % (m, lab))
                         else:
-                            lines.append("%s → 未确认（%s）" % (m, why))
-                    status.set("验证结果：" + "；".join(lines)
-                               + "。改完点「确定」才写入。")
+                            lines.append(texts.SET_PROV_CAT_30 % (m, why))
+                    status.set(texts.SET_PROV_CAT_31 + "；".join(lines)
+                               + texts.SET_PROV_CAT_32)
 
                 # 拖动门控（W 2026-10-10）：云端模型清单长了拖动同样卡，做法与设置窗一致
                 widgets.ResizeDeferGate(
@@ -2463,18 +2387,17 @@ class SettingsMixin:
             def do_remove_selected():
                 sel = lb.curselection()
                 if not sel:
-                    msg_lbl.set("先在列表里选中要移出的模型。")
+                    msg_lbl.set(texts.SET_PROV_A0_15)
                     return
                 # 反查原名（列表里是缩写显示行，配置里是原名 —— 坑 131）
                 m = lb_map.get(lb.get(sel[0]))
                 if not m:
-                    msg_lbl.set("这条没能对上配置里的模型名（列表可能是旧的）："
-                                "重开一次设置窗口再试。")
+                    msg_lbl.set(texts.SET_PROV_A0_16)
                     return
                 st["models"] = [x for x in st["models"] if x != m]
                 commit(silent=True)
                 refresh_menu_list()
-                msg_lbl.set("已从主页面菜单移出「%s」（它仍留在已知模型里，可随时再勾）。"
+                msg_lbl.set(texts.SET_PROV_CAT_33
                             % providers.short_of(m))
 
             # ---------------- 连通性 ----------------
@@ -2483,9 +2406,9 @@ class SettingsMixin:
                     return
                 key = secrets.get_api_key(st["pid"])
                 if not key:
-                    msg_lbl.set("先按「填该服务商 API Key」存好密钥，再测连接。")
+                    msg_lbl.set(texts.SET_PROV_A0_17)
                     return
-                msg_lbl.set("测试中…（用文本模型发一次 max_tokens=1 的最小请求）")
+                msg_lbl.set(texts.SET_PROV_A0_18)
                 t4b.update_idletasks()
 
                 p = providers.get_provider(self.cfg, st["pid"]) or provider_snapshot()
@@ -2503,9 +2426,9 @@ class SettingsMixin:
                             # 免得刚填好的服务商配着上一家留下的旧缓存清单。
                             open_picker(
                                 fetch=True,
-                                explain="连接测试通过，下面是刚从接口取到的清单。")
+                                explain=texts.SET_PROV_N_13)
                         else:
-                            messagebox.showwarning("连不上", text)
+                            messagebox.showwarning(texts.SET_PROV_A0_19, text)
                     self._ui_q.put(after)
                 threading.Thread(target=work, daemon=True).start()
 
@@ -2526,20 +2449,20 @@ class SettingsMixin:
             bar = ttk.Frame(t4b)
             bar.grid(row=r4b["i"], column=0, columnspan=3, sticky="w", pady=(0, 8))
             r4b["i"] += 1
-            ttk.Label(bar, text="服务商：").pack(side="left")
+            ttk.Label(bar, text=texts.SET_PROV_N_14).pack(side="left")
             combo = theme.comb(bar, width=24, state="readonly")
             combo.pack(side="left", padx=(0, 6))
             combo.bind("<<ComboboxSelected>>", on_pick)
             if not simple:
                 # 「删除」是管理动作，普通用户模式不出现（测试连接按 W 的口径保留）
-                theme.button(bar, text="删除", width=6,
+                theme.button(bar, text=texts.SET_PROV_N_15, width=6,
                            command=do_delete).pack(side="left", padx=3)
-            theme.button(bar, text="测试连接", width=10, command=do_test).pack(side="left", padx=3)
+            theme.button(bar, text=texts.SET_PROV_N_16, width=10, command=do_test).pack(side="left", padx=3)
 
             kr = ttk.Frame(t4b)
             kr.grid(row=r4b["i"], column=0, columnspan=3, sticky="w", pady=(0, 8))
             r4b["i"] += 1
-            theme.button(kr, text="填该服务商 API Key", width=20,
+            theme.button(kr, text=texts.SET_PROV_N_17, width=20,
                        command=do_key_dialog).pack(side="left")
             # 原先这里还有一个「配置本地 API 地址」按钮跳去API 页（W 2026-10-03 要求移除）：
             # 云端这一页只管密钥与模型，混一个"去改本地端口"的入口只会让人以为两者相关。
@@ -2562,8 +2485,7 @@ class SettingsMixin:
             fields = ttk.Frame(t4b)      # 名称：只有自定义服务商可填
             fields.grid(row=r4b["i"], column=0, columnspan=3, sticky="w")
             sub = {"i": 0}
-            ent(fields, sub, None, "名称", "服务商显示名（菜单、下拉、提示里都用它，写中文就行）；"
-                                        "新建时它还兼作这条记录的索引名。",
+            ent(fields, sub, None, texts.SET_PROV_A3, texts.SET_PROV_A4,
                 width=30, var=vars_["name"])
             r4b["i"] += 1
 
@@ -2573,23 +2495,20 @@ class SettingsMixin:
             fields2.grid(row=r4b["i"], column=0, columnspan=3, sticky="w")
             sub2 = {"i": 0}
             ent(fields2, sub2, None, "base_url",
-                "OpenAI 兼容根地址，带不带 /v1 都行（会自动补）。",
+                texts.SET_PROV_A4_2,
                 width=36, var=vars_["base_url"], trace=lambda *a: (refresh_url(),
                                                                    refresh_media()))
-            ent(fields2, sub2, None, "原生接口地址",
-                "云端生图/生视频用的地址，留空 = 从上面那段自动推（把 /compatible-mode/v1 "
-                "换成 /api/v1）。只有跨方案时才需要填，key 与域名不可混用。",
+            ent(fields2, sub2, None, texts.SET_PROV_A3_2,
+                texts.SET_PROV_A4_3,
                 width=36, var=vars_["media_base_url"], trace=refresh_media)
             # width=18：最长的候选串是「不接（这个服务商只用文本）」这类 12 个中日韩字，
             # 18 个"平均字宽"够摆下（24 会把这一行撑到 775px，比视口 768 还宽 → 整行被压扁）
             _ma_cb = theme.comb(fields2, textvariable=vars_["media_api"], state="readonly",
                                   width=18, values=[t for _c, t in _ma_opts])
             _ma_cb.bind("<<ComboboxSelected>>", lambda *a: refresh_media())
-            _row(fields2, sub2, "原生接口协议", _ma_cb,
-                 "生图与生视频走哪套原生协议。按域名自动认（阿里云系 / MiniMax / 智谱 / 华为系）；"
-                 "自建网关、代理或专有域名认不出来时在这里手动指一次。"
-                 "选「不接」= 这个服务商只用文本对话，生图生视频会在发送前拦下。",
-                 hint="自动/手动")
+            _row(fields2, sub2, texts.SET_PROV_A2, _ma_cb,
+                 texts.SET_PROV_A4_4,
+                 hint=texts.SET_PROV_N_18)
             r4b["i"] += 1
 
             if not simple:
@@ -2617,12 +2536,12 @@ class SettingsMixin:
             # 都操作它，对没映射的 Listbox 做 delete/insert 完全合法
             btns = ttk.Frame(mf)
             btns.pack(side="left", padx=(6, 0) if not simple else (0, 0), fill="y")
-            theme.button(btns, text="选择模型…", width=12,
+            theme.button(btns, text=texts.SET_PROV_N_19, width=12,
                        command=do_pick_models).pack(anchor="w", pady=1)
             if not simple:
-                theme.button(btns, text="移出选中项", width=12,
+                theme.button(btns, text=texts.SET_PROV_N_20, width=12,
                            command=do_remove_selected).pack(anchor="w", pady=1)
-                theme.button(btns, text="刷新清单", width=12,
+                theme.button(btns, text=texts.SET_PROV_N_11, width=12,
                            command=lambda: (commit(silent=True),
                                             open_picker(fetch=True))).pack(anchor="w", pady=1)
 
@@ -2638,19 +2557,16 @@ class SettingsMixin:
             r4b["i"] += 1
 
             if not simple:
-                ent(t4b, r4b, None, "超时（秒）", "单次请求超时；思考型模型建议 300 以上。",
+                ent(t4b, r4b, None, texts.SET_PROV_A3_3, texts.SET_PROV_A4_5,
                     var=vars_["timeout"])
-                ent(t4b, r4b, None, "上下文窗口",
-                    "该服务商模型的上下文长度（token），0 = 不声明。"
-                    "留 0 时文本附件按默认 %d token 折行；填上真实窗口（例如 1000000）"
-                    "就多带一些。注意上限还夹在 %d token：附件会留在历史里，"
-                    "之后每一轮都重发一遍，塞太满等于把后续每轮都变成大账单。"
+                ent(t4b, r4b, None, texts.SET_PROV_A3_4,
+                    texts.SET_PROV_CAT_34
                     % (textfile.CLOUD_TOKEN_BUDGET, textfile.CLOUD_TOKEN_CAP),
                     var=vars_["ctx"])
 
                 i = r4b["i"]
                 r4b["i"] += 1
-                theme.check(t4b, text="启用该服务商",
+                theme.check(t4b, text=texts.SET_PROV_N_21,
                                 variable=vars_["enabled"]).grid(
                     row=i, column=1, sticky="w", pady=4)
 
@@ -2666,7 +2582,7 @@ class SettingsMixin:
                 ttk.Label(t4b, textvariable=jobs_lbl, style="Hint.TLabel", wraplength=680,
                           justify="left", font=("Microsoft YaHei UI", 9)).grid(
                     row=i, column=0, columnspan=3, sticky="w", pady=(6, 2))
-                theme.button(t4b, text="刷新任务台账", width=14,
+                theme.button(t4b, text=texts.SET_PROV_N_22, width=14,
                            command=refresh_jobs).grid(row=i, column=2, sticky="e", pady=(6, 2))
 
             def save_page():
@@ -2686,7 +2602,7 @@ class SettingsMixin:
                 sf = ttk.Frame(t4b)
                 sf.grid(row=r4b["i"], column=0, columnspan=3, sticky="w", pady=(4, 4))
                 r4b["i"] += 1
-                theme.button(sf, text="保存本页", width=12, command=save_page).pack(side="left")
+                theme.button(sf, text=texts.SET_PROV_N_23, width=12, command=save_page).pack(side="left")
                 ttk.Label(sf, textvariable=url_lbl, style="Hint.TLabel", wraplength=430,
                           justify="left", font=("Microsoft YaHei UI", 9)).pack(side="left", padx=10)
             # 蓝色状态行两种模式都留：测试连接 / 选模型的结果要有地方说话
@@ -2711,7 +2627,7 @@ class SettingsMixin:
             r4d["i"] += 1
             v["cloud_show_reasoning"] = tk.BooleanVar(
                 value=bool(self.cfg.get("cloud_show_reasoning", True)))
-            theme.check(t4d, text="展示思考过程（云端模型；与本地模型的开关互不影响）",
+            theme.check(t4d, text=texts.SET_CTEXT_N,
                             variable=v["cloud_show_reasoning"]).grid(
                 row=i, column=0, columnspan=3, sticky="w", pady=6)
             if simple:
@@ -2723,7 +2639,7 @@ class SettingsMixin:
             v["show_usage"] = tk.BooleanVar(value=bool(self.cfg.get("show_usage", True)))
             # 勾选框文字长，必须跨列放：占在 column=1 上会把整列撑宽，
             # 于是右侧"短摘要 + ?"那一格被 grid 挤扁（版式自检抓到过）
-            theme.check(t4d, text="每轮结束后显示 token 用量（云端计费可见性）",
+            theme.check(t4d, text=texts.SET_CTEXT_N_2,
                             variable=v["show_usage"]).grid(
                 row=i, column=0, columnspan=3, sticky="w", pady=6)
 
@@ -2732,32 +2648,26 @@ class SettingsMixin:
             v["cloud_file_model_decides"] = tk.BooleanVar(
                 value=bool(self.cfg.get("cloud_file_model_decides", False)))
             theme.check(
-                t4d, text="文本附件超预算时，让云端模型自己决定读哪一段",
+                t4d, text=texts.SET_CTEXT_N_3,
                 variable=v["cloud_file_model_decides"]).grid(
                 row=i, column=0, columnspan=2, sticky="w", pady=(0, 6))
             widgets.HelpDot(t4d,
-                            "打开后：附件太长时会先发一次「只要 JSON 行号」的规划请求；"
-                            "模型给的范围仍会被预算与行数上限夹住，规划失败就按原预算发送，"
-                            "不影响正常对话。只规划一轮，不加多轮循环（每轮都是真金白银）。"
-                            "默认关。"
+                            texts.SET_CTEXT_A1
                             ).grid(row=i, column=2, sticky="e", pady=(0, 6))
 
-            _row(t4d, r4d, "文本预算", ttk.Label(
-                t4d, text="按服务商各自声明的上下文窗口算", style="Dim.TLabel"),
-                "云端文本的附件预算 = min(该服务商声明的上下文窗口 − max_tokens − 预留, 200000)。"
-                "上限 200000 是成本护栏，不是拍脑袋：附件会留在历史里**每一轮都重发**，"
-                "声明 1M 也不代表该一次塞 1M。窗口在上一区块「服务商与密钥」里按服务商填。",
-                hint="上限 20 万")
+            _row(t4d, r4d, texts.SET_CTEXT_A2, ttk.Label(
+                t4d, text=texts.SET_CTEXT_N_4, style="Dim.TLabel"),
+                texts.SET_CTEXT_A4,
+                hint=texts.SET_CTEXT_N_5)
 
             # 云端文本自己的成本估算（2026-10-07 W 定：三条云端链路各一个入口、
             # 单价表与计费单位各自独立；文本这条只在高级模式出现）
             fc = ttk.Frame(t4d)
-            theme.button(fc, text="成本估算", width=14,
+            theme.button(fc, text=texts.SET_CTEXT_N_6, width=14,
                        command=lambda: self.open_cost_window(
                            providers.KIND_TEXT)).pack(side="left")
-            _row(t4d, r4d, "费用单价", fc,
-                 "云端文本按 token 计费：单价按**模型**填（元/千token）。"
-                 "填了就在每轮「用量」行尾附一句预估费用；没填就不提钱，以账单为准。")
+            _row(t4d, r4d, texts.SET_CTEXT_A2_2, fc,
+                 texts.SET_CTEXT_A4_2)
         # ---- 区块 7：云端 / 生图与生视频（服务商原生接口，与本地 sd.cpp 无关）----
         @section("cloud_m", "cmedia")
         def _t4c(t4c, r4c):
@@ -2776,99 +2686,79 @@ class SettingsMixin:
             col_l.grid(row=0, column=0, sticky="nw")
             col_r = ttk.Frame(cols)
             col_r.grid(row=0, column=1, sticky="nw", padx=(30, 0))
-            for f, name in ((col_l, "云端生图"), (col_r, "云端生视频")):
+            for f, name in ((col_l, texts.IMG_CLOUD_TAG), (col_r, texts.VID_CONFIRM_TITLE)):
                 ttk.Label(f, text=name, font=("Microsoft YaHei UI", 10, "bold")).grid(
                     row=0, column=0, columnspan=3, sticky="w", pady=(0, 4))
             rl, rr = {"i": 1}, {"i": 1}
 
-            _size_entry(col_l, rl, "cloud_img_size", "出图尺寸",
-                "填「宽x高」（832*480、832，480 这类分隔符也认，会自动归一成 x），"
-                "发出去前会按这一家的写法换算："
-                "阿里云 1024*1024、智谱与华为 1024x1024、MiniMax 换成比例（16:9）"
-                "或宽高两个整数。超出这一家允许的区间时，服务端会点名报错。"
-                "阿里云：qwen-image-3.0-pro 面积 512×512…2560×2560、"
-                "qwen-image-max 到 1664×1664、wan2.7-image 像素 589824…16777216。",
-                width=11, hint="宽x高", lw=8, warn_text=SIZE_WARN_RES,
+            _size_entry(col_l, rl, "cloud_img_size", texts.SET_CMEDIA_A3,
+                texts.SET_CMEDIA_A4,
+                width=11, hint=texts.SET_LMIMG_N, lw=8, warn_text=SIZE_WARN_RES,
                 allow=lambda t: ":" in str(t).replace("：", ":"))
-            ent(col_l, rl, "cloud_img_negative", "生图负向词",
-                "选填。留空 = 不传该参数。", lw=8)
-            ent(col_l, rl, "cloud_img_dir", "图片存放",
-                "云端生图的落地目录；留空 = 产物文件夹下的 云端\\image"
-                "（产物文件夹在下方「修改产物位置」里改）。", lw=8)
+            ent(col_l, rl, "cloud_img_negative", texts.SET_CMEDIA_A3_2,
+                texts.SET_CMEDIA_A4_2, lw=8)
+            ent(col_l, rl, "cloud_img_dir", texts.SET_CMEDIA_A3_3,
+                texts.SET_CMEDIA_A4_3, lw=8)
             fl = ttk.Frame(col_l)
-            theme.button(fl, text="打开图片文件夹", width=14,
+            theme.button(fl, text=texts.SET_CMEDIA_N, width=14,
                        command=lambda: _open_outdir(
                            cloud_media_dir(self.cfg, "image"),
-                           "云端生图的落地目录",
-                           "云端模型 → 生图 / 生视频 → 图片存放")).pack(side="left")
-            row(col_l, rl, "输出目录", fl,
-                "产物一落地就在这里。云端地址只活 24 小时，本地这份是唯一的留存；"
-                "目录还没生成时点一下会先建出来再打开。", lw=8)
+                           texts.SET_CMEDIA_A1,
+                           texts.SET_CMEDIA_A2)).pack(side="left")
+            row(col_l, rl, texts.SET_OPEN_OUTDIR_A0, fl,
+                texts.SET_CMEDIA_A4_4, lw=8)
             # 成本估算按链路拆开（2026-10-07 W 定）：生图 / 生视频各一个按钮、
             # 各一张单价表、各自的计费单位（原来两条链路共用一个「成本预估算」）
             flc = ttk.Frame(col_l)
-            theme.button(flc, text="成本估算", width=14,
+            theme.button(flc, text=texts.SET_CTEXT_N_6, width=14,
                        command=lambda: self.open_cost_window(
                            providers.KIND_IMAGE)).pack(side="left")
-            row(col_l, rl, "费用单价", flc,
-                "生图按**张**计费：单价按模型填（元/张）。填了就在提交前报金额；"
-                "没填就明说「以账单为准」，不编数字。", lw=8)
+            row(col_l, rl, texts.SET_CTEXT_A2_2, flc,
+                texts.SET_CMEDIA_A4_5, lw=8)
 
-            _size_entry(col_r, rr, "cloud_video_resolution", "视频分辨率",
-                "各家档位不一样（阿里云/MiniMax 用 720P、1080P、768P、2K 这类标签，"
-                "智谱与华为用 1280x720 这种宽高，*、，这类分隔符也认，会自动归一成 x）。"
-                "留空 = 不传这个参数，用服务端默认（阿里云 Token Plan 的 happyhorse "
-                "不传时按 1080P / 16:9 出）。不知道这一家允许什么时，留空最安全。",
-                hint="留空=默认", lw=8, width=8, warn_text=SIZE_WARN_RES,
+            _size_entry(col_r, rr, "cloud_video_resolution", texts.SET_CMEDIA_A3_4,
+                texts.SET_CMEDIA_A4_6,
+                hint=texts.SET_LMIMG_N_7, lw=8, width=8, warn_text=SIZE_WARN_RES,
                 allow=_vidres_allow)
-            ent(col_r, rr, "cloud_video_duration", "视频时长",
-                "秒。各家允许区间不同（超范围会被服务端点名报错，原话会显示在对话里）："
-                "happyhorse-1.1-t2v 是 **3~15 秒**；MiniMax Hailuo 官方页是 6/10 秒、"
-                "智谱 cogvideox-3 是 5/10 秒。提交前一律弹一次确认，"
-                "单价填过就报金额、没填就说明以账单为准。", hint="各家不同", lw=8)
-            ent(col_r, rr, "cloud_video_ratio", "画面比例",
-                "例如 16:9 / 9:16 / 1:1；留空 = 不传（画面比例常由素材决定）。", lw=8)
-            ent(col_r, rr, "cloud_vid_dir", "视频存放",
-                "云端生视频的落地目录；留空 = 产物文件夹下的 云端\\video"
-                "（产物文件夹在下方「修改产物位置」里改）。", lw=8)
+            ent(col_r, rr, "cloud_video_duration", texts.SET_CMEDIA_A3_5,
+                texts.SET_CMEDIA_A4_7, hint=texts.SET_CMEDIA_N_2, lw=8)
+            ent(col_r, rr, "cloud_video_ratio", texts.SET_CMEDIA_A3_6,
+                texts.SET_CMEDIA_A4_8, lw=8)
+            ent(col_r, rr, "cloud_vid_dir", texts.SET_CMEDIA_A3_7,
+                texts.SET_CMEDIA_A4_9, lw=8)
             fr = ttk.Frame(col_r)
-            theme.button(fr, text="打开视频文件夹", width=14,
+            theme.button(fr, text=texts.SET_CMEDIA_N_3, width=14,
                        command=lambda: _open_outdir(
                            cloud_media_dir(self.cfg, "video"),
-                           "云端生视频的落地目录",
-                           "云端模型 → 生图 / 生视频 → 视频存放")).pack(side="left")
-            row(col_r, rr, "输出目录", fr,
-                "同上：这条链路下它是唯一留存，服务端地址 24 小时就失效。", lw=8)
+                           texts.SET_CMEDIA_A1_2,
+                           texts.SET_CMEDIA_A2_2)).pack(side="left")
+            row(col_r, rr, texts.SET_OPEN_OUTDIR_A0, fr,
+                texts.SET_CMEDIA_A4_10, lw=8)
             frc = ttk.Frame(col_r)
-            theme.button(frc, text="成本估算", width=14,
+            theme.button(frc, text=texts.SET_CTEXT_N_6, width=14,
                        command=lambda: self.open_cost_window(
                            providers.KIND_VIDEO)).pack(side="left")
-            row(col_r, rr, "费用单价", frc,
-                "生视频按**秒**或按**条**计费（同一家两种都有）：单价按模型填。"
-                "填没填都会在提交前弹一次确认；没填就明说「以账单为准」。", lw=8)
+            row(col_r, rr, texts.SET_CTEXT_A2_2, frc,
+                texts.SET_CMEDIA_A4_11, lw=8)
 
             ttk.Separator(t4c).grid(row=r4c["i"], column=0, columnspan=3,
                                     sticky="we", pady=(12, 4))
             r4c["i"] += 1
             i = r4c["i"]
             r4c["i"] += 1
-            tk.Label(t4c, text="生图与生视频共用", foreground=theme.c("dim"),
+            tk.Label(t4c, text=texts.SET_CMEDIA_N_4, foreground=theme.c("dim"),
                      font=("Microsoft YaHei UI", 9, "bold"),
                      background=widgets.default_bg()).grid(
                 row=i, column=0, columnspan=3, sticky="w")
             # 产物位置（2026-10-06）：本地与云端四条链路共用的落地根。
             # 标签 6 个字超出共用栏 lw=8 的宽度（每个中文字占 2 格，坑 113 同族），这一行收到 12
-            ent(t4c, r4c, "output_dir", "修改产物位置",
-                "本地与云端生图 / 生视频**四条链路共用**的落地根；留空 = 程序目录下的"
-                "「产物」文件夹，里面按 本地 / 云端 × image / video 分四个子目录，"
-                "首次生成时自动建。上面「图片存放 / 视频存放」两格与本地生图 / 生视频页"
-                "「高级参数」里的「输出目录」单独填过时，以各自为准。",
-                width=24, hint="留空=程序目录\\产物", lw=12)
-            ent(t4c, r4c, "cloud_poll_seconds", "轮询间隔",
-                "秒。官方建议 15，且创建/查询/取消三个端点合计 20 QPS——"
-                "调小不会让任务更快完成，只会更早撞上限流。", hint="建议 15", lw=8)
-            ent(t4c, r4c, "cloud_wait_minutes", "等待上限",
-                "分钟。超了就不再干等，任务留在台账里，重启后对话开头会给「取回」按钮。",
+            ent(t4c, r4c, "output_dir", texts.SET_CMEDIA_A3_8,
+                texts.SET_CMEDIA_A4_12,
+                width=24, hint=texts.SET_CMEDIA_N_5, lw=12)
+            ent(t4c, r4c, "cloud_poll_seconds", texts.SET_CMEDIA_A3_9,
+                texts.SET_CMEDIA_A4_13, hint=texts.SET_CMEDIA_N_6, lw=8)
+            ent(t4c, r4c, "cloud_wait_minutes", texts.SET_CMEDIA_A3_10,
+                texts.SET_CMEDIA_A4_14,
                 lw=8)
             # 原来这里有一条共用的「费用单价 → 成本预估算」：2026-10-07 起成本估算
             # 按链路拆开（W 定），按钮分别挂在左右两列的底部（各自的单价表与计费单位）
@@ -2879,62 +2769,55 @@ class SettingsMixin:
         # SIMPLE_NAV_SPEC 里（tools/check_structure.py 的 [2] 段按两份规格一起判死区块）。
         @section("cloud_m", "cimg")
         def _t4e(t4e, r4e):
-            _size_entry(t4e, r4e, "cloud_img_size", "分辨率",
-                "填「宽x高」（832*480、832，480 这类分隔符也认，会自动归一成 x），"
-                "发出去前会按这一家的写法换算；"
-                "超出这一家允许的区间时，服务端会点名报错。",
-                width=11, hint="宽x高",
+            _size_entry(t4e, r4e, "cloud_img_size", texts.SET_LMIMG_A3,
+                texts.SET_CIMG_A4,
+                width=11, hint=texts.SET_LMIMG_N,
                 allow=lambda t: ":" in str(t).replace("：", ":"))
-            ent(t4e, r4e, "cloud_img_dir", "输出目录",
-                "云端生图的落地目录；留空 = 产物文件夹（程序目录下的「产物」）里的 云端\\image。",
-                width=30, hint="留空=产物文件夹")
+            ent(t4e, r4e, "cloud_img_dir", texts.SET_OPEN_OUTDIR_A0,
+                texts.SET_CIMG_A4_2,
+                width=30, hint=texts.SET_LMIMG_N_2)
             fl = ttk.Frame(t4e)
-            theme.button(fl, text="打开输出目录", width=14,
+            theme.button(fl, text=texts.SET_LMIMG_N_3, width=14,
                        command=lambda: _open_outdir(
                            cloud_media_dir(self.cfg, "image"),
-                           "云端生图的落地目录",
-                           "云端生图 → 输出目录")).pack(side="left")
+                           texts.SET_CMEDIA_A1,
+                           texts.SET_CIMG_A2)).pack(side="left")
             row(t4e, r4e, "", fl,
-                "产物一落地就在这里。云端地址只活 24 小时，本地这份是唯一的留存。")
+                texts.SET_CIMG_A4_3)
             fc = ttk.Frame(t4e)
-            theme.button(fc, text="成本估算", width=14,
+            theme.button(fc, text=texts.SET_CTEXT_N_6, width=14,
                        command=lambda: self.open_cost_window(
                            providers.KIND_IMAGE)).pack(side="left")
-            row(t4e, r4e, "费用单价", fc,
-                "生图按**张**计费：单价按模型填（元/张）。填了就在提交前报金额；"
-                "没填就明说「以账单为准」，不编数字。")
+            row(t4e, r4e, texts.SET_CTEXT_A2_2, fc,
+                texts.SET_CMEDIA_A4_5)
 
         @section("cloud_m", "cvid")
         def _t4f(t4f, r4f):
-            _size_entry(t4f, r4f, "cloud_video_resolution", "分辨率",
-                "各家档位不一样（720P、1080P 这类标签，或 1280x720 这种宽高，"
-                "*、，这类分隔符也认，会自动归一成 x）。"
-                "留空 = 用服务端默认；不知道这一家允许什么时，留空最安全。",
-                hint="留空=默认", width=8, warn_text=SIZE_WARN_RES, allow=_vidres_allow)
-            ent(t4f, r4f, "cloud_video_duration", "时长",
-                "秒。各家允许区间不同，超范围会被服务端点名报错（原话会显示在对话里）。"
-                "提交前一律弹一次确认，单价填过就报金额、没填就说明以账单为准。",
-                hint="各家不同")
-            ent(t4f, r4f, "cloud_video_ratio", "比例",
-                "例如 16:9 / 9:16 / 1:1；留空 = 不传（画面比例常由素材决定）。")
-            ent(t4f, r4f, "cloud_vid_dir", "输出目录",
-                "云端生视频的落地目录；留空 = 产物文件夹（程序目录下的「产物」）里的 云端\\video。",
-                width=30, hint="留空=产物文件夹")
+            _size_entry(t4f, r4f, "cloud_video_resolution", texts.SET_LMIMG_A3,
+                texts.SET_CVID_A4,
+                hint=texts.SET_LMIMG_N_7, width=8, warn_text=SIZE_WARN_RES, allow=_vidres_allow)
+            ent(t4f, r4f, "cloud_video_duration", texts.SET_CVID_A3,
+                texts.SET_CVID_A4_2,
+                hint=texts.SET_CMEDIA_N_2)
+            ent(t4f, r4f, "cloud_video_ratio", texts.SET_CVID_A3_2,
+                texts.SET_CMEDIA_A4_8)
+            ent(t4f, r4f, "cloud_vid_dir", texts.SET_OPEN_OUTDIR_A0,
+                texts.SET_CVID_A4_3,
+                width=30, hint=texts.SET_LMIMG_N_2)
             fr = ttk.Frame(t4f)
-            theme.button(fr, text="打开输出目录", width=14,
+            theme.button(fr, text=texts.SET_LMIMG_N_3, width=14,
                        command=lambda: _open_outdir(
                            cloud_media_dir(self.cfg, "video"),
-                           "云端生视频的落地目录",
-                           "云端生视频 → 输出目录")).pack(side="left")
+                           texts.SET_CMEDIA_A1_2,
+                           texts.SET_CVID_A2)).pack(side="left")
             row(t4f, r4f, "", fr,
-                "这条链路下它是唯一留存，服务端地址 24 小时就失效。")
+                texts.SET_CVID_A4_4)
             fc = ttk.Frame(t4f)
-            theme.button(fc, text="成本估算", width=14,
+            theme.button(fc, text=texts.SET_CTEXT_N_6, width=14,
                        command=lambda: self.open_cost_window(
                            providers.KIND_VIDEO)).pack(side="left")
-            row(t4f, r4f, "费用单价", fc,
-                "生视频按**秒**或按**条**计费（同一家两种都有）：单价按模型填。"
-                "填没填都会在提交前弹一次确认；没填就明说「以账单为准」。")
+            row(t4f, r4f, texts.SET_CTEXT_A2_2, fc,
+                texts.SET_CMEDIA_A4_11)
 
         @section("general", "general")
         def _tgen(tgen, rgen):
@@ -2954,7 +2837,7 @@ class SettingsMixin:
                 use = usable_local(self.cfg)["chat"]
                 hid = localmodels.hidden_set(self.cfg)
                 if [p for p in use if os.path.basename(p) not in hid]:
-                    items.append(("本地模型（当前已加载的那个）", "local"))
+                    items.append((texts.SET_GEN_L0, "local"))
             except Exception:
                 pass
             try:
@@ -2974,15 +2857,13 @@ class SettingsMixin:
             tgen._var_general = gvar       # 挂控件保活：StringVar 被 GC 下拉就静默变空（坑 145 家族）
             comb = theme.comb(tgen, textvariable=gvar, state="readonly",
                               width=30, values=labels)
-            row(tgen, rgen, "提示词优化", comb,
-                "提示词优化（输入框右上角的星星）三路重写用的文本模型。\n"
-                "加入第一个文本模型时会自动选上；本地模型经本机服务转发"
-                "（当前已加载的那个）。",
-                hint="重写用的模型", lw=8)
+            row(tgen, rgen, texts.POPT_WINDOW_TITLE, comb,
+                texts.SET_GEN_A4,
+                hint=texts.SET_GEN_N, lw=8)
             if not items:
                 i = rgen["i"]
                 rgen["i"] += 1
-                ttk.Label(tgen, text="还没有可用的文本模型 —— 加入第一个后会自动选上。",
+                ttk.Label(tgen, text=texts.SET_GEN_N_2,
                           style="Dim.TLabel").grid(
                     row=i, column=0, columnspan=3, sticky="w", pady=(0, 4))
 
@@ -2996,18 +2877,16 @@ class SettingsMixin:
                 value=bool(self.cfg.get("keepawake_ac_only", False)))
             i = rgen["i"]
             rgen["i"] += 1
-            kw_cb = theme.check(tgen, text="允许锁屏运行",
+            kw_cb = theme.check(tgen, text=texts.SET_GEN_N_3,
                                 variable=v["keepawake_enabled"])
             kw_cb.grid(row=i, column=0, columnspan=2, sticky="w", pady=(10, 4))
             if not simple:
                 widgets.HelpDot(tgen,
-                                "勾选后本软件会阻止系统自动睡眠，息屏后手机等设备"
-                                "仍能连上来。\n使用电池会更耗电；笔记本合盖后的行为"
-                                "取决于系统设置。").grid(row=i, column=2, sticky="w",
+                                texts.SET_GEN_A1).grid(row=i, column=2, sticky="w",
                                                         pady=(10, 4))
             i = rgen["i"]
             rgen["i"] += 1
-            kw_ac = theme.check(tgen, text="仅接电源时保持唤醒",
+            kw_ac = theme.check(tgen, text=texts.SET_GEN_N_4,
                                 variable=v["keepawake_ac_only"])
             kw_ac.grid(row=i, column=0, columnspan=3, sticky="w",
                        padx=(18, 0), pady=(0, 6))
@@ -3121,9 +3000,9 @@ class SettingsMixin:
                     # 60s）——挂主线程就是"拨一下开关、整个界面冻住"。挪后台线程，
                     # 状态行先说一句，起完再回显（跨线程一律经 _ui_q，铁律 7）。
                     stat_var.set(
-                        "正在启动（开启无线直连组，可能要几秒）…"
+                        texts.SET_REMOTE_N
                         if str(self.cfg.get("remote_bind") or "") == remote_mod.BIND_WFD
-                        else "正在启动（首次要生成一份自签证书，可能要几秒）…")
+                        else texts.SET_REMOTE_N_2)
                     code_var.set("—")
 
                     def _started(err):
@@ -3136,11 +3015,10 @@ class SettingsMixin:
                             if str(self.cfg.get("remote_bind") or "") == remote_mod.BIND_WFD:
                                 # 直连档的失败原因自带指路（组起不来 / 没链路 /
                                 # 端口），不套"端口被占用"那半句去误导
-                                stat_var.set("启动失败：%s。" % err)
+                                stat_var.set(texts.SET_REMOTE_CAT % err)
                             else:
                                 stat_var.set(
-                                    "启动失败：%s。常见原因是端口被别的程序占用——"
-                                    "换一个端口再拨一次开关。" % err)
+                                    texts.SET_REMOTE_CAT_2 % err)
                             code_var.set("—")
                             return
                         _remote_refresh()
@@ -3155,36 +3033,32 @@ class SettingsMixin:
             save_hooks[trem] = _save_remote
             i = rrem["i"]
             rrem["i"] += 1
-            theme.check(trem, text="启用远程访问（手机浏览器远程使用本软件）",
+            theme.check(trem, text=texts.SET_REMOTE_N_3,
                         variable=v["remote_enabled"],
                         command=_apply_remote).grid(
                 row=i, column=0, columnspan=3, sticky="w", pady=(4, 4))
             if not simple:
                 widgets.HelpDot(trem,
-                                "开启后本机对局域网开放一个网页入口。安全三件套"
-                                "一并生效：只有配对过的设备能连、传输走自签 HTTPS、"
-                                "所有访问都记审计日志。默认关。").grid(
+                                texts.SET_REMOTE_A1).grid(
                     row=i, column=2, sticky="w", pady=(4, 4))
-            ent(trem, rrem, "remote_port", "端口",
-                "远程访问的监听端口；被占用时换一个（1024~65535）。改完保存即重启监听。",
+            ent(trem, rrem, "remote_port", texts.SET_REMOTE_A3,
+                texts.SET_REMOTE_A4,
                 width=7)
             if not simple:
                 i = rrem["i"]
                 rrem["i"] += 1
-                theme.check(trem, text="使用 HTTPS（自签证书，推荐）",
+                theme.check(trem, text=texts.SET_REMOTE_N_4,
                             variable=v["remote_https"],
                             command=_apply_remote).grid(
                     row=i, column=0, columnspan=3, sticky="w", pady=(4, 4))
                 widgets.HelpDot(trem,
-                                "证书由本机 PowerShell 自动生成（免管理员）。"
-                                "手机浏览器首次访问会提示不安全 —— 点「继续访问」"
-                                "即可；身份认证靠配对码，不靠证书提示。").grid(
+                                texts.SET_REMOTE_A1_2).grid(
                     row=i, column=2, sticky="w", pady=(4, 4))
                 # 对外开放范围（P0-5，2026-10-12；仅高级模式——普通模式照旧
                 # "拨一下开关就能用"，不多一个会让人连不上的选项）
                 i = rrem["i"]
                 rrem["i"] += 1
-                ttk.Label(trem, text="对外开放范围").grid(
+                ttk.Label(trem, text=texts.SET_REMOTE_N_5).grid(
                     row=i, column=0, sticky="w", padx=(0, 8), pady=5)
                 bind_cb = ttk.Combobox(trem, values=_bind_labels,
                                        state="readonly", width=22)
@@ -3196,15 +3070,7 @@ class SettingsMixin:
                 bind_cb.bind("<<ComboboxSelected>>",
                              lambda *a: _apply_remote())
                 widgets.HelpDot(trem,
-                                "默认对整个局域网开放。装了 Tailscale 可以只绑"
-                                "虚拟网卡那个地址（走了隧道才连得上）；选「仅局域网"
-                                "IPv4」就不收 IPv6 的连接。选「仅设备直连」时只开放"
-                                "热点 / 无线直连链路的地址——公网口完全不开放，"
-                                "电脑侧会自动把无线直连组开起来（手机像连普通 "
-                                "Wi-Fi 一样加入）；拿不到直连地址时会拒绝启动、"
-                                "不会退回全部网卡。改这里会重启监听并立即生效；"
-                                "选 Tailscale 而本机没有那个地址时，会退回"
-                                "全部网卡并在状态行说出来。").grid(
+                                texts.SET_REMOTE_A1_3).grid(
                     row=i, column=2, sticky="w", pady=5)
             # 建页完成：钉初始快照（控件此时才全部建好；ent 的 remote_port
             # 与档位下拉都在了）。之后别的页点保存，值没变就不重启监听（坑 262）
@@ -3220,30 +3086,25 @@ class SettingsMixin:
                 row=i, column=0, columnspan=3, sticky="w", pady=(6, 2))
             i = rrem["i"]
             rrem["i"] += 1
-            ttk.Label(trem, text="网址").grid(row=i, column=0, sticky="w",
+            ttk.Label(trem, text=texts.SET_REMOTE_N_6).grid(row=i, column=0, sticky="w",
                                               padx=(0, 8), pady=5)
             theme.button(trem, text="****", width=7,
                          command=lambda: _open_urls()).grid(
                 row=i, column=1, sticky="w", pady=5)
             if not simple:
                 widgets.HelpDot(trem,
-                                "具体网址默认不外露（手机在旁边才能看到）。点开"
-                                "是一个 IPv6 和一个 IPv4 地址，各带「复制」。"
-                                "IPv6 适合手机用流量，IPv4 适合同一 Wi-Fi / "
-                                "热点。").grid(
+                                texts.SET_REMOTE_A1_4).grid(
                     row=i, column=2, sticky="w", pady=5)
             i = rrem["i"]
             rrem["i"] += 1
-            ttk.Label(trem, text="配对码").grid(row=i, column=0, sticky="w",
+            ttk.Label(trem, text=texts.SET_REMOTE_N_7).grid(row=i, column=0, sticky="w",
                                                 padx=(0, 8), pady=5)
             ttk.Label(trem, textvariable=code_var, font=(
                 "Consolas", 14, "bold")).grid(row=i, column=1, sticky="w",
                                               pady=5)
             if not simple:
                 widgets.HelpDot(trem,
-                                "手机在配对页输入这个码，电脑端弹窗确认后即完成配对。"
-                                "码是一次性的，5 分钟没用过就失效；点「刷新配对码」"
-                                "重出。").grid(row=i, column=2, sticky="w", pady=5)
+                                texts.SET_REMOTE_A1_5).grid(row=i, column=2, sticky="w", pady=5)
             i = rrem["i"]
             rrem["i"] += 1
             btn_row = ttk.Frame(trem)
@@ -3289,11 +3150,11 @@ class SettingsMixin:
                 """网址次级窗：一个 IPv6 + 一个 IPv4（W 2026-10-11 定：不铺
                 全部），各带「复制」；证书指纹也收在这里。设备直连档只给
                 直连那一条地址（另加直连组的组名 / 密码给手机对）。"""
-                w, frm = _panel("远程访问 · 网址")
+                w, frm = _panel(texts.SET_REMOTE_A0)
                 if w is None:
                     return                      # 已经开着：抬到前面就够了
                 if not self.remote.running():
-                    ttk.Label(frm, text="远程服务未启动。", style="Dim.TLabel"
+                    ttk.Label(frm, text=texts.SET_REMOTE_N_8, style="Dim.TLabel"
                               ).pack(anchor="w")
                     widgets.center_on(w, host=win)
                     return
@@ -3304,12 +3165,12 @@ class SettingsMixin:
                         == remote_mod.BIND_WFD and self.remote.bind):
                     # 设备直连档：只给这一条直连地址（其他网口本来就没监听，
                     # 不列出来）；电脑侧直连组还给组名与密码
-                    rows.append(("设备直连（只在手机与电脑之间）",
+                    rows.append((texts.SET_REMOTE_L0,
                                  "%s://%s:%s" % (scheme, self.remote.bind, port)))
                     if getattr(self.remote, "bind_kind", "") == "wfd":
-                        rows.append(("直连组名（手机在 Wi-Fi 列表里选它）",
+                        rows.append((texts.SET_REMOTE_L0_2,
                                      remote_mod.WFD_SSID))
-                        rows.append(("直连组密码", remote_mod.WFD_PASS))
+                        rows.append((texts.SET_REMOTE_L0_3, remote_mod.WFD_PASS))
                 else:
                     ips = remote_mod.local_ips() or []
                     v6 = next((x for x in ips
@@ -3317,14 +3178,14 @@ class SettingsMixin:
                     v4 = next((x for x in ips
                                if remote_mod.ip_label(x) in ("v4", "tailscale")), "")
                     if v6:
-                        rows.append(("IPv6（手机用流量时用这个）",
+                        rows.append((texts.SET_REMOTE_L0_4,
                                      "%s://[%s]:%s" % (scheme, v6, port)))
                     if v4:
                         lab = ("（Tailscale）" if remote_mod.ip_label(v4) ==
-                               "tailscale" else "（同一 Wi-Fi / 热点时用这个）")
+                               "tailscale" else texts.SET_REMOTE_N_9)
                         rows.append(("IPv4" + lab, "%s://%s:%s" % (scheme, v4, port)))
                 if not rows:
-                    ttk.Label(frm, text="没有可用的本机地址。",
+                    ttk.Label(frm, text=texts.SET_REMOTE_N_10,
                               style="Dim.TLabel").pack(anchor="w", pady=4)
                 for name, url in rows:
                     ttk.Label(frm, text=name, style="Dim.TLabel"
@@ -3333,20 +3194,20 @@ class SettingsMixin:
                     rowf.pack(anchor="w")
                     ttk.Label(rowf, text=url, font=("Consolas", 11)).pack(
                         side="left")
-                    b = theme.button(rowf, text="复制", width=6)
+                    b = theme.button(rowf, text=texts.SET_API_N_7, width=6)
 
                     def _copy(u=url, bt=None):
                         win.clipboard_clear()
                         win.clipboard_append(u)
                         if bt and bt.winfo_exists():
-                            bt.configure(text="已复制")
+                            bt.configure(text=texts.SET_REMOTE_N_11)
                         win.after(1200, lambda: (
-                            bt.winfo_exists() and bt.configure(text="复制")))
+                            bt.winfo_exists() and bt.configure(text=texts.SET_API_N_7)))
 
                     b.configure(command=lambda u=url, bt=b: _copy(u, bt))
                     b.pack(side="left", padx=8)
                 if self.remote.cert_fp:
-                    ttk.Label(frm, text="证书指纹（SHA-256）：%s"
+                    ttk.Label(frm, text=texts.SET_REMOTE_CAT_3
                               % self.remote.cert_fp, style="Dim.TLabel",
                               wraplength=380, justify="left"
                               ).pack(anchor="w", pady=(10, 0))
@@ -3360,7 +3221,7 @@ class SettingsMixin:
                 dialogs（系统 messagebox / simpledialog 下线），入口级吊销
                 原来没二次确认，补一道危险操作确认。
                 """
-                w, frm = _panel("远程访问 · 已配对设备")
+                w, frm = _panel(texts.SET_REMOTE_A0_2)
                 if w is None:
                     return                      # 已经开着：抬到前面就够了
                 DEV_MIN = (540, 260)           # 空态也保持设计规范的最小窗
@@ -3383,68 +3244,63 @@ class SettingsMixin:
                     if not persons:
                         empty = ttk.Frame(frm)
                         empty.pack(anchor="w", pady=(26, 10))
-                        ttk.Label(empty, text="还没有已配对的设备",
+                        ttk.Label(empty, text=texts.SET_REMOTE_N_12,
                                   font=("Microsoft YaHei UI", 10, "bold")).pack(
                             anchor="w")
                         ttk.Label(
                             empty,
-                            text="手机打开远程访问网址、输入配对码并在电脑端允许后，"
-                                 "设备会出现在这里。",
+                            text=texts.SET_REMOTE_N_13,
                             style="Dim.TLabel", wraplength=480,
                             justify="left").pack(anchor="w", pady=(10, 2))
                         ttk.Label(
                             empty,
-                            text="同一台设备换 Wi-Fi / 热点 / 浏览器会自动认回；"
-                                 "不同设备的对话与历史产物互不可见。",
+                            text=texts.SET_REMOTE_N_14,
                             style="Dim.TLabel", wraplength=480,
                             justify="left").pack(anchor="w", pady=(2, 0))
                     else:
                         ttk.Label(
                             frm,
-                            text="同一台设备换 Wi-Fi / 直连 / 浏览器配对会自动归在"
-                                 "一起。「吊销」会让这台设备的所有连接方式全部失效："
+                            text=texts.SET_REMOTE_N_15
                             if simple else
-                            "「吊销」= 这台设备所有连接方式全部失效；"
-                            "高级模式下每个入口可单独吊销：",
+                            texts.SET_REMOTE_N_16,
                             style="Dim.TLabel", wraplength=520, justify="left").pack(
                             anchor="w", pady=(0, 6))
                         for p in persons:
                             oses = "、".join(os_label(k) for k in (p.get("os_set") or []))
-                            tag = oses or "未知设备"
+                            tag = oses or texts.DLG_PAIR_UNKNOWN_DEVICE
                             if len(p.get("os_set") or []) > 1:
-                                tag += "（多系统）"
+                                tag += texts.SET_REMOTE_TAG
                             pf = ttk.Frame(frm)
                             pf.pack(anchor="w", pady=3, fill="x")
                             # 按钮组统一贴右缘成一列：设备名长短不一时「改名 / 吊销」
                             # 不再跟着文字漂（2026-10-15 UI 走查）
                             acts = ttk.Frame(pf)
                             acts.pack(side="right")
-                            ttk.Label(pf, text="%s · %s（最近活跃 %s）" % (
+                            ttk.Label(pf, text=texts.SET_REMOTE_CAT_4 % (
                                 tag, p.get("name", "?"),
                                 p.get("last_seen") or "—")).pack(side="left")
                             pid = p["id"]
 
                             def _rename(pid=pid, old=p.get("name", "")):
                                 nm = dialogs.ask_text(
-                                    w, "设备备注", "给这台设备起个名字：",
+                                    w, texts.SET_REMOTE_A1_6, texts.SET_REMOTE_A2,
                                     initial=old)
                                 if nm and nm.strip():
                                     self.remote.rename_persona(pid, nm.strip())
                                     redraw()
 
-                            theme.button(acts, text="改名", width=6,
+                            theme.button(acts, text=texts.SET_REMOTE_N_17, width=6,
                                          command=_rename).pack(side="left", padx=(8, 0))
 
                             def _revoke(pid=pid, name=p.get("name", "?")):
                                 if dialogs.ask_confirm(
-                                        w, "吊销设备",
-                                        "吊销后，「%s」的所有连接方式都会立即失效，"
-                                        "再次访问需要重新配对。确定吊销吗？" % name,
-                                        ok_text="吊销设备", danger=True):
+                                        w, texts.SET_REMOTE_A1_7,
+                                        texts.SET_REMOTE_CAT_5 % name,
+                                        ok_text=texts.SET_REMOTE_A1_7, danger=True):
                                     self.remote.revoke_persona(pid)
                                     redraw()
 
-                            theme.button(acts, text="吊销", width=6,
+                            theme.button(acts, text=texts.SET_REMOTE_N_18, width=6,
                                          command=_revoke).pack(side="left", padx=4)
                             # 入口级清单只在高级模式露出（W Q4②：普通用户容易把
                             # "换个入口重配"误当成数据被删，坑 284）
@@ -3457,7 +3313,7 @@ class SettingsMixin:
                                         ttk.Label(
                                             cf, style="Muted.TLabel",
                                             font=("Microsoft YaHei UI", 8),
-                                            text="入口 %s · %s · IP %s · 加入 %s" % (
+                                            text=texts.SET_REMOTE_CAT_6 % (
                                                 cd.get("id", "?"),
                                                 os_label(cd.get("os")),
                                                 cd.get("last_ip") or "—",
@@ -3465,17 +3321,15 @@ class SettingsMixin:
 
                                         def _revoke_cred(did=cd.get("id", "")):
                                             if dialogs.ask_confirm(
-                                                    w, "吊销连接入口",
-                                                    "只吊销入口 %s 这一个连接，"
-                                                    "这台设备的其他连接方式不受影响。"
-                                                    "确定吊销吗？" % did,
-                                                    ok_text="吊销此入口",
+                                                    w, texts.SET_REMOTE_A1_8,
+                                                    texts.SET_REMOTE_CAT_7 % did,
+                                                    ok_text=texts.SET_REMOTE_N_19,
                                                     danger=True):
                                                 self.remote.revoke(did)
                                                 redraw()
 
                                         theme.button(
-                                            cf, text="吊销此入口", width=10,
+                                            cf, text=texts.SET_REMOTE_N_19, width=10,
                                             command=_revoke_cred
                                         ).pack(side="left", padx=6)
                     code_var.set(_pair_text())
@@ -3487,12 +3341,12 @@ class SettingsMixin:
                 """状态行 / 配对码的回显（进页 + 保存后都调）。网址与设备
                 收在次级窗（W 2026-10-11 精简），主页面只说"已启动"。"""
                 if self.remote.running():
-                    stat = "已启动"
+                    stat = texts.SET_REMOTE_STAT
                     if self.remote.scheme() != "https":
-                        stat += "（当前是明文 HTTP，仅建议局域网内使用）"
+                        stat += texts.SET_REMOTE_STAT_2
                     if (str(self.cfg.get("remote_bind") or "")
                             == remote_mod.BIND_WFD and self.remote.bind):
-                        stat += "（设备直连：%s；公网口未监听）" % self.remote.bind
+                        stat += texts.SET_REMOTE_CAT_8 % self.remote.bind
                     # 想只绑 Tailscale 但本机没那个地址 → 已退回全部网卡，如实说
                     if getattr(self.remote, "bind_note", ""):
                         stat += "（" + self.remote.bind_note + "）"
@@ -3500,7 +3354,7 @@ class SettingsMixin:
                     stat_var.set(stat)
                 else:
                     code_var.set("—")
-                    stat_var.set("未启动。打开上方开关即可（即开即生效）。")
+                    stat_var.set(texts.SET_REMOTE_A0_3)
 
             def _pair_text():
                 # 上一码被试错作废（按码限次，15 §1 2026-10-12 行）；原话 W 已逐字
@@ -3508,17 +3362,16 @@ class SettingsMixin:
                 if self.remote.pair_burned():
                     return remote_mod.PAIR_BURNED_PAGE
                 left = self.remote.pair_code_left()
-                return "已出一个，剩 %d 秒（点「刷新配对码」重出）" % left if left else "—"
+                return texts.SET_REMOTE_CAT_9 % left if left else "—"
 
             def _new_code():
                 if not self.remote.running():
-                    stat_var.set("先打开「启用远程访问」开关（拨上即生效），"
-                                 "再生成配对码。")
+                    stat_var.set(texts.SET_REMOTE_A0_4)
                     return
                 code_var.set(self.remote.new_pair_code())
-            theme.button(btn_row, text="刷新配对码", width=12,
+            theme.button(btn_row, text=texts.SET_REMOTE_N_20, width=12,
                          command=_new_code).pack(side="left")
-            theme.button(btn_row, text="已配对设备…", width=14,
+            theme.button(btn_row, text=texts.SET_REMOTE_N_21, width=14,
                          command=_open_devices).pack(side="left", padx=8)
             # 「停止远程任务」（16 §4 第 6 条，二期 W 拍板并入）：一期 API 已有
             # /api/cancel，GUI 侧一直没有按钮。device_id="local" = 本机全可见
@@ -3530,18 +3383,18 @@ class SettingsMixin:
                 jobs = getattr(r, "jobs", None)
                 chat = getattr(r, "chat", None)
                 if jobs is not None and jobs.busy() and jobs.cancel(None, "local"):
-                    stat_var.set("已停止远程生图任务。")
+                    stat_var.set(texts.SET_REMOTE_A0_5)
                 elif chat is not None and chat.busy() and chat.cancel("local"):
-                    stat_var.set("已停止远程对话。")
+                    stat_var.set(texts.SET_REMOTE_A0_6)
                 else:
-                    stat_var.set("当前没有远程任务在跑。")
-            theme.button(btn_row, text="停止远程任务", width=13,
+                    stat_var.set(texts.SET_REMOTE_A0_7)
+            theme.button(btn_row, text=texts.SET_REMOTE_N_22, width=13,
                          command=_stop_remote_job).pack(side="left", padx=8)
 
             def _open_audit():
                 """审计次级窗（仅高级模式；普通模式可裁 = 16 §4 第 6 条口径）。
                 只读展示 remote_audit.jsonl 的元数据行，清空前问一句。"""
-                w, frm = _panel("远程访问 · 审计")
+                w, frm = _panel(texts.SET_REMOTE_A0_8)
                 if w is None:
                     return                      # 已经开着：抬到前面就够了
                 box = tk.Text(frm, height=16, width=64, wrap="word",
@@ -3556,33 +3409,32 @@ class SettingsMixin:
                     box.configure(state="normal")
                     box.delete("1.0", "end")
                     if not rows:
-                        box.insert("end", "（还没有审计记录）")
+                        box.insert("end", texts.SET_REMOTE_A1_9)
                     else:
                         for r in rows:      # read_audit 已按时间倒序
                             box.insert("end", "%s  %-14s %-15s %s  %s\n" % (
                                 r.get("t", "?"), r.get("ip", "?"),
                                 r.get("action", "?"),
-                                "成功" if r.get("ok") else "失败",
+                                texts.SET_REMOTE_N_23 if r.get("ok") else texts.POPT_FAILED,
                                 str(r.get("detail", ""))[:60]))
                     box.configure(state="disabled")
 
                 def _clear():
-                    if dialogs.ask_confirm(w, "清空审计",
-                                          "清空全部远程访问审计日志？此操作不可撤销。",
-                                          ok_text="清空", danger=True):
+                    if dialogs.ask_confirm(w, texts.SET_REMOTE_A1_10,
+                                          texts.SET_REMOTE_A2_2,
+                                          ok_text=texts.MASK_CLEAR, danger=True):
                         remote_mod.clear_audit()
                         redraw()
                 bar = ttk.Frame(frm)
                 bar.pack(anchor="w", pady=(8, 0))
-                theme.button(bar, text="清空", width=8,
+                theme.button(bar, text=texts.MASK_CLEAR, width=8,
                              command=_clear).pack(side="left")
-                ttk.Label(bar, text="（只记元数据：时间 / 来源 / 动作 / 成败，"
-                                    "不含提示词与附件内容）",
+                ttk.Label(bar, text=texts.SET_REMOTE_N_24,
                           style="Dim.TLabel").pack(side="left", padx=8)
                 redraw()
                 widgets.center_on(w, host=win)
             if not simple:
-                theme.button(btn_row, text="查看审计…", width=11,
+                theme.button(btn_row, text=texts.SET_REMOTE_N_25, width=11,
                              command=_open_audit).pack(side="left", padx=8)
 
             # 历史产物开关（16 §4 第 3 条，二期 W 拍板并入；默认关）。布尔键
@@ -3599,15 +3451,13 @@ class SettingsMixin:
                     pass
             i = rrem["i"]
             rrem["i"] += 1
-            theme.check(trem, text="允许取回历史产物（不限本次远程会话产生的）",
+            theme.check(trem, text=texts.SET_REMOTE_N_26,
                         variable=v["remote_history"],
                         command=_apply_history).grid(
                 row=i, column=0, columnspan=3, sticky="w", pady=(2, 4))
             if not simple:
                 widgets.HelpDot(trem,
-                                "默认关：每台设备只能取回自己提交的任务产物。"
-                                "开启后，任何已配对的设备都能取回台账里的历史"
-                                "远程产物（台账最多 200 条）。").grid(
+                                texts.SET_REMOTE_A1_11).grid(
                     row=i, column=2, sticky="w", pady=(2, 4))
 
             _remote_refresh()
@@ -3627,12 +3477,12 @@ class SettingsMixin:
             构建的）。选色走 `_ask_color`（Windows 原生对话框 + 可持久化的
             自定义色板，随改随落盘）。
             """
-            _THEME_DISPLAY = (("跟随系统", "auto"), ("浅色模式", "light"),
-                              ("深色模式", "dark"))
+            _THEME_DISPLAY = ((texts.SET_APPR_L0, "auto"), (texts.SET_APPR_L0_2, "light"),
+                              (texts.SET_APPR_L0_3, "dark"))
             _BY_VALUE = {v: d for d, v in _THEME_DISPLAY}
             theme_var = tk.StringVar(
                 value=_BY_VALUE.get(str(self.cfg.get("ui_theme", "auto") or "auto"),
-                                    "跟随系统"))
+                                    texts.SET_APPR_L0))
             accent_var = tk.StringVar(value=str(self.cfg.get("ui_accent", "") or ""))
             sel_var = tk.StringVar(value=str(self.cfg.get("ui_accent_sel", "") or ""))
             swatches = {}              # 配置键 → 色块 Label（变量一变就染新色）
@@ -3685,8 +3535,8 @@ class SettingsMixin:
                 cur = str((accent_var if key == "ui_accent" else sel_var).get()
                           or "").strip() or None
                 got = _ask_color(win,
-                                 "选择全局主题色" if key == "ui_accent"
-                                 else "选择选中文本强调色",
+                                 texts.SET_APPR_N if key == "ui_accent"
+                                 else texts.SET_APPR_N_2,
                                  cur, cust)
                 if list(cust) != before:
                     # 自定义色格在**任何关闭时机**（含取消）都持久化 —— 这是色板
@@ -3709,9 +3559,9 @@ class SettingsMixin:
                               relief="groove", bd=1)
                 sw.pack(side="left", pady=2)
                 swatches[key] = sw
-                theme.button(cell, text="选颜色…", width=10,
+                theme.button(cell, text=texts.SET_APPR_N_3, width=10,
                              command=lambda: _pick(key)).pack(side="left", padx=(8, 0))
-                theme.button(cell, text="恢复默认", width=10,
+                theme.button(cell, text=texts.SET_APPR_N_4, width=10,
                              command=lambda: _reset(key)).pack(side="left", padx=(6, 0))
                 _refresh_swatch(key)
                 return cell
@@ -3742,15 +3592,12 @@ class SettingsMixin:
                         self._switch_theme(want)
 
                 theme_comb.bind("<<ComboboxSelected>>", _on_theme_pick)
-                row(tapr, rapr, "界面主题", theme_comb,
-                    "界面配色跟随系统 / 固定浅色 / 固定深色。\n"
-                    "切换实时应用到主窗口与已打开的次级窗口。")
-            row(tapr, rapr, "全局主题色", _color_cell("ui_accent"),
-                "发送按钮、取回、模型名、用户名、状态灯、滑动开关与左栏选中项共用的颜色。\n"
-                "改完下次启动生效；留空 = 用主题默认。选中文本不跟随它，单独在下一行配。")
-            row(tapr, rapr, "选中文本强调色", _color_cell("ui_accent_sel"),
-                "只改聊天里拖蓝选中的那一块，与全局主题色互相独立；\n"
-                "留空 = 用主题默认。")
+                row(tapr, rapr, texts.SET_APPR_A2, theme_comb,
+                    texts.SET_APPR_A4)
+            row(tapr, rapr, texts.SET_APPR_A2_2, _color_cell("ui_accent"),
+                texts.SET_APPR_A4_2)
+            row(tapr, rapr, texts.SET_APPR_A2_3, _color_cell("ui_accent_sel"),
+                texts.SET_APPR_A4_3)
 
             accent_var.trace_add("write", lambda *_: _refresh_swatch("ui_accent"))
             sel_var.trace_add("write", lambda *_: _refresh_swatch("ui_accent_sel"))
@@ -3811,23 +3658,23 @@ class SettingsMixin:
             # 调都会多占一点纵向版面，还容易和 `place` 的层次、`grid` 的格子打架。
             for txt_, font, fg, pady in (
                     ("LLM Chat", ("Microsoft YaHei UI", 16, "bold"), theme.c("hdr"), (0, 2)),
-                    ("本地模型工作台 · 版本 %s" % APP_VERSION,
+                    (texts.SET_ABOUT_CAT % APP_VERSION,
                      ("Microsoft YaHei UI", 9), theme.c("dim"), (0, 2)),
-                    ("llama.cpp 对话 · sd.cpp 生图生视频 · 云端服务商",
+                    (texts.SET_ABOUT_L0,
                      ("Microsoft YaHei UI", 9), theme.c("hint"), (0, 0))):
                 lab = ttk.Label(names, text=txt_, foreground=fg, font=font,
                                 wraplength=420, justify="left")
                 lab.pack(anchor="w", pady=pady)
-                if txt_.startswith("本地模型工作台"):
+                if txt_.startswith(texts.SET_ABOUT_A0):
                     lab.bind("<Button-1>", _tap_version)
 
             bf = ttk.Frame(t9)
             i = r9["i"]
             r9["i"] += 1
             bf.grid(row=i, column=0, columnspan=3, sticky="w", pady=(0, 6))
-            theme.button(bf, text="新手引导", width=12,
+            theme.button(bf, text=texts.APP_GUIDE_TITLE, width=12,
                        command=self.start_guide).pack(side="left", padx=(0, 6))
-            theme.button(bf, text="诊断", width=12,
+            theme.button(bf, text=texts.DIAGW_TITLE, width=12,
                        command=self.open_diag_window).pack(side="left")
 
             # 检查更新：联网在子线程、结果回主线程走 _ui_q
@@ -3841,7 +3688,7 @@ class SettingsMixin:
             st = self._upd_check        # App 级会话状态：at / busy / last / cache / render
             up_url = {"v": ""}          # 有新版本时才填上，"打开下载页"才可点
             ch_var = tk.StringVar(value=updater.CHANNEL_LABEL[updater.CHANNEL_STABLE])
-            ustate = tk.StringVar(value="还没检查过。")
+            ustate = tk.StringVar(value=texts.SET_ABOUT_N)
 
             ust_lab = ttk.Label(t9, textvariable=ustate, style="Note.TLabel",
                                 wraplength=560, justify="left",
@@ -3853,14 +3700,14 @@ class SettingsMixin:
 
             def _open_page(url):
                 if not url:
-                    messagebox.showinfo("打开下载页", "还没有可打开的地址：先点「检查更新」。")
+                    messagebox.showinfo(texts.SET_ABOUT_A0_2, texts.SET_ABOUT_A1)
                     return
                 try:
                     if not webbrowser.open(url):
-                        raise RuntimeError("浏览器没响应")
+                        raise RuntimeError(texts.UPDW_BROWSER_NORESP)
                 except Exception as e:
                     messagebox.showwarning(
-                        "打开下载页", "打不开浏览器（%s）。\n把这个地址复制到浏览器里就行：\n%s"
+                        texts.SET_ABOUT_A0_2, texts.SET_ABOUT_CAT_2
                         % (e, url))
 
             def _render(state, info, note="", dialog=False):
@@ -3882,9 +3729,9 @@ class SettingsMixin:
                 if state == updater.STATE_UPDATE:
                     up_url["v"] = info.get("url") or ""
                     btn_open.configure(state="normal")
-                    _say("发现新版本：%s（%s）　本机：%s　发布于 %s"
+                    _say(texts.SET_ABOUT_CAT_3
                          % (info.get("name") or info["tag"],
-                            info["tag"], cur, info.get("published") or "日期未知")
+                            info["tag"], cur, info.get("published") or texts.UPDW_DATE_UNKNOWN)
                          + note, theme.c("oklit"))
                     if dialog:
                         # 手动点的：弹「发现新版本」次级窗口（能一键更新），永远弹
@@ -3896,22 +3743,22 @@ class SettingsMixin:
                         # 同一个版本被关掉过就只留这行状态，不再弹第二次
                         self.open_update_window(info, auto=True)
                 elif state == updater.STATE_LATEST:
-                    _say("已是最新：%s（%s）。"
+                    _say(texts.SET_ABOUT_CAT_4
                          % (updater.display_version(info.get("tag") or cur), ch_text_)
                          + note, theme.c("oklit"))
                 elif state == updater.STATE_AHEAD:
                     # 报实话：不并进「已是最新」（多半是自己编的版本还没打 tag）；
                     # 彩蛋（W 2026-10-05）：本机比线上最新的还新时，文案末尾追一句
                     # 「莫非你是测试用户！」—— 只看本次返回结果，不额外去查另一个通道。
-                    _say("本机 %s 比线上最新的 %s 还新（%s）。%s"
+                    _say(texts.SET_ABOUT_CAT_5
                          % (cur, updater.display_version(info.get("tag") or "？"),
                             ch_text_, updater.AHEAD_EGG) + note, theme.c("warndim"))
                 else:
                     # msg 自带"检查更新失败："前缀，这里不再叠一层（2026-10-03）
-                    msg = info.get("msg") or "检查更新失败：原因未知。"
+                    msg = info.get("msg") or texts.SET_ABOUT_N_2
                     _say(msg + note, theme.c("errdeep"))
                     if dialog:
-                        messagebox.showwarning("检查更新", msg)
+                        messagebox.showwarning(texts.SET_ABOUT_A0_3, msg)
 
             def _do_check(channel=None, notify=True):
                 if st["busy"]:          # 不叠第二个请求：状态与按钮都由前一个负责收尾
@@ -3930,7 +3777,7 @@ class SettingsMixin:
                 btn_chk.configure(state="disabled")     # 防连点：一次只发一个请求
                 btn_open.configure(state="disabled")
                 up_url["v"] = ""
-                _say("正在向 GitHub 查询%s的最新版本…（本机 %s）" % (ch_text, cur))
+                _say(texts.SET_ABOUT_CAT_6 % (ch_text, cur))
 
                 def done(state, info):
                     st["busy"] = False
@@ -3947,7 +3794,7 @@ class SettingsMixin:
                         res = updater.check_update(cur, ch_code, cache=st["cache"],
                                                    token=tok)
                     except Exception as e:          # 兜底：异常不许穿回 UI 线程
-                        res = (updater.STATE_ERROR, {"msg": "检查更新时出错：%s" % e})
+                        res = (updater.STATE_ERROR, {"msg": texts.APP_UPD_CHECK_ERR % e})
                     self._ui_q.put(lambda: done(*res))
 
                 threading.Thread(target=work, daemon=True).start()
@@ -3956,12 +3803,12 @@ class SettingsMixin:
             # 顺序按 W 2026-10-04 的要求：检查更新 → 正式版/测试版 → 打开下载页 → "?"，
             # 并且**删掉左边的「版本类型」标签** —— 那一行的内容自解释，不需要一个名词占位。
             uf = ttk.Frame(t9)
-            btn_chk = theme.button(uf, text="检查更新", width=12, command=_do_check)
+            btn_chk = theme.button(uf, text=texts.SET_ABOUT_A0_3, width=12, command=_do_check)
             btn_chk.pack(side="left", padx=(0, 6))
             ch_cb = theme.comb(uf, textvariable=ch_var, state="readonly", width=10,
                                  values=[lab for _c, lab in updater.CHANNELS])
             ch_cb.pack(side="left", padx=(0, 6))
-            btn_open = theme.button(uf, text="打开下载页", width=12,
+            btn_open = theme.button(uf, text=texts.SET_ABOUT_A0_2, width=12,
                                   command=lambda: _open_page(up_url["v"]),
                                   state="disabled")
             btn_open.pack(side="left", padx=(0, 6))
@@ -3991,7 +3838,7 @@ class SettingsMixin:
             # 这一次同样 `notify=False`：不弹窗，只写这行状态。
             def _enter_about():
                 if st["busy"]:          # 上一个请求还在飞：把同一句"正在查"说出来
-                    _say("正在向 GitHub 查询%s的最新版本…（本机 %s）"
+                    _say(texts.SET_ABOUT_CAT_6
                          % (updater.CHANNEL_LABEL[updater.CHANNEL_STABLE],
                             updater.display_version(APP_VERSION)))
                     return
@@ -4030,19 +3877,15 @@ class SettingsMixin:
             def set_dpi():
                 self.cfg["dpi_aware"] = 1 if dpi_var.get() else 0
                 save_config(self.cfg)
-                dpi_status.set("已记住，重开程序后生效。")
+                dpi_status.set(texts.SET_ABOUT_A0_4)
 
-            theme.check(df, text="高分屏清晰度", variable=dpi_var,
+            theme.check(df, text=texts.SET_ABOUT_N_3, variable=dpi_var,
                             command=set_dpi).pack(side="left")
-            ttk.Label(df, text="现在：%s" % ("已开" if now else "没开"),
+            ttk.Label(df, text=texts.SET_ABOUT_CAT_7 % (texts.SET_ABOUT_N_4 if now else texts.SET_ABOUT_N_5),
                       style="Hint.TLabel", font=("Microsoft YaHei UI", 9)).pack(
                 side="left", padx=(10, 0))
             if not simple:      # 普通用户模式不放 "?"（2026-10-07 W 定）
-                widgets.HelpDot(df, "屏幕缩放不是 100% 时开的：开着 = 界面按显示器的真实像素画，"
-                                     "文字锐利，同一块屏幕上窗口看着比现在小一档；"
-                                     "关着 = 交给 Windows 拉伸，看着大但发虚。\n"
-                                     "改完要**重开程序**才生效（这一项只能冷切换）。"
-                                     "远程桌面里建议关着。").pack(side="left", padx=(6, 0))
+                widgets.HelpDot(df, texts.SET_ABOUT_A1_2).pack(side="left", padx=(6, 0))
             ttk.Label(t9, textvariable=dpi_status, style="Hint.TLabel", wraplength=360,
                       justify="left", font=("Microsoft YaHei UI", 9)).grid(
                 row=r9["i"], column=0, columnspan=3, sticky="w")
@@ -4065,9 +3908,9 @@ class SettingsMixin:
             def _refresh():
                 t = secrets.get_github_token()
                 if t:
-                    tok_lab.set("GitHub 令牌：已填写 " + secrets.mask(t))
+                    tok_lab.set(texts.SET_DEV_CAT + secrets.mask(t))
                 else:
-                    tok_lab.set("GitHub 令牌：未填写（匿名接口 60 次/小时）")
+                    tok_lab.set(texts.SET_DEV_A0)
 
             def _sync_upd_help():
                 """令牌一变，关于页那个 "?" 里"多久不再自动查"就得跟着变（见 `_upd_help_text`）。
@@ -4086,13 +3929,11 @@ class SettingsMixin:
                 d = tk.Toplevel(win)
                 theme.style_toplevel(d, "panel")   # 经典背景 + 标题栏两件套（坑 186）
                 d.withdraw()                # 先藏起来，摆正了再显示（否则左上角闪一下）
-                d.title("GitHub 令牌")
-                widgets.panel_label(d, text="GitHub 令牌",
+                d.title(texts.SET_DEV_A0_2)
+                widgets.panel_label(d, text=texts.SET_DEV_A0_2,
                                     font=("Microsoft YaHei UI", 10, "bold")).pack(
                     anchor="w", padx=14, pady=(12, 4))
-                widgets.panel_label(d, text="限额 60 → 5000 次/小时，更新冷却 10 分钟 → 5 秒，"
-                                  "并开启后台定时检查。\n"
-                                  "只写进本机 secrets.json，界面与配置文件仅显示掩码。",
+                widgets.panel_label(d, text=texts.SET_DEV_N,
                           fg_key="hint", wraplength=430, justify="left",
                           font=("Microsoft YaHei UI", 9)).pack(anchor="w", padx=14)
                 e = theme.entry(d, width=48, show="●")
@@ -4111,31 +3952,30 @@ class SettingsMixin:
                     _refresh()
                     _sync_upd_help()
                     self._dev_upd_start()   # 令牌到手 → 后台那个定时器可以起来了
-                    msg_lab.set("已保存 GitHub 令牌。")
+                    msg_lab.set(texts.SET_DEV_A0_3)
                     d.destroy()
 
                 def clear():
-                    if messagebox.askyesno("GitHub 令牌", "清除已填的 GitHub 令牌？"):
+                    if messagebox.askyesno(texts.SET_DEV_A0_2, texts.SET_DEV_A1):
                         secrets.set_github_token("")
                         _refresh()
                         _sync_upd_help()
                         self._dev_upd_start()   # 令牌没了 → 定时器自己会停
-                        msg_lab.set("已清除 GitHub 令牌。")
+                        msg_lab.set(texts.SET_DEV_A0_4)
                     d.destroy()
 
-                theme.button(bf, text="清除", width=8, command=clear).pack(side="left", padx=4)
-                theme.button(bf, text="取消", width=8, command=d.destroy).pack(side="left", padx=4)
-                theme.button(bf, text="保存令牌", width=10, command=save).pack(side="left")
+                theme.button(bf, text=texts.SET_PROV_N_6, width=8, command=clear).pack(side="left", padx=4)
+                theme.button(bf, text=texts.BTN_CANCEL, width=8, command=d.destroy).pack(side="left", padx=4)
+                theme.button(bf, text=texts.SET_DEV_N_2, width=10, command=save).pack(side="left")
                 e.focus_set()
                 widgets.center_on(d, win)   # 摆到设置页正中，别落在屏幕左上角
 
             def reset_dev():
                 t = secrets.get_github_token()
                 if not messagebox.askyesno(
-                        "重置开发者选项",
-                        "清掉 GitHub 令牌%s，以及「已提醒过、不再弹窗」的版本记录？\n"
-                        "开发者模式保持开启。"
-                        % ("（当前 %s）" % secrets.mask(t) if t else "（本来就没填）")):
+                        texts.SET_DEV_A0_5,
+                        texts.SET_DEV_CAT_2
+                        % (texts.SET_DEV_CAT_3 % secrets.mask(t) if t else texts.SET_DEV_N_3)):
                     return
                 secrets.set_github_token("")
                 self.cfg["dev_upd_dismissed"] = ""   # 旧键：2026-10-05 前的后台弹窗记录，顺手清
@@ -4144,7 +3984,7 @@ class SettingsMixin:
                 _refresh()
                 _sync_upd_help()
                 self._dev_upd_start()       # 令牌清空了 → 后台定时器停掉
-                msg_lab.set("已重置开发者选项。")
+                msg_lab.set(texts.SET_DEV_A0_6)
 
             def trust_sign():
                 """把本程序 exe 的签名证书列入**当前用户**的受信任根（免管理员）。
@@ -4155,18 +3995,15 @@ class SettingsMixin:
                 """
                 info, rwhy = codesign.read_cert_detail()
                 if info is None:
-                    msg_lab.set("列入失败：%s" % (rwhy or "本程序这份 exe 没有签名"
-                                                  "（源码运行、或装的是未签名的构建）。"))
+                    msg_lab.set(texts.SET_DEV_CAT_4 % (rwhy or texts.SET_DEV_N_4))
                     return
                 if info.get("trusted"):
-                    msg_lab.set("这张签名证书已经在本机可信名单里了，不用再列一次。")
+                    msg_lab.set(texts.SET_DEV_A0_7)
                     return
                 if not messagebox.askyesno(
-                        "将本软件签名列入本机可信签名",
-                        "请确保该软件是从 GitHub 上直接下载的，\n"
-                        "否则将签名列入可信名单是一件很危险的事。\n\n"
-                        "要列入的证书：\n%s\n指纹：%s"
-                        % (info.get("subject") or "（读不出主体）",
+                        texts.SET_DEV_A0_8,
+                        texts.SET_DEV_CAT_5
+                        % (info.get("subject") or texts.SET_DEV_N_5,
                            info.get("thumbprint") or "")):
                     return
                 good, why = codesign.trust()
@@ -4174,9 +4011,9 @@ class SettingsMixin:
                     self._codesign_info = dict(info, trusted=True)   # 下次建页不再显示这条
                     if btn_trust_user is not None:
                         btn_trust_user.pack_forget()                 # 已经信任了，这条没用了
-                    msg_lab.set("已把本软件的签名列入本机可信名单（当前用户）。")
+                    msg_lab.set(texts.SET_DEV_A0_9)
                 else:
-                    msg_lab.set("列入失败：%s" % why)
+                    msg_lab.set(texts.SET_DEV_CAT_4 % why)
 
             def trust_sign_machine():
                 """把本程序 exe 的签名证书列入**本机（所有用户）**信任根 —— 需要管理员。
@@ -4187,30 +4024,23 @@ class SettingsMixin:
                 """
                 info, rwhy = codesign.read_cert_detail()
                 if info is None:
-                    msg_lab.set("列入失败：%s" % (rwhy or "本程序这份 exe 没有签名"
-                                                  "（源码运行、或装的是未签名的构建）。"))
+                    msg_lab.set(texts.SET_DEV_CAT_4 % (rwhy or texts.SET_DEV_N_4))
                     return
                 if info.get("trusted_machine"):
-                    msg_lab.set("这张签名证书已经在本机（所有用户）可信名单里了。")
+                    msg_lab.set(texts.SET_DEV_A0_10)
                     return
                 if not messagebox.askyesno(
-                        "列入系统级信任（所有用户）—— 请看清再决定",
-                        "这一步会把证书写进【这台机器的所有用户】，不只是你当前这个用户。\n\n"
-                        "后果：这台机器上任何人、任何程序，只要是用这张证书签名的，"
-                        "Windows 都会直接信任它。\n\n"
-                        "除非你确定这份软件是从 GitHub 上直接下载的、并且这台机器只由你使用，"
-                        "否则不要继续。\n\n"
-                        "接下来会弹系统管理员授权 —— 在那里取消就等于放弃。\n\n"
-                        "要列入的证书：\n%s\n指纹：%s"
-                        % (info.get("subject") or "（读不出主体）",
+                        texts.SET_DEV_A0_11,
+                        texts.SET_DEV_CAT_6
+                        % (info.get("subject") or texts.SET_DEV_N_5,
                            info.get("thumbprint") or "")):
                     return
-                msg_lab.set("正在请求管理员授权…")
+                msg_lab.set(texts.SET_DEV_A0_12)
                 ok, why = codesign.trust_machine()
                 if ok:
-                    msg_lab.set("已把本软件的签名列入本机（所有用户）可信名单。")
+                    msg_lab.set(texts.SET_DEV_A0_13)
                 else:
-                    msg_lab.set("列入失败：%s" % why)
+                    msg_lab.set(texts.SET_DEV_CAT_4 % why)
 
             btn_trust_user = None       # 用户级那个按钮（已信任时不建；点了成功就收起来）
 
@@ -4226,8 +4056,7 @@ class SettingsMixin:
             # 控件放在回调之后建：`command=名字` 是建控件那一刻就要绑定的（坑 115）
             i = r_dev["i"]
             r_dev["i"] += 1
-            ttk.Label(t_dev, text="开发者模式已开启 · 仅本次运行有效 · "
-                                  "重新进入：关于页版本号连点 5 次",
+            ttk.Label(t_dev, text=texts.SET_DEV_N_6,
                       style="Note.TLabel", wraplength=720, justify="left",
                       font=("Microsoft YaHei UI", 9)).grid(
                 row=i, column=0, columnspan=3, sticky="w", pady=(0, 6))
@@ -4238,19 +4067,19 @@ class SettingsMixin:
             # —— 所以签名那条按需少建一个时，也不许挪动这两头的位置。
             brf = ttk.Frame(t_dev)
             brf.grid(row=i, column=0, columnspan=3, sticky="w", pady=(2, 6))
-            theme.button(brf, text="关闭开发者模式",
+            theme.button(brf, text=texts.SET_DEV_N_7,
                        command=close_dev).pack(side="top", anchor="w", pady=(0, 4))
-            theme.button(brf, text="填写 GitHub 令牌",
+            theme.button(brf, text=texts.SET_DEV_N_8,
                        command=fill_token).pack(side="top", anchor="w", pady=(0, 4))
             # 「本机已写入签名」就不再显示用户级那一条（W 2026-10-05）：判据用启动时那次
             # 检测的结果（`App._codesign_info`），不在这里再起一次 PowerShell 卡界面。
             if not _trusted_here():
-                btn_trust_user = theme.button(brf, text="将本软件签名列入本机可信签名",
+                btn_trust_user = theme.button(brf, text=texts.SET_DEV_A0_8,
                                             command=trust_sign)
                 btn_trust_user.pack(side="top", anchor="w", pady=(0, 4))
-            theme.button(brf, text="将本软件签名列入系统级信任（所有用户）",
+            theme.button(brf, text=texts.SET_DEV_N_9,
                        command=trust_sign_machine).pack(side="top", anchor="w", pady=(0, 4))
-            theme.button(brf, text="重置开发者选项",
+            theme.button(brf, text=texts.SET_DEV_A0_5,
                        command=reset_dev).pack(side="top", anchor="w")
 
             for var, fg in ((tok_lab, theme.c("note")), (msg_lab, theme.c("oklit"))):
@@ -4290,23 +4119,22 @@ class SettingsMixin:
             # (键, 标题, 用户在配置里填的那项, 真正要存在才行的文件, 该放哪儿, 目录怎么称呼, 指路在哪, 额外说明)
             engines = [
                 ("llama",
-                 "llama.cpp（对话引擎）",
+                 texts.SET_FENG_L1,
                  lambda: str((self.cfg.get("exe") or "").strip()),
                  lambda: str((self.cfg.get("exe") or "").strip()),
                  lambda: os.path.dirname(str((self.cfg.get("exe") or "").strip())) or APP_DIR,
-                 "llama-server 所在目录",
-                 "本地模型 → 服务参数",
-                 "CUDA 版还要把 cudart 包里的运行库一起放进同一目录，否则启动时报缺 dll。"),
+                 texts.SET_FENG_L5,
+                 texts.SET_FENG_L6,
+                 texts.SET_FENG_L7),
                 ("sd",
-                 "stable-diffusion.cpp（生图 / 生视频引擎）",
+                 texts.SET_FENG_L1_2,
                  lambda: str((self.cfg.get("sd_dir") or "").strip()),
                  lambda: os.path.join(str((self.cfg.get("sd_dir") or "").strip()),
                                       engine_install.exe_name("sd")),
                  lambda: str((self.cfg.get("sd_dir") or "").strip()),
-                 "sd.cpp 引擎目录",
-                 "本地模型 → 生图（sd.cpp）",
-                 "生图与生视频共用这一个可执行文件，只是参数不同；"
-                 "同目录还要有一堆运行库 dll。"),
+                 texts.SET_FENG_L5_2,
+                 texts.SET_FENG_L6_2,
+                 texts.SET_FENG_L7_2),
             ]
 
             def _state_of(cfg_of, exe_of):
@@ -4316,11 +4144,11 @@ class SettingsMixin:
                 # （和坑 42 里 `os.path.join("", "output")` 在 CWD 建目录是同一个根子）。
                 # 四态里的"未就位 / 已就位"落在这里，"未就位"后面跟原因（W 2026-10-05）。
                 if not str(cfg_of() or "").strip():
-                    return "未就位：还没指路（「打开目标目录」会告诉你该放去哪儿）", theme.c("errdeep")
+                    return texts.SET_FENG_L0, theme.c("errdeep")
                 exe = str(exe_of() or "")
                 if os.path.isfile(exe):
-                    return "已就位：" + exe, theme.c("oklit")
-                return "未就位：指了路但找不到该文件：" + exe, theme.c("errdeep")
+                    return texts.SET_FENG_CAT + exe, theme.c("oklit")
+                return texts.SET_FENG_CAT_2 + exe, theme.c("errdeep")
 
             # ---- 这几个 helper **定义在循环之外**，全部显式收参。
             #
@@ -4350,15 +4178,15 @@ class SettingsMixin:
             def _flavor_line(b, k, fv):
                 """「查询到新版本」那一行：版本 + 档位 + 体积（含不含运行库）。"""
                 if not b.get("builds"):
-                    return "查询到新版本：还没查过可用版本（先点「检查更新」）。"
+                    return texts.SET_FENG_RET
                 build = engine_install.pick_build(b["builds"], fv.get())
                 fl = [f for f in engine_install.flavors_from(build) if f["id"] == fv.get()]
                 if not fl:
-                    return "查询到新版本：%s（这个档位当前版本没有可用包）" % (
+                    return texts.SET_FENG_CAT_3 % (
                         build.get("tag") or "？")
                 mb = fl[0]["size"] / 1048576.0
-                extra = "（含运行库）" if fl[0].get("extra") else ""
-                return "查询到新版本：%s · 档位 %s · %.0f MB%s" % (
+                extra = texts.SET_FENG_N if fl[0].get("extra") else ""
+                return texts.SET_FENG_CAT_4 % (
                     build.get("tag") or "？", fl[0].get("label") or fv.get(), mb, extra)
 
             def _plan_of(b, k, fv):
@@ -4394,7 +4222,7 @@ class SettingsMixin:
                     return ""
                 if self._server_alive_flag or (
                         server_process_alive() and server_alive(self.cfg)):
-                    return "这份引擎正在运行，请先在主页面停止服务再安装。"
+                    return texts.SET_FENG_RET_2
                 return ""
 
             eng_refresh = {}      # {引擎键: 该引擎状态行的刷新函数}，给"进页自动定向"用
@@ -4406,12 +4234,9 @@ class SettingsMixin:
                 tk.Label(th, text=title, font=("Microsoft YaHei UI", 10, "bold"),
                          background=widgets.default_bg(), anchor="w").pack(side="left")
                 if not simple:      # 普通用户模式不放 "?"（引擎管理的功能与按钮本身不变）
-                    widgets.HelpDot(th, "「更新引擎」会把压缩包整包解压（不要只放那一个 exe，"
-                                         "同目录的运行库都要），落到程序目录下的 engines 里。\n"
+                    widgets.HelpDot(th, texts.SET_FENG_CAT_5
                                          + note +
-                                         "\n引擎本来就装在这台机器上、只是换了位置的："
-                                         "进这一屏会自动按 exe 名扫一遍，也可以「手动定向」自己指，"
-                                         "都不用重装。").pack(side="left", padx=(6, 0))
+                                         texts.SET_FENG_CAT_6).pack(side="left", padx=(6, 0))
 
                 # 状态行：四态文案（未就位 / 已就位 / 正在查 / 查询到新版本）**都写在这一行**，
                 # 不另设提示行（W 2026-10-05）。变量挂控件保活（坑 145 ①）。
@@ -4435,11 +4260,11 @@ class SettingsMixin:
 
                 flavor_var = tk.StringVar(value="")
                 # width 14：第四态「补全缺失文件」6 个汉字，12 字符宽会挤（坑 280）
-                btn_act = theme.button(vf, text="检查更新", width=14)
+                btn_act = theme.button(vf, text=texts.SET_ABOUT_A0_3, width=14)
                 btn_act.pack(side="left")
                 # 档位下拉先建不 pack：**点过「检查更新」才 pack 出来**（W 2026-10-05）。
                 # 构造时就绑 textvariable（坑 112：只 set 变量而没绑，界面是空的而数据是对的）。
-                flavor_lbl = ttk.Label(vf, text="档位", style="Dim.TLabel",
+                flavor_lbl = ttk.Label(vf, text=texts.SET_FENG_N_2, style="Dim.TLabel",
                                        font=("Microsoft YaHei UI", 9))
                 flavor_cb = theme.comb(vf, textvariable=flavor_var, state="readonly",
                                          width=16, values=[])
@@ -4465,38 +4290,35 @@ class SettingsMixin:
                     """按当前 mode 刷按钮文字与状态行（各态文案的唯一出口）。"""
                     mode = b.get("mode") or "idle"
                     if mode == "checking":
-                        _say(sv, stl, "正在查…", theme.c("warnlit"))
-                        btn.configure(text="检查更新", state="disabled")
+                        _say(sv, stl, texts.SET_FENG_A2, theme.c("warnlit"))
+                        btn.configure(text=texts.SET_ABOUT_A0_3, state="disabled")
                         return
                     if mode == "ready":
                         _say(sv, stl, _flavor_line(b, k, fv))
-                        btn.configure(text="更新引擎", state="normal")
+                        btn.configure(text=texts.SET_FENG_N_3, state="normal")
                         return
                     if mode in ("installing", "repairing"):
-                        btn.configure(text="取消安装", state="normal")
+                        btn.configure(text=texts.SET_FENG_N_4, state="normal")
                         return
                     if mode == "repair":
                         # CUDA 两个 zip 只放齐一个：exe 在、ggml-cuda 在、cudart64 缺
                         _say(sv, stl,
-                             "已就位：%s\n但缺少 CUDA 运行库（官方 CUDA 包是两个压缩包，"
-                             "另一个还没放进同一目录），这样服务会启动即退出。"
-                             "点右侧「补全缺失文件」可只下载运行库一键补齐。" % so(),
+                             texts.SET_FENG_CAT_7 % so(),
                              theme.c("warnlit"))
-                        btn.configure(text="补全缺失文件", state="normal")
+                        btn.configure(text=texts.SET_FENG_N_5, state="normal")
                         return
                     if mode == "repair_body":
                         _say(sv, stl,
-                             "未就位：引擎主体不完整（目录里没有 %s，多半是主压缩包"
-                             "没下完或没解压完整）。点右侧「补全缺失文件」完整重装。"
+                             texts.SET_FENG_CAT_8
                              % engine_install.exe_name(k),
                              theme.c("errdeep"))
-                        btn.configure(text="补全缺失文件", state="normal")
+                        btn.configure(text=texts.SET_FENG_N_5, state="normal")
                         return
                     text, color = _state_of(co, so)
-                    if b.get("checked") and text.startswith("已就位"):
-                        text += "（已是最新）"      # 查过且没有更新版本
+                    if b.get("checked") and text.startswith(texts.SET_FENG_A0):
+                        text += texts.SET_FENG_TEXT      # 查过且没有更新版本
                     _say(sv, stl, text, color)
-                    btn.configure(text="检查更新", state="normal")
+                    btn.configure(text=texts.SET_ABOUT_A0_3, state="normal")
 
                 def _refresh_inspect(b=box, k=key, do=dir_of, co=cfg_of, rf=_render):
                     """看这份引擎是不是半装，据结果在 idle / repair / repair_body 间定态。
@@ -4569,7 +4391,7 @@ class SettingsMixin:
                         if not builds:
                             bb["mode"] = "idle"
                             rf()
-                            _say(sv, stl, why or "没查到带本平台安装包的版本。", theme.c("errdeep"))
+                            _say(sv, stl, why or texts.SET_FENG_N_6, theme.c("errdeep"))
                             return
                         bb["builds"] = builds
                         ids = [f["id"] for f in engine_install.flavors_from(builds[0])]
@@ -4597,7 +4419,7 @@ class SettingsMixin:
                         try:
                             builds, why = engine_install.list_builds(k, token=tok)
                         except Exception as e:       # 兜底：异常不许穿回 UI 线程（坑 54）
-                            builds, why = [], "查可用版本时出错：%s" % e
+                            builds, why = [], texts.SET_FENG_CAT_9 % e
                         # 探显卡放在联网之后、且只在**子线程**里做（坑 4：最坏会 spawn
                         # nvidia-smi 等满 10 秒，放这儿不冻界面）。三级判据便宜的先问，只有
                         # "没认到 N 卡"才走到 spawn 那一级，而那类机器通常连 nvidia-smi 都没装
@@ -4622,23 +4444,23 @@ class SettingsMixin:
                     try:
                         t10.winfo_toplevel().clipboard_clear()
                         t10.winfo_toplevel().clipboard_append(u)
-                        _say(sv, stl, "安装包链接已复制，贴到浏览器地址栏就能开始下载。"
-                             if p and p["files"] else "发布页链接已复制。")
+                        _say(sv, stl, texts.SET_FENG_N_7
+                             if p and p["files"] else texts.SET_FENG_N_8)
                     except Exception as e:
-                        messagebox.showwarning("复制链接", "复制失败（%s）。" % e)
+                        messagebox.showwarning(texts.SET_FENG_A0_2, texts.SET_FENG_CAT_10 % e)
 
                 def manual_dir(_e=None, k=key, b=box, rf=_render, ad=_apply_dir,
                                ri=_refresh_inspect, do=dir_of, co=cfg_of):
                     """「手动定向」：用户自己指一个文件夹（该引擎所在目录）。"""
                     folder = filedialog.askdirectory(
-                        title="选择 %s 所在文件夹" % engine_install.exe_name(k),
+                        title=texts.SET_FENG_CAT_11 % engine_install.exe_name(k),
                         parent=t10.winfo_toplevel())
                     if not folder:
                         return
                     exe = os.path.join(folder, engine_install.exe_name(k))
                     if not os.path.isfile(exe) and not messagebox.askyesno(
-                            "手动定向",
-                            "这个文件夹里没有 %s。\n\n仍要指到这里吗？"
+                            texts.SET_FENG_A0_3,
+                            texts.SET_FENG_CAT_12
                             % engine_install.exe_name(k)):
                         return
                     ad(k, folder)
@@ -4657,19 +4479,19 @@ class SettingsMixin:
                     if not p or not p["files"]:
                         # 同一句也写进状态行：无头自检看不见 messagebox，
                         # 而"没查过就点更新"这条规矩必须能被断言（也更像这页的口径）。
-                        _say(sv, stl, "还没查过可用版本 —— 先点「检查更新」，再选一个档位。",
+                        _say(sv, stl, texts.SET_FENG_A2_2,
                              theme.c("errdeep"))
                         return
                     why = _guard(b, k, co)
-                    if why and not messagebox.askyesno("更新引擎", why + "\n\n仍要继续吗？"):
+                    if why and not messagebox.askyesno(texts.SET_FENG_N_3, why + texts.SET_FENG_CAT_13):
                         return
                     dest = p["dir"]
                     tok = secrets.get_github_token()
                     b["stop"] = threading.Event()
                     b["busy"] = True
                     b["mode"] = "installing"
-                    btn.configure(text="取消安装", state="normal")
-                    _say(sv, stl, "准备下载 %s（%.0f MB）…"
+                    btn.configure(text=texts.SET_FENG_N_4, state="normal")
+                    _say(sv, stl, texts.SET_FENG_CAT_14
                          % (p["files"][0]["name"], p["total"] / 1048576.0))
 
                     def emit(text):
@@ -4685,8 +4507,8 @@ class SettingsMixin:
                             ri(b, k, do, co, rf)
                             _say(sv, stl, why_, theme.c("errdeep"))
                             messagebox.showwarning(
-                                "更新引擎",
-                                "%s\n\n也可以点「复制下载链接」自己下。" % why_)
+                                texts.SET_FENG_N_3,
+                                texts.SET_FENG_CAT_15 % why_)
                             return
                         # 记下装上的版本（下次「检查更新」据此判「查询到新版本 / 已是最新」）
                         # + **把路径指到刚装的那份**（W 2026-10-05 明确要求，见本函数口径）
@@ -4698,15 +4520,15 @@ class SettingsMixin:
                         b["checked"] = False
                         ri(b, k, do, co, rf)   # 新装必完整 → idle（坑 280 同一出口）
                         messagebox.showinfo(
-                            "更新引擎",
-                            "已装好并指过去：\n%s\n\n回 设置 → %s 就能用它。" % (exe, setting))
+                            texts.SET_FENG_N_3,
+                            texts.SET_FENG_CAT_16 % (exe, setting))
 
                     def work():
                         tmp = engine_install.staging_dir()
                         got, why2, exe3, files = True, "", "", []
                         try:
                             for f in p["files"]:
-                                emit("正在下载 %s（%.0f MB）…"
+                                emit(texts.SET_FENG_CAT_17
                                      % (f["name"], f["size"] / 1048576.0))
                                 # 落盘名净化（R-109）：资产名直取有 `..` / 盘符时可写到
                                 # 暂存目录之外；basename + 白名单字符兜底
@@ -4728,10 +4550,10 @@ class SettingsMixin:
                             if got:
                                 ok3, why3, exe3 = engine_install.install(
                                     k, files, dest, emit=emit, stop_flag=b["stop"],
-                                    guard=lambda: "已取消" if b["stop"].is_set() else "")
+                                    guard=lambda: texts.SET_FENG_N_9 if b["stop"].is_set() else "")
                                 got, why2 = ok3, why3
                         except Exception as e:
-                            got, why2 = False, "安装时出错：%s" % e
+                            got, why2 = False, texts.SET_FENG_CAT_18 % e
                         finally:
                             engine_install.cleanup(tmp)
                         self._ui_q.put(lambda: finish(got, why2, exe3))
@@ -4741,7 +4563,7 @@ class SettingsMixin:
                             work()
                         except Exception as e:      # 兜底：异常不许穿回 UI 线程（坑 54）
                             self._ui_q.put(
-                                lambda: finish(False, "安装时出错：%s" % e, ""))
+                                lambda: finish(False, texts.SET_FENG_CAT_18 % e, ""))
 
                     threading.Thread(target=work_safe, daemon=True).start()
 
@@ -4766,8 +4588,8 @@ class SettingsMixin:
                             self._server_alive_flag or
                             (server_process_alive() and server_alive(self.cfg))):
                         messagebox.showwarning(
-                            "补全缺失文件",
-                            "这份引擎正在运行。请先在主页面停止服务，再补全文件。")
+                            texts.SET_FENG_N_5,
+                            texts.SET_FENG_A1)
                         return
                     body_mode = (mode == "repair_body")
 
@@ -4781,13 +4603,12 @@ class SettingsMixin:
                         p = _plan_of(b, k, fv)
                         if not p or not p["files"]:
                             messagebox.showwarning(
-                                "补全缺失文件",
-                                "没查到可用的安装包。请先点「检查更新」，选一个 CUDA 档位。")
+                                texts.SET_FENG_N_5,
+                                texts.SET_FENG_A1_2)
                             return
                         if not messagebox.askyesno(
-                                "补全缺失文件",
-                                "引擎主体不完整，将完整下载并重装（主包 + 运行库，"
-                                "约 %.0f MB）到默认引擎目录。\n\n现在开始下载吗？"
+                                texts.SET_FENG_N_5,
+                                texts.SET_FENG_CAT_19
                                 % (p["total"] / 1048576.0)):
                             return
                         b["mode"] = "ready"        # do_install 的入口态；其 finish 会再 inspect
@@ -4799,15 +4620,13 @@ class SettingsMixin:
                         f = rp.get("file")
                         if not f:
                             messagebox.showwarning(
-                                "补全缺失文件",
-                                "选中的档位（%s）不含 CUDA 运行库。\n"
-                                "请在左侧「档位」里改选一个 cuda 档位，再点补全。"
+                                texts.SET_FENG_N_5,
+                                texts.SET_FENG_CAT_20
                                 % (fv.get() or "？"))
                             return
                         if not messagebox.askyesno(
-                                "补全缺失文件",
-                                "将补全 CUDA 运行库：\n版本 %s · 档位 %s · 约 %.0f MB\n"
-                                "只下载运行库并合并进：\n%s\n\n现在开始下载吗？"
+                                texts.SET_FENG_N_5,
+                                texts.SET_FENG_CAT_21
                                 % (rp.get("tag") or "？", rp.get("flavor") or fv.get(),
                                    (f.get("size") or 0) / 1048576.0, do())):
                             return
@@ -4816,7 +4635,7 @@ class SettingsMixin:
                         b["busy"] = True
                         b["mode"] = "repairing"
                         rf()
-                        _say(sv, stl, "准备下载 %s（%.0f MB）…"
+                        _say(sv, stl, texts.SET_FENG_CAT_14
                              % (f.get("name"), (f.get("size") or 0) / 1048576.0))
 
                         def emit(text):
@@ -4828,15 +4647,15 @@ class SettingsMixin:
                             ri(b, k, do, co, rf)       # 重新 inspect：补齐→idle，失败→回 repair
                             if not ok:
                                 _say(sv, stl, why_, theme.c("errdeep"))
-                                if why_ != "已取消":
+                                if why_ != texts.SET_FENG_N_9:
                                     messagebox.showwarning(
-                                        "补全缺失文件",
-                                        "%s\n\n也可以点「复制下载链接」自行下载后解压到同一目录。"
+                                        texts.SET_FENG_N_5,
+                                        texts.SET_FENG_CAT_22
                                         % why_)
                                 return
                             messagebox.showinfo(
-                                "补全缺失文件",
-                                "已补全 %d 个运行库文件。重启服务后即可正常使用 CUDA。"
+                                texts.SET_FENG_N_5,
+                                texts.SET_FENG_CAT_23
                                 % len(merged))
 
                         def work():
@@ -4849,7 +4668,7 @@ class SettingsMixin:
                                                    str(f.get("name") or "cudart.zip")
                                                    .replace("\\", "/"))) or "cudart.zip"
                                 zp = os.path.join(tmp, _safe)
-                                emit("正在下载 %s（%.0f MB）…"
+                                emit(texts.SET_FENG_CAT_17
                                      % (f.get("name"), (f.get("size") or 0) / 1048576.0))
                                 ok, why_ = engine_install.download(
                                     f.get("url"), zp, emit=emit, stop_flag=b["stop"],
@@ -4859,7 +4678,7 @@ class SettingsMixin:
                                     ok, why_, merged = engine_install.merge_runtime(
                                         k, zp, target, emit=emit, stop_flag=b["stop"])
                             except Exception as e:
-                                ok, why_ = False, "补全时出错：%s" % e
+                                ok, why_ = False, texts.SET_FENG_CAT_24 % e
                             finally:
                                 engine_install.cleanup(tmp)
                             self._ui_q.put(lambda: finish_rt(ok, why_, merged))
@@ -4869,7 +4688,7 @@ class SettingsMixin:
                                 work()
                             except Exception as e:      # 兜底：异常不穿回 UI 线程（坑 54）
                                 self._ui_q.put(
-                                    lambda: finish_rt(False, "补全时出错：%s" % e, []))
+                                    lambda: finish_rt(False, texts.SET_FENG_CAT_24 % e, []))
 
                         threading.Thread(target=work_safe_rt, daemon=True).start()
 
@@ -4880,8 +4699,8 @@ class SettingsMixin:
                     tok = secrets.get_github_token()
                     hw = {"gpu_name": str(self.cfg.get("gpu_name") or "")}
                     b["busy"] = True
-                    btn.configure(state="disabled", text="补全缺失文件")
-                    _say(sv, stl, "正在查询可用版本以补全…", theme.c("warnlit"))
+                    btn.configure(state="disabled", text=texts.SET_FENG_N_5)
+                    _say(sv, stl, texts.SET_FENG_A2_3, theme.c("warnlit"))
 
                     def fetched(builds, why, kinds, bb=b, cb=cb, vv=fv, sv=sv, stl=stl,
                                 sf=sf, btn=btn, ri=ri, do=do, co=co, begin=begin):
@@ -4889,7 +4708,7 @@ class SettingsMixin:
                         btn.configure(state="normal")
                         if not builds:
                             ri(b, k, do, co, rf)
-                            _say(sv, stl, why or "没查到带本平台安装包的版本。",
+                            _say(sv, stl, why or texts.SET_FENG_N_6,
                                  theme.c("errdeep"))
                             return
                         bb["builds"] = builds
@@ -4904,7 +4723,7 @@ class SettingsMixin:
                         try:
                             builds, why = engine_install.list_builds(k, token=tok)
                         except Exception as e:
-                            builds, why = [], "查可用版本时出错：%s" % e
+                            builds, why = [], texts.SET_FENG_CAT_9 % e
                         try:
                             kinds = hardware.gpu_kinds(hw)
                         except Exception:
@@ -4933,11 +4752,11 @@ class SettingsMixin:
 
                 # 顺序按 W 2026-10-05（2026-10-08 去掉「自动定向」后保持其余相对次序）：
                 # 复制下载链接 → 手动定向 → 打开目标目录
-                theme.button(bf, text="复制下载链接", width=13,
+                theme.button(bf, text=texts.UPDW_BTN_COPYLINK, width=13,
                            command=copy_link).pack(side="left", padx=(0, 6))
-                theme.button(bf, text="手动定向", width=10,
+                theme.button(bf, text=texts.SET_FENG_A0_3, width=10,
                            command=manual_dir).pack(side="left", padx=(0, 6))
-                theme.button(bf, text="打开目标目录", width=13,
+                theme.button(bf, text=texts.SET_FENG_N_10, width=13,
                            command=lambda d=dir_of, w=what, s=setting: _open_outdir(
                                d(), w, s)).pack(side="left")
                 btn_act.configure(command=do_click)
@@ -4979,9 +4798,9 @@ class SettingsMixin:
                 # 普通用户模式（2026-10-07 W 定）：管理本地模型 / 全部重新计算 /
                 # 手动定向模型 三件 + 引擎管理那一屏（eng 区块本身不变）。
                 # 「补全缺失项」与「整理模型文件夹」在高级模式；进页自动补全照旧在后台跑。
-                for _txt, _cmd in (("管理本地模型…", self.open_local_models),
-                                   ("全部重新计算", lambda: self._manual_scan(True)),
-                                   ("手动定向模型", self._manual_point_model)):
+                for _txt, _cmd in ((texts.SET_FILES_L0, self.open_local_models),
+                                   (texts.MDL_RECALC_TITLE, lambda: self._manual_scan(True)),
+                                   (texts.MDL_POINT_TITLE, self._manual_point_model)):
                     theme.button(t5, text=_txt, width=18, command=_cmd).grid(
                         row=r5["i"], column=0, columnspan=3, sticky="w", pady=4)
                     r5["i"] += 1
@@ -4994,9 +4813,9 @@ class SettingsMixin:
                 # 必然折成两行、第一行尾巴还参差不齐（W 2026-10-04：删掉这些冗余计数）。
                 # 「进这一页会自动补全…」那半句也删了（W 2026-10-05）：自动化不需要向
                 # 用户说明，底下那些按钮自己会说话。
-                return "当前：模型 %d 个（含可看图）" % n_models
+                return texts.SET_FILES_CAT % n_models
 
-            head_lbl = ttk.Label(t5, text="当前：正在读取模型目录…",
+            head_lbl = ttk.Label(t5, text=texts.SET_FILES_N,
                                  style="Dim.TLabel", wraplength=760, justify="left",
                                  font=("Microsoft YaHei UI", 9))
             head_lbl.grid(row=0, column=0, columnspan=3, sticky="w", pady=(0, 8))
@@ -5010,33 +4829,26 @@ class SettingsMixin:
             _idle_fill(t5, _fill_files_head)
 
             frm = ttk.Frame(t5)
-            theme.button(frm, text="管理本地模型…", width=18,
+            theme.button(frm, text=texts.SET_FILES_L0, width=18,
                        command=self.open_local_models).pack(side="left")
-            row(t5, r5, "菜单与配套件", frm,
-                "三组模型与各自的配套件（VAE / 文本编码器 / CLIP / T5…）摊开在一页里，"
-                "可逐个勾选要不要出现在顶部模型菜单 —— 生图 / 生视频附带的"
-                "「能聊天的 .gguf 编码器」常需要收起来。只改显示，不动文件。")
+            row(t5, r5, texts.SET_FILES_A2, frm,
+                texts.SET_FILES_A4)
 
             fr = ttk.Frame(t5)
-            theme.button(fr, text="补全缺失项", width=18,
+            theme.button(fr, text=texts.MDL_RECALC_MISSING, width=18,
                        command=lambda: self._manual_scan(False)).pack(side="left", padx=(0, 6))
-            theme.button(fr, text="全部重新计算", width=18,
+            theme.button(fr, text=texts.MDL_RECALC_TITLE, width=18,
                        command=lambda: self._manual_scan(True)).pack(side="left")
-            row(t5, r5, "匹配参数", fr,
-                "补全 = 只为缺记录的模型计算（不覆盖手动调整过的值）；"
-                "全部重新计算 = 清空全部自动记录后重算（含覆盖手调值，会二次确认）。"
-                "进这一页会自动补全一次（10 分钟内不重复）。")
+            row(t5, r5, texts.SET_FILES_A2_2, fr,
+                texts.SET_FILES_A4_2)
 
             fr2 = ttk.Frame(t5)
-            theme.button(fr2, text="整理模型文件夹", width=18,
+            theme.button(fr2, text=texts.MDL_TIDY_TITLE, width=18,
                        command=self._open_tidy_dialog).pack(side="left", padx=(0, 6))
-            theme.button(fr2, text="手动定向模型", width=18,
+            theme.button(fr2, text=texts.MDL_POINT_TITLE, width=18,
                        command=self._manual_point_model).pack(side="left")
-            row(t5, r5, "文件整理", fr2,
-                "把模型按 文本模型 / 生图模型 / 生视频模型 归入模型目录下的 model 文件夹；"
-                "共用同一文本编码器的模型（如 qwen-image 2.1 的两个量化版本）收进同一个"
-                "子文件夹（先预览、后执行；只移动不删除；名称无法判断归属的保持原位）。"
-                "「手动定向模型」把别处的文件夹或单个 .gguf 加进来源 —— 只登记，不动文件。")
+            row(t5, r5, texts.SET_FILES_A2_3, fr2,
+                texts.SET_FILES_A4_3)
 
             # 进「模型文件与引擎」页自动补全一次（10 分钟冷却；与「检查更新」共用
             # core.throttle 那一套判据）。手动按钮不受冷却限制（models_ui._manual_scan）。
@@ -5080,7 +4892,7 @@ class SettingsMixin:
             body._done = True
             build = registry.get(key)
             if build is None:
-                ttk.Label(body, text="（这个区块还没接上构建函数）",
+                ttk.Label(body, text=texts.SET_BUILD_SECTION_N,
                           style="ErrLit.TLabel").grid(row=0, column=0, sticky="w")
                 return body
             build(body, {"i": 0})
@@ -5197,7 +5009,7 @@ class SettingsMixin:
             """
             ok, why = self._apply_settings(v)
             if not ok:
-                messagebox.showwarning("还没保存", why)
+                messagebox.showwarning(texts.SET_GLOBAL_SAVE_A0, why)
                 return                          # 一个键都没写，窗也不关：改好再来
             for _items in page_items.values():
                 for it in _items:
@@ -5210,10 +5022,10 @@ class SettingsMixin:
                     try:
                         ok, msg = hook() or (True, "")
                     except Exception as e:
-                        ok, msg = False, "这一区块没能保存：%s" % e
+                        ok, msg = False, texts.SET_GLOBAL_SAVE_CAT % e
                     if not ok:
                         messagebox.showwarning(
-                            "还没保存", msg or "这一页有内容没通过检查，请改好再保存。")
+                            texts.SET_GLOBAL_SAVE_A0, msg or texts.SET_GLOBAL_SAVE_N)
                         return
             # 保存往往就是"第一次配好"的时刻（指了引擎 / 指了模型目录 / 勾了云端模型 /
             # 填了密钥）⇒ 立刻问一次"第一个能用的模型有了没有"，别等下一轮轮询（坑 150）
@@ -5228,9 +5040,8 @@ class SettingsMixin:
             do_restart = False
             if running:
                 do_restart = bool(messagebox.askyesno(
-                    "保存设置",
-                    "检测到 llama-server 正在运行。\n\n部分设置（端口、模型、GPU 层数、"
-                    "上下文长度等）需要重启服务才生效。\n\n保存后立即重启服务吗？"))
+                    texts.SET_GLOBAL_SAVE_A0_2,
+                    texts.SET_GLOBAL_SAVE_A1))
             win.destroy()
             if do_restart:
                 self.restart_server()
@@ -5260,11 +5071,11 @@ class SettingsMixin:
             self._settings_sp = None
             self.open_settings(jump=cur if cur in keys else "")
 
-        theme.button(bar, text="切换到高级模式" if simple else "切换到普通模式",
+        theme.button(bar, text=texts.SET_OPEN_SETTINGS_N if simple else texts.SET_OPEN_SETTINGS_N_2,
                    command=_switch_mode).pack(side="left", padx=(2, 0))
-        theme.button(bar, text="关闭", command=win.destroy).pack(side="right", padx=4)
+        theme.button(bar, text=texts.SET_OPEN_SETTINGS_N_3, command=win.destroy).pack(side="right", padx=4)
         # 旧版第二个按钮「保存并重启服务」已删（坑 281）：保存时若服务在跑会自己问一句
-        theme.button(bar, text="保存", command=_global_save).pack(side="right")
+        theme.button(bar, text=texts.SET_OPEN_SETTINGS_N_4, command=_global_save).pack(side="right")
 
         # 首屏默认落在第一个叶子（本地模型 → 文本模型 → 生成参数）；
         # jump 由输出栏那两个按钮传进来，指到哪个叶子就滚到哪一段

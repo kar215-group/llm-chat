@@ -8,6 +8,7 @@ import urllib.request
 
 from ..core.config import api_headers, base_url
 from ..core.models import clean_alias
+from .. import texts
 
 
 def request_auto_alias(cfg, path):
@@ -92,9 +93,9 @@ def friendly_error(e, cfg):
             said = cloud._server_says(raw) or ""
         except Exception:
             said = ""
-        return "本地服务返回错误（HTTP %s）。%s" % (e.code, said)
+        return texts.STRM_CAT % (e.code, said)
     if isinstance(e, urllib.error.URLError):
-        return "无法连接本地服务（%s）——请先点「启动服务」或检查端口设置。" % base_url(cfg)
+        return texts.STRM_CAT_2 % base_url(cfg)
     return str(e)
 
 REASONING_KEYS = ("reasoning_content", "reasoning", "thinking")

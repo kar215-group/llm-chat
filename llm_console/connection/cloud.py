@@ -18,23 +18,24 @@ import urllib.request
 
 from ..core import config, providers, secrets
 from .stream import iter_sse_chat
+from .. import texts
 
 RETRY_STATUS = (429, 500, 502, 503, 504)  # 值得退避重试的（504 = 网关超时，自有 _HTTP_HINT 也列了它，R-47 补齐）
 MAX_ATTEMPTS = 3
 
 _HTTP_HINT = {
-    400: "请求被拒（参数、模型名或接口路径不对）",
-    401: "API Key 无效或没有权限",
-    403: "无权限访问该模型（可能未开通，或 key 与地域/业务空间不匹配）",
-    404: "地址或模型名不存在（检查 base_url 是否该带 /v1、模型名有没有写错）",
-    408: "请求超时",
-    413: "请求体过大（历史太长，试着清空对话）",
-    422: "参数格式不对",
-    429: "限流或余额不足",
-    500: "服务端内部错误",
-    502: "网关错误",
-    503: "服务暂时不可用",
-    504: "网关超时",
+    400: texts.CLD_D400,
+    401: texts.CLD_D401,
+    403: texts.CLD_D403,
+    404: texts.CLD_D404,
+    408: texts.CLD_D408,
+    413: texts.CLD_D413,
+    422: texts.CLD_D422,
+    429: texts.CLD_D429,
+    500: texts.CLD_D500,
+    502: texts.CLD_D502,
+    503: texts.CLD_D503,
+    504: texts.CLD_D504,
 }
 
 
@@ -68,21 +69,21 @@ def _server_says(body):
 def humanize_http(code, body, provider):
     """HTTP 错误 → 可直接显示给用户的中文（含服务端原话与可操作建议）。"""
     hint = _HTTP_HINT.get(code, "HTTP %s" % code)
-    msg = "云端请求失败：%s（%s）" % (hint, (provider or {}).get("name") or "云端")
+    msg = texts.CLD_CAT % (hint, (provider or {}).get("name") or texts.CLD_N)
     said = _server_says(body)
     if said:
-        msg += "\n  服务端说：%s" % said
+        msg += texts.CLD_CAT_2 % said
     low = (body or "").lower()
     if "stream_options" in low:
-        msg += "\n  看起来是这个端点不认 stream_options（用量统计），可关掉重试。"
+        msg += texts.CLD_AUG
     if code == 401:
-        msg += "\n  检查：设置 → 云端模型 → 服务商与密钥 → 密钥是否正确、是否过期。"
+        msg += texts.CLD_AUG_2
     elif code == 404:
-        msg += "\n  当前请求地址：%s" % providers.chat_completions_url(provider or {})
+        msg += texts.CLD_CAT_3 % providers.chat_completions_url(provider or {})
     elif code == 429:
-        msg += "\n  稍等几秒再发，或检查账户余额 / 免费额度。"
-    if "inappropriate" in low or "data_inspection" in low or "审核" in (body or ""):
-        msg += "\n  （提示词可能被内容审核拦下，换个说法再试。）"
+        msg += texts.CLD_AUG_3
+    if "inappropriate" in low or "data_inspection" in low or texts.CLD_CMP in (body or ""):
+        msg += texts.CLD_AUG_4
     return msg
 
 
@@ -93,14 +94,13 @@ def humanize_net(err, provider):
         reason = getattr(err, "reason", err)
         text = str(reason)
         if "timed out" in text.lower() or "timeout" in text.lower():
-            return ("云端连接超时（%s）。\n  可能是网络不通、需要代理，或地址写错。" % url)
+            return (texts.CLD_CAT_4 % url)
         if "getaddrinfo" in text.lower() or "name or service not known" in text.lower():
-            return ("域名解析失败：%s\n  检查 base_url 是否写对（含专属域名，如 "
-                    "token-plan.cn-beijing.maas.aliyuncs.com）。" % url)
-        return "无法连接云端（%s）：%s" % (url, text)
+            return (texts.CLD_CAT_5 % url)
+        return texts.CLD_CAT_6 % (url, text)
     if isinstance(err, TimeoutError):
-        return "云端响应超时（%s）。" % url
-    return "云端调用出错：%s" % err
+        return texts.CLD_CAT_7 % url
+    return texts.CLD_CAT_8 % err
 
 
 def _plan_prompt(meta_lines, total, budget, question, avg_chars):
@@ -114,7 +114,7 @@ def _plan_prompt(meta_lines, total, budget, question, avg_chars):
         "只输出 JSON：{\"start\": 起始行, \"end\": 结束行}，"
         "不要输出解释、不要代码块标记。\n\n"
         "【文件开头预览（前 %d 行）】\n%s\n\n【我的问题】\n%s"
-        % (total, budget, approx_rows, len(meta_lines), "\n".join(meta_lines), question or "（无）"))
+        % (total, budget, approx_rows, len(meta_lines), "\n".join(meta_lines), question or texts.CLD_N_2))
 
 
 def providers_chars_per_token():
@@ -172,7 +172,7 @@ def _ask_window(provider, key, model, preview, total, budget, question, timeout=
         # 回包解析成功但不是 JSON 对象（数组/裸字符串）：这一句在 except 之外，
         # 放过去就会穿出 chat_stream_with_file、打死聊天线程 —— 不投任何收尾事件，
         # busy 永不复位、界面永久停在"生成中…"。折成"规划没成功"，走既有回退。
-        return None, "规划请求的回包不是 JSON 对象（原文：%s）" % str(data)[:120]
+        return None, texts.CLD_CAT_9 % str(data)[:120]
     choices = data.get("choices") or [{}]
     first = choices[0] if choices and isinstance(choices[0], dict) else {}
     msg = first.get("message", {}) or {}
@@ -181,7 +181,7 @@ def _ask_window(provider, key, model, preview, total, budget, question, timeout=
     blob = "%s %s" % (msg.get("content") or "", msg.get("reasoning_content") or "")
     win = _parse_window(blob, total)
     if not win:
-        return None, "模型没给出可用范围（原文：%s）" % blob.strip()[:120]
+        return None, texts.CLD_CAT_10 % blob.strip()[:120]
     return win, ""
 
 
@@ -196,7 +196,7 @@ def chat_stream_with_file(cfg, messages, out_q, stop_flag, file_info):
     """
     provider = providers.current_provider(cfg)
     if provider is None:
-        out_q.put(("error", "当前选中的不是云端模型，或它的 provider 已不存在/被停用。"))
+        out_q.put(("error", texts.CLD_L1))
         return
     key = secrets.get_api_key(provider["id"])
     sp = providers.split_cloud_id(cfg.get("model", ""))
@@ -223,14 +223,14 @@ def chat_stream_with_file(cfg, messages, out_q, stop_flag, file_info):
                 keep += 1
             if keep < len(seg):
                 b = a + keep - 1
-                out_q.put(("fileplan", "模型要的范围比预算大，已收到第 %d~%d 行。" % (a, b)))
+                out_q.put(("fileplan", texts.CLD_CAT_11 % (a, b)))
             else:
-                out_q.put(("fileplan", "模型请求读取第 %d~%d 行（共 %d 行）。" % (a, b, total)))
+                out_q.put(("fileplan", texts.CLD_CAT_12 % (a, b, total)))
             block = _render_file_block(file_info, lines[a - 1:b], a, b, total, budget)
             if messages:
                 messages[-1] = {"role": "user", "content": block}
         else:
-            out_q.put(("fileplan", "规划没成功（%s），按原预算发送。" % (why or "原因未知")))
+            out_q.put(("fileplan", texts.CLD_CAT_13 % (why or texts.CLD_N_3)))
     chat_stream(cfg, messages, out_q, stop_flag)
 
 
@@ -242,10 +242,10 @@ def _est_tokens(s):
 def _render_file_block(file_info, seg, a, b, total, budget):
     from ..core import textfile
     return textfile.render_block(
-        file_info.get("name") or "文件", seg, total, file_info.get("chars") or 0,
+        file_info.get("name") or texts.CLD_N_4, seg, total, file_info.get("chars") or 0,
         max(0, total - b), file_info.get("encoding") or "utf-8",
         question=file_info.get("question"), budget=budget,
-        window="模型选择读取第 %d~%d 行" % (a, b))
+        window=texts.CLD_CAT_14 % (a, b))
 
 
 def _tiny_png_b64():
@@ -289,22 +289,22 @@ def probe_image_input(cfg, provider=None, api_key=None, model=None, timeout=60):
         try:
             from ..core.server import server_process_alive
             if not server_process_alive():
-                return capability.UNKNOWN, "本地服务没启动：先在主页面点「启动服务」再验证"
+                return capability.UNKNOWN, texts.CLD_L1_2
         except Exception:
-            return capability.UNKNOWN, "无法判断本地服务状态"
+            return capability.UNKNOWN, texts.CLD_L1_3
         url = config.base_url(cfg) + "/v1/chat/completions"
         headers = config.api_headers(cfg)
         m = model or os.path.basename(str(cfg.get("model", "")))
     else:
         key = api_key if api_key is not None else secrets.get_api_key(provider["id"])
         if not key:
-            return capability.UNKNOWN, "没有 API Key，验证不了"
+            return capability.UNKNOWN, texts.CLD_L1_4
         url = providers.chat_completions_url(provider)
         headers = _headers(provider, key)
         sp = providers.split_cloud_id(model or cfg.get("model", ""))
         m = model or (sp[1] if sp else "")
     if not m:
-        return capability.UNKNOWN, "没有可验证的模型名"
+        return capability.UNKNOWN, texts.CLD_L1_5
     body = {"model": m, "stream": False, "max_tokens": 1,
             "messages": [{"role": "user", "content": [
                 {"type": "text", "text": "只回一个字"},
@@ -315,15 +315,15 @@ def probe_image_input(cfg, provider=None, api_key=None, model=None, timeout=60):
     try:
         with urllib.request.urlopen(req, timeout=timeout) as r:
             r.read()
-        return capability.YES, "服务端收下了图片输入"
+        return capability.YES, texts.CLD_L1_6
     except urllib.error.HTTPError as e:
         raw = _safe_read(e)
         low = raw.lower()
         if e.code in (400, 404, 415, 422) and any(w in low for w in _NO_IMAGE_WORDS):
-            return capability.NO, "服务端明确拒收图片：%s" % _server_says(raw)
-        return capability.UNKNOWN, "没问出结论（HTTP %s）：%s" % (e.code, _server_says(raw))
+            return capability.NO, texts.CLD_CAT_15 % _server_says(raw)
+        return capability.UNKNOWN, texts.CLD_CAT_16 % (e.code, _server_says(raw))
     except Exception as e:
-        return capability.UNKNOWN, "没问出结论：%s" % e
+        return capability.UNKNOWN, texts.CLD_CAT_17 % e
 
 
 def _payload(cfg, model, messages, with_usage=True):
@@ -350,17 +350,17 @@ def chat_stream(cfg, messages, out_q, stop_flag):
     """云端文本流式对话：推的事件与本地 stream_worker 完全一致。"""
     provider = providers.current_provider(cfg)
     if provider is None:
-        out_q.put(("error", "当前选中的不是云端模型，或它的 provider 已不存在/被停用。"))
+        out_q.put(("error", texts.CLD_L1))
         return
     key = secrets.get_api_key(provider["id"])
     if not key:
-        out_q.put(("error", "还没给「%s」填 API Key（设置 → 云端模型 → 服务商与密钥 → 密钥）。"
+        out_q.put(("error", texts.CLD_CAT_18
                             % provider["name"]))
         return
     sp = providers.split_cloud_id(cfg.get("model", ""))
     model = sp[1] if sp else ""
     if not model:
-        out_q.put(("error", "云端模型名解析失败：%r" % cfg.get("model")))
+        out_q.put(("error", texts.CLD_CAT_19 % cfg.get("model")))
         return
 
     url = providers.chat_completions_url(provider)
@@ -397,7 +397,7 @@ def chat_stream(cfg, messages, out_q, stop_flag):
                 continue
             if e.code in RETRY_STATUS and attempt < MAX_ATTEMPTS:
                 wait = 2 ** attempt
-                out_q.put(("retry", "云端返回 %s，%ds 后重试（第 %d/%d 次）…"
+                out_q.put(("retry", texts.CLD_CAT_20
                            % (e.code, wait, attempt, MAX_ATTEMPTS - 1)))
                 if _sleep(stop_flag, wait):
                     out_q.put(("stopped", None))
@@ -468,7 +468,7 @@ def list_models(provider, api_key=None, timeout=25):
     """
     key = api_key if api_key is not None else secrets.get_api_key(provider["id"])
     if not key:
-        return False, [], "没有 API Key，无法拉取模型清单。"
+        return False, [], texts.CLD_L2
     url = providers.models_list_url(provider)
     req = urllib.request.Request(url, headers=_headers(provider, key), method="GET")
     try:
@@ -480,8 +480,8 @@ def list_models(provider, api_key=None, timeout=25):
         return False, [], humanize_net(e, provider)
     ids = _parse_model_ids(data)
     if not ids:
-        return False, [], "这个端点没有返回可解析的模型清单（返回体是空的或格式不同）。"
-    return True, ids, "取到 %d 个模型（%s）" % (len(ids), url)
+        return False, [], texts.CLD_L2_2
+    return True, ids, texts.CLD_CAT_21 % (len(ids), url)
 
 
 def try_model(provider, api_key=None, model=None, timeout=45):
@@ -494,10 +494,10 @@ def try_model(provider, api_key=None, model=None, timeout=45):
     """
     key = api_key if api_key is not None else secrets.get_api_key(provider["id"])
     if not key:
-        return False, "没有 API Key，试不了。"
+        return False, texts.CLD_L1_7
     model = str(model or "").strip()
     if not model:
-        return False, "先填模型名。"
+        return False, texts.CLD_L1_8
     url = providers.chat_completions_url(provider)
     body = {"model": model, "stream": False, "max_tokens": 1,
             "messages": [{"role": "user", "content": "ping"}]}
@@ -512,7 +512,7 @@ def try_model(provider, api_key=None, model=None, timeout=45):
             got = json.loads(data).get("model") or model
         except Exception:
             got = model
-        return True, "服务端认这个名字（%d ms）：%s" % (ms, got)
+        return True, texts.CLD_CAT_22 % (ms, got)
     except urllib.error.HTTPError as e:
         return False, humanize_http(e.code, _safe_read(e), provider)
     except Exception as e:
@@ -527,21 +527,21 @@ def probe(provider, api_key=None, model=None):
     """
     key = api_key if api_key is not None else secrets.get_api_key(provider["id"])
     if not key:
-        return False, "没有 API Key，先填密钥再测。"
+        return False, texts.CLD_L1_9
     models = provider.get("models") or []
     if not model:
         # 只拿文本模型测：生图/生视频走的是另一套原生协议，用 chat 请求探它们必然 400，
         # 而且个别平台（阿里云）会把它当成一次真实生成来计费
-        texts = [m for m in models
-                 if providers.model_kind_of(provider, m) == providers.KIND_TEXT]
-        if not texts:
-            return False, ("「%s」里没有归类为文本模型的条目——测试连接要用文本模型，"
-                           "请先在模型清单里加入一个。" % provider["name"])
-        model = texts[0]
+        # 局部变量取名避开模块级文案模块（2026-10-16 起本文件引用 llm_console 文案常量）
+        text_models = [m for m in models
+                       if providers.model_kind_of(provider, m) == providers.KIND_TEXT]
+        if not text_models:
+            return False, (texts.CLD_CAT_23 % provider["name"])
+        model = text_models[0]
     elif providers.model_kind_of(provider, model) != providers.KIND_TEXT:
-        return False, "「%s」不是文本模型，不能拿 chat 请求去测（会走错协议）。" % model
+        return False, texts.CLD_CAT_24 % model
     if not model:
-        return False, "provider 还没填任何模型名，无法测试。"
+        return False, texts.CLD_L1_10
     url = providers.chat_completions_url(provider)
     headers = _headers(provider, key)
     body = {"model": model, "stream": False, "max_tokens": 1,
@@ -558,7 +558,7 @@ def probe(provider, api_key=None, model=None):
             got = (j.get("model") or model)
         except Exception:
             got = model
-        return True, "连通正常（%d ms）：%s ← %s" % (ms, got, url)
+        return True, texts.CLD_CAT_25 % (ms, got, url)
     except urllib.error.HTTPError as e:
         return False, humanize_http(e.code, _safe_read(e), provider)
     except Exception as e:

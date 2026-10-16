@@ -75,6 +75,7 @@ from .remote_uploads import (UPLOAD_DIR, UPLOAD_KINDS, UPLOAD_MAX_BYTES,
                              UPLOAD_MAX_FILES, UPLOAD_TTL_S, _sniff_image_ext,
                              _uploads, _uploads_lock, sweep_orphan_uploads,
                              upload_paths, upload_store, uploads_reset)
+from .. import texts
 
 class RemoteStartError(Exception):
     """启动失败且文案已是人话（端口越界等）。`App.start_remote_async` 对这类
@@ -98,7 +99,7 @@ POLL_PATHS = ("/api/task", "/api/caps", "/api/chat")
 # 足够（chat / prompt 两条上限都是 4000 字）。
 JSON_MAX_BYTES = 1024 * 1024
 # 超限回给端上的原话（W 2026-10-12 批准）：拒读 + 断连，与上传面 413 同款纪律
-JSON_TOO_LARGE_MSG = "请求内容太大（上限 1MB），已拒绝。"
+JSON_TOO_LARGE_MSG = texts.REM_JSON_TOO_LARGE_MSG
 
 # `_read_json` 的超限哨兵：None = 解析失败（语义是"按空 body 走"），哨兵 =
 # 这一条根本没读——调用方必须回 413 并 return，不能当空 body 继续往下走。
@@ -248,13 +249,13 @@ class _RemoteHandler(http.server.BaseHTTPRequestHandler):
             return self._page_pair()
         if not self._auth_ok():
             _audit(self, "get", False, path)
-            return self._json(401, {"error": "未配对设备，请先在网页上完成配对。"})
+            return self._json(401, {"error": texts.REM_DERROR})
         fn = self.server.route_get.get(path)
         ok = True
         try:
             if fn:
                 return fn(self)
-            return self._json(404, {"error": "没有这个端点: %s" % path})
+            return self._json(404, {"error": texts.REM_CAT % path})
         except Exception:
             # 路由函数炸了：审计记失败——finally 里无条件记 True 会让台账出现
             # "成功"假阳性，而客户端实际收到的是 500（A3）
@@ -285,7 +286,7 @@ class _RemoteHandler(http.server.BaseHTTPRequestHandler):
             # 残字节当请求行解析（与跨源 403 路径同款处理，见上面那段注释）
             self.close_connection = True
             _audit(self, "post", False, path)
-            return self._json(401, {"error": "未配对设备，请先在网页上完成配对。"})
+            return self._json(401, {"error": texts.REM_DERROR})
         fn = self.server.route_post.get(path)
         ok = True
         try:
@@ -293,7 +294,7 @@ class _RemoteHandler(http.server.BaseHTTPRequestHandler):
                 return fn(self)
             # 路由未命中 = 没读 body：不断连就会错位后续请求（A2）
             self.close_connection = True
-            return self._json(404, {"error": "没有这个端点: %s" % path})
+            return self._json(404, {"error": texts.REM_CAT % path})
         except Exception:
             ok = False       # 同上：路由函数抛异常时审计记失败，不谎报成功（A3）
             raise
@@ -342,7 +343,7 @@ class _RemoteHandler(http.server.BaseHTTPRequestHandler):
                            for c in secrets.personas_with_creds()]})
         if not decision:
             _audit(self, "pair", False, "denied on PC")
-            return self._json(403, {"error": "电脑端拒绝了这次配对。"})
+            return self._json(403, {"error": texts.REM_DERROR_2})
         merge_pid = str(decision.get("pid", "") or "")
         token = _pysecrets.token_urlsafe(32)
         token_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()
@@ -354,7 +355,7 @@ class _RemoteHandler(http.server.BaseHTTPRequestHandler):
         except KeyError:
             # 等待确认的 120s 里目标设备被吊销了（坑 283：落盘前复验失败）
             _audit(self, "pair", False, "merge target revoked")
-            return self._json(403, {"error": "选择的设备已被吊销，请重新配对。"})
+            return self._json(403, {"error": texts.REM_DERROR_3})
         _audit(self, "pair", True, "persona " + pid + " via " + did)
         # HTTPS 在跑时补 `Secure`：这个 token 是长期凭证（一年），少了这个标志，
         # 之后降级成 HTTP 用时它会明文过网（同一部手机、同一个 Wi-Fi 就够嗅了）。
@@ -425,7 +426,7 @@ class RemoteServer:
         # App.start_remote_async 二次调用会留下第二个 httpd（旧的不再被引用、
         # 端口却一直占着）。先 stop 再 start 是正常路径（settings 拨开关走它）。
         if getattr(self, "httpd", None) is not None or getattr(self, "_starting", False):
-            raise RemoteStartError("远程服务已经在启动或运行中，先停止再启动")
+            raise RemoteStartError(texts.REM_A0)
         self._starting = True
         try:
             return self._start_inner()
@@ -453,7 +454,7 @@ class RemoteServer:
             # 原来会静默改听默认端口（界面还显示 :0）或绑失败后走 all 回退——
             # 两种都让用户以为远程开着（坑 128 同族）。人话报错，由
             # App.start_remote_async 直接展示（RemoteStartError 不套类型前缀）。
-            raise RemoteStartError("端口应在1024~65535范围内")
+            raise RemoteStartError(texts.REM_A0_2)
         want_https = bool(self.cfg.get("remote_https", True))
         # 对外开放范围（P0-5）：默认 `all` = 全部网卡，与一期行为逐字一致；
         # `wfd` = 仅设备直连（2026-10-13，99 K16）
@@ -489,8 +490,7 @@ class RemoteServer:
             if want_bind == BIND_WFD:
                 # 直连档绑的是具体地址，绑不上基本就是端口被占——同样不回退
                 remote_wfd.stop_go()
-                raise RemoteStartError("端口 %d 被别的程序占用：换一个端口"
-                                       "再拨一次开关" % port)
+                raise RemoteStartError(texts.REM_CAT_2 % port)
             # 选了 Tailscale 档、但那一刻那个地址没了（客户端刚断）：退回全部
             # 网卡并**如实说出来**——静默不监听会让用户以为远程开着（坑 128）
             httpd = make_httpd(port, _RemoteHandler, "")
@@ -548,7 +548,7 @@ class RemoteServer:
                 # 证书生成不再发主页提醒（W 2026-10-11：主页只留一条"远程服务
                 # 已启动"）；指纹在 设置 → 远程访问 的「网址 ****」里可见。
             except remote_cert.RemoteCertError as e:
-                self.note("HTTPS 未能启用：%s 明文 HTTP 已回退开启（仅建议局域网内使用）。" % e)
+                self.note(texts.REM_CAT_3 % e)
         scheme = "https" if httpd.https_on else "http"
         self.httpd = httpd
         self.https_on = httpd.https_on
@@ -679,7 +679,7 @@ class RemoteServer:
             # 越界 / 非数字一律当 1 —— 引擎只对生图支持批量）
             count=payload.get("count", 1))
         if err:
-            busy = ("忙" in err or "进行" in err)
+            busy = (texts.REM_CMP in err or texts.REM_CMP_2 in err)
             return h._json(409 if busy else 400, {"error": err})
         return h._json(200, {"ok": True, "task_id": tid})
 
@@ -694,7 +694,7 @@ class RemoteServer:
         except Exception:
             n = 0
         if n <= 0:
-            return h._json(400, {"error": "这个文件是空的，换一张。"})
+            return h._json(400, {"error": texts.REM_DERROR_4})
         if n > UPLOAD_MAX_BYTES:
             # 不读这份超大体：回 413 并直接关连接（读了也是白读，keep-alive
             # 的流同步交给"下一条连接"去建立）
@@ -702,7 +702,7 @@ class RemoteServer:
             self._audit_req("upload", h._client_ip(), False, "oversize",
                             ms=_ms(h))
             return h._json(413, {"error": (
-                "这张图 %.1fMB，超过 %dMB 上限——先压小一点。"
+                texts.REM_CAT_4
                 % (n / 1048576.0, UPLOAD_MAX_BYTES // 1048576))})
         try:
             raw = h.rfile.read(n)
@@ -712,7 +712,7 @@ class RemoteServer:
         if err:
             self._audit_req("upload", h._client_ip(), False, kind,
                             ms=_ms(h))
-            code = 413 if "上限" in err else 400
+            code = 413 if texts.REM_CMP_3 in err else 400
             return h._json(code, {"error": err})
         return h._json(200, {"ok": True, "name": name})
 
@@ -819,14 +819,14 @@ class RemoteServer:
         # 网页固定 POST body:"{}"：不读它，残留字节会被 keep-alive 连接上的
         # 下一条请求当请求行解析（与 401/404 路径同一条纪律，坑 258）
         if h._read_json() is None and h.close_connection:
-            return h._json(400, {"error": "请求体读不了。"})
+            return h._json(400, {"error": texts.REM_DERROR_5})
         if self.chat.cancel(self._caller_id(h)):
             return h._json(200, {"ok": True})
-        return h._json(404, {"error": "没有可停止的远程会话。"})
+        return h._json(404, {"error": texts.REM_DERROR_6})
 
     def _h_chat_clear(self, h):
         if h._read_json() is None and h.close_connection:
-            return h._json(400, {"error": "请求体读不了。"})
+            return h._json(400, {"error": texts.REM_DERROR_5})
         return h._json(200, {"ok": True,
                              "cleared": self.chat.clear(self._caller_id(h))})
 
@@ -835,7 +835,7 @@ class RemoteServer:
         tid = (qs.get("id") or [""])[0]
         st = self.jobs.status(tid, self._caller_id(h))
         if st is None:
-            return h._json(404, {"error": "没有这个任务。"})
+            return h._json(404, {"error": texts.REM_DERROR_7})
         return h._json(200, st)
 
     def _h_cancel(self, h):
@@ -846,7 +846,7 @@ class RemoteServer:
         ok = self.jobs.cancel(str(payload.get("id", "")) or None,
                               self._caller_id(h))
         return h._json(200 if ok else 404, {"ok": ok} if ok
-                       else {"error": "没有可取消的远程任务。"})
+                       else {"error": texts.REM_DERROR_8})
 
     def _h_artifact(self, h):
         qs = urllib.parse.parse_qs(urllib.parse.urlparse(h.path).query)
@@ -854,14 +854,14 @@ class RemoteServer:
         name = (qs.get("name") or [""])[0]
         p = self.jobs.artifact_path(tid, self._caller_id(h), name)
         if not p:
-            return h._json(404, {"error": "产物不存在（只开放当前会话产生的文件）。"})
+            return h._json(404, {"error": texts.REM_DERROR_9})
         ctype = "image/png" if p.lower().endswith(".png") else \
             "application/octet-stream"
         try:
             with open(p, "rb") as f:
                 data = f.read()
         except Exception:
-            return h._json(404, {"error": "产物读不出来（可能被移动或删除）。"})
+            return h._json(404, {"error": texts.REM_DERROR_10})
         try:
             h.send_response(200)
             h.send_header("Content-Type", ctype)

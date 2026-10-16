@@ -15,6 +15,7 @@ from ..core.params import ctx_for
 from ..core.server import (_query_serving_ctx, _query_serving_model,
                            server_alive, server_process_alive, server_ready,
                            start_server, stop_server)
+from .. import texts
 
 
 PROXY_WAIT_READY_S = 240          # 经代理拉起服务时等待就绪的上限（超时→503）
@@ -94,12 +95,12 @@ class _ProxyHandler(http.server.BaseHTTPRequestHandler):
             # 不在这里拦住就会在 try 之外抛 AttributeError —— 请求拿不到任何响应、
             # 连接被直接断开，agent 侧只看到"连接重置"，查不出原因。
             return self._json(400, {"error": {"message":
-                "请求体必须是 JSON 对象（收到 %s）" % type(payload).__name__}})
+                texts.PXY_CAT % type(payload).__name__}})
 
         target = self.server.ensure_model(str(payload.get("model", "")))
         if target is None:
             return self._json(503, {"error": {"message":
-                "本地模型未就绪（加载超时或失败），请稍后重发请求。"}})
+                texts.PXY_DMESSAGE}})
         payload["model"] = os.path.basename(target)
 
         url = base_url(self.server.cfg) + "/v1/chat/completions"
@@ -124,8 +125,7 @@ class _ProxyHandler(http.server.BaseHTTPRequestHandler):
                 obj = {"error": {"message": str(obj)[:2000]}}
             err = obj.setdefault("error", {})
             if "exceed" in detail and "context" in detail:
-                err["hint"] = ("本地模型上下文不足：请在 GUI 设置 → 服务参数调大 context"
-                               "（当前 %s），保存并重启服务。" % self.server.cfg.get("ctx"))
+                err["hint"] = (texts.PXY_CAT_2 % self.server.cfg.get("ctx"))
             data = json.dumps(obj, ensure_ascii=False).encode("utf-8")
             self.send_response(e.code)              # 透传上游状态码（不再包成 502）
             self.send_header("Content-Type", "application/json")
@@ -163,7 +163,7 @@ class _ProxyHandler(http.server.BaseHTTPRequestHandler):
                 except Exception:
                     pass
                 return self._json(502, {"error": {"message":
-                    "upstream error（回包中途断开）: %s" % e}})
+                    texts.PXY_CAT_3 % e}})
             try:
                 resp.close()      # 非流式分支原来不关响应：句柄留给 GC，显式收掉
             except Exception:
@@ -197,7 +197,7 @@ class ProxyServer:
             httpd = http.server.ThreadingHTTPServer(("127.0.0.1", port),
                                                     _ProxyHandler)
         except Exception as e:
-            self.note("代理启动失败（端口 %s）：%s" % (port, e))
+            self.note(texts.PXY_CAT_4 % (port, e))
             return False
         httpd.cfg = self.cfg
         httpd.ensure_model = self.ensure_model
@@ -208,7 +208,7 @@ class ProxyServer:
         self.thread = threading.Thread(
             target=lambda: httpd.serve_forever(poll_interval=0.05), daemon=True)
         self.thread.start()
-        self.note("API 代理已启动：http://127.0.0.1:%d/v1" % port)
+        self.note(texts.PXY_CAT_5 % port)
         return True
 
     def stop(self):
@@ -246,9 +246,9 @@ class ProxyServer:
                 return target
             # 需要（重新）加载目标模型（或 context 与 agent 场景记录不符）
             if server_process_alive() and server_alive(self.cfg):
-                self.note("agent 请求 %s（context %d）：停止当前服务并切换…" % (tb, want_ctx))
+                self.note(texts.PXY_CAT_6 % (tb, want_ctx))
             else:
-                self.note("agent 请求 %s（context %d）：正在启动服务…" % (tb, want_ctx))
+                self.note(texts.PXY_CAT_7 % (tb, want_ctx))
             stop_server(self.cfg)
             time.sleep(1)
             self.cfg["model"] = target
@@ -257,15 +257,15 @@ class ProxyServer:
             try:
                 start_server(self.cfg, want_ctx)
             except Exception as e:
-                self.note("agent 请求启动服务失败：%s" % e)
+                self.note(texts.PXY_CAT_8 % e)
                 return None
             if not self._wait_ready():
-                self.note("agent 请求 %s：等待超时（%ds），已返回 503"
+                self.note(texts.PXY_CAT_9
                           % (tb, PROXY_WAIT_READY_S))
                 return None
             self.cfg["proxy_last_model"] = tb
             save_config(self.cfg)
-            self.note("agent 请求 %s：服务就绪。" % tb)
+            self.note(texts.PXY_CAT_10 % tb)
             return target
 
     def _wait_ready(self, timeout_s=PROXY_WAIT_READY_S):

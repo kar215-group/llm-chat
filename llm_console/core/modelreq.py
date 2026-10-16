@@ -26,6 +26,7 @@
 import os
 
 from .gguf import read_gguf_info
+from .. import texts
 
 LEVEL_OK = 0          # 够用
 LEVEL_SLOW = 1        # 低于推荐 ×0.85：可能速度较慢
@@ -34,12 +35,12 @@ LEVEL_FATAL = 3       # 内存低于最低 ×0.7：几乎难以胜任，必闪�
 
 # 简洁文案（W 定的口径，界面直接引用；别在各调用点重写）
 LEVEL_TEXT = {
-    LEVEL_SLOW: "可能速度较慢",
-    LEVEL_RISKY: "可能无法正常运行，导致闪退",
-    LEVEL_FATAL: "以目前探测结果来看，此设备几乎难以胜任该模型，必闪退",
+    LEVEL_SLOW: texts.MRQ_DICT,
+    LEVEL_RISKY: texts.MRQ_DICT_2,
+    LEVEL_FATAL: texts.MRQ_DICT_3,
 }
 
-KIND_LABEL = {"text": "文本", "image": "生图", "video": "生视频"}
+KIND_LABEL = {"text": texts.MRQ_DTEXT, "image": texts.MRQ_DIMAGE, "video": texts.MRQ_DVIDEO}
 
 
 def _need(rec_vram, rec_ram, min_ram, gpu_total, detail):
@@ -75,7 +76,7 @@ def assess_text(cfg, path, files=None):
     # CPU offload 不拖慢生成 —— 开发机 35B-A3B 实测）。KV 由自动 ctx 那套另行钳住。
     rec_vram = f * (0.3 if moe else 1.05) + 1.0
     return _need(rec_vram, f * 1.2 + 5.0, f + 3.0, 0.0,
-                 "权重 %.1fGB%s" % (f, "（MoE）" if moe else ""))
+                 texts.MRQ_CAT % (f, "（MoE）" if moe else ""))
 
 
 def assess_image(cfg, path, files=None):
@@ -93,7 +94,7 @@ def assess_image(cfg, path, files=None):
     gpu = _size_gb(path) + _size_gb(files.get("vae"))
     cpu = sum(_size_gb(files.get(k)) for k in ("llm", "clip_l", "clip_g", "t5xxl", "tokenizer"))
     return _need(gpu * 1.15 + 1.0, cpu * 1.2 + gpu + 4.0, cpu + 3.0, gpu,
-                 "主体 %.1f + VAE %.1f（显存）/ 编码器 %.1f（内存）"
+                 texts.MRQ_CAT_2
                  % (_size_gb(path), _size_gb(files.get("vae")), cpu))
 
 
@@ -108,7 +109,7 @@ def assess_video(cfg, path, files=None):
     gpu = (_size_gb(path) + _size_gb(files.get("vae")) + _size_gb(files.get("audio_vae")))
     cpu = sum(_size_gb(files.get(k)) for k in ("llm", "t5xxl", "tokenizer"))
     return _need(gpu * 1.15 + 1.0, cpu * 1.2 + gpu + 4.0, cpu + 3.0, gpu,
-                 "主体 %.1f + VAE %.1f（显存）/ 编码器 %.1f（内存）"
+                 texts.MRQ_CAT_2
                  % (_size_gb(path), _size_gb(files.get("vae")), cpu))
 
 

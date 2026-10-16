@@ -6,6 +6,7 @@ import os
 import secrets
 import sys
 import threading
+from .. import texts
 
 
 # 项目根目录：本文件在 <root>\llm_console\core\config.py，往上三级即仓库根。
@@ -30,7 +31,7 @@ CONFIG_PATH = os.path.join(APP_DIR, "gui_config.json")
 
 # 版本号：发版时改这一处（--selfcheck / --version 会打印它）。
 # GitHub Release 的 tag 要与它一致（tag 去掉开头的 v），Actions 工作流会做一致性校验。
-APP_VERSION = "2.0.0beta2"
+APP_VERSION = "2.0.0"
 
 CFG_VERSION = 3
 
@@ -561,8 +562,7 @@ def save_config(cfg):
         if other_instance_running():
             _LAST_WRITE.update(
                 path=CONFIG_PATH, n=_LAST_WRITE["n"] + 1,
-                reason="检测到另一个程序实例正在运行——为免互相覆盖设置，本次保存已拒绝；"
-                       "请先关闭另一个实例再改设置。")
+                reason=texts.CFG_N)
             return False
         return atomic_write_json(CONFIG_PATH, cfg)
 

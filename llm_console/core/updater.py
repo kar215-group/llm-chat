@@ -33,6 +33,7 @@ from . import config
 from .config import APP_DIR, USER_AGENT
 # 进页冷却的判据统一在 core/throttle（模型补全那边共用同一处），这里转出同名符号
 from .throttle import cooldown_left
+from .. import texts
 
 # 对外仓库坐标（公开仓库，匿名 API 可读）
 REPO = "kar215-group/llm-chat"
@@ -42,7 +43,7 @@ PAGE_TAG = "https://github.com/%s/releases/tag/%s"
 
 CHANNEL_STABLE = "stable"
 CHANNEL_BETA = "beta"
-CHANNELS = ((CHANNEL_STABLE, "正式版"), (CHANNEL_BETA, "测试版"))
+CHANNELS = ((CHANNEL_STABLE, texts.UPD_L1), (CHANNEL_BETA, texts.UPD_L1_2))
 CHANNEL_LABEL = dict(CHANNELS)
 
 # 四种结果，没有"出错就当最新"这一档
@@ -54,7 +55,7 @@ STATE_ERROR = "error"        # 查不到
 # 彩蛋（W 2026-10-05）：本机版本**高于**本次查到的线上最新版时，状态行末尾追这一句。
 # 只按**本次返回的结果**判 —— 不为了凑这个彩蛋再去查另一个通道（选正式版就只看正式版，
 # 选测试版就只看测试版）。判据就是 `check_update` 给出 STATE_AHEAD，没有额外逻辑。
-AHEAD_EGG = "莫非你是测试用户！"
+AHEAD_EGG = texts.UPD_AHEAD_EGG
 
 TIMEOUT = 12                  # 秒。GitHub 匿名接口正常 <1s
 
@@ -214,7 +215,7 @@ def channel_of_label(label):
 
 
 def channel_label(channel):
-    return CHANNEL_LABEL.get(channel, "正式版")
+    return CHANNEL_LABEL.get(channel, texts.UPD_L1)
 
 
 # ---------------------------------------------------------------- 冷却（进页自动查的节流）
@@ -277,11 +278,9 @@ def fetch_releases(fetch=None, timeout=TIMEOUT, repo=REPO, cache=None, token=Non
     try:
         data = json.loads(body.decode("utf-8") if isinstance(body, bytes) else body)
     except Exception:
-        raise UpdaterError("检查更新失败：GitHub 返回的不是 JSON（可能被公司网关拦截），"
-                           "请换个网络环境后重试。%s" % _MANUAL)
+        raise UpdaterError(texts.UPD_CAT % _MANUAL)
     if not isinstance(data, list):
-        raise UpdaterError("检查更新失败：GitHub 返回的数据格式不对，"
-                           "请稍后重试。%s" % _MANUAL)
+        raise UpdaterError(texts.UPD_CAT_2 % _MANUAL)
     if cache is not None:
         cache.items = data
         # 服务端这次没回 ETag（或换了弱校验）就别把旧值丢了：留着它下次照样能问出 304
@@ -311,7 +310,7 @@ def pick_latest(items, channel=CHANNEL_STABLE):
 
 # ---------------------------------------------------------------- 错误翻人话
 
-_MANUAL = "请手动前往仓库下载更新。"
+_MANUAL = texts.UPD__MANUAL
 
 
 def _reason(code):
@@ -324,20 +323,20 @@ def _reason(code):
     return {
         # 401 只可能出现在"带了令牌"那条路上（不带的请求根本没有 Authorization 头，
         # GitHub 对匿名只会回 403）。所以这里可以直接把话说死：是令牌的问题。
-        401: ("GitHub 不认这个令牌",
-              "请在「开发者选项」里重新填写 GitHub 令牌"),
-        403: ("GitHub 拒绝了此次访问",
-              "请几分钟后重试；若仍失败，可能是当前出口 IP 被 GitHub 限流"),
-        404: ("GitHub 上找不到该仓库的 Release",
-              "请稍后重试；若一直如此，可能是仓库地址变了或该版本已撤下"),
-        304: ("GitHub 说 Release 没变化，但本机没留下上次的结果可复用",
-              "请再点一次「检查更新」"),
-        422: ("GitHub 不认这个请求", "请稍后重试"),
-        429: ("请求太密，被 GitHub 限流了", "请过几分钟再点一次"),
-        500: ("GitHub 服务端出错", "请稍后重试"),
-        502: ("GitHub 网关无响应", "请稍后重试"),
-        503: ("GitHub 服务暂时不可用", "请稍后重试"),
-    }.get(int(code), ("GitHub 返回异常状态（HTTP %s）" % code, "请稍后重试"))
+        401: (texts.UPD_L0,
+              texts.UPD_L1_3),
+        403: (texts.UPD_L0_2,
+              texts.UPD_L1_4),
+        404: (texts.UPD_L0_3,
+              texts.UPD_L1_5),
+        304: (texts.UPD_L0_4,
+              texts.UPD_L1_6),
+        422: (texts.UPD_L0_5, texts.UPD_L1_7),
+        429: (texts.UPD_L0_6, texts.UPD_L1_8),
+        500: (texts.UPD_L0_7, texts.UPD_L1_7),
+        502: (texts.UPD_L0_8, texts.UPD_L1_7),
+        503: (texts.UPD_L0_9, texts.UPD_L1_7),
+    }.get(int(code), (texts.UPD_CAT_3 % code, texts.UPD_L1_7))
 
 
 def _safe_read(err, limit=400):
@@ -350,7 +349,7 @@ def _safe_read(err, limit=400):
 def humanize_http(code, body="", repo=REPO):
     """HTTP 错误 → 可直接显示的一句话（原因 + 下一步 + 手动兜底）。"""
     why, how = _reason(code)
-    return "检查更新失败：%s，%s。%s" % (why, how, _MANUAL)
+    return texts.UPD_CAT_4 % (why, how, _MANUAL)
 
 
 def humanize_net(err, repo=REPO):
@@ -365,18 +364,16 @@ def humanize_net(err, repo=REPO):
     if isinstance(err, urllib.error.URLError):
         reason = getattr(err, "reason", err)
         if isinstance(reason, TimeoutError) or "timed out" in str(reason).lower():
-            return ("检查更新失败：连接 GitHub 超时（%d 秒内无响应），"
-                    "请检查网络或代理设置后重试。%s" % (TIMEOUT, _MANUAL))
-        return ("检查更新失败：连不上 GitHub（%s），"
-                "请检查网络 / 代理 / 防火墙（公司网络常拦 api.github.com）。%s"
+            return (texts.UPD_CAT_5 % (TIMEOUT, _MANUAL))
+        return (texts.UPD_CAT_6
                 % (reason, _MANUAL))
-    return "检查更新失败：%s。%s" % (err, _MANUAL)
+    return texts.UPD_CAT_7 % (err, _MANUAL)
 
 
 # ---------------------------------------------------------------- 公告摘录
 
 # 「发现新版本」窗口里要显示的小节（`05` §6.2 那套版式；安装 / 注意两段不进窗口）
-NOTE_SECTIONS = ("功能更新", "问题修复", "使用优化")
+NOTE_SECTIONS = (texts.UPD_L0_10, texts.UPD_L1_9, texts.UPD_L2)
 
 _HEAD = re.compile(r"^\s{0,3}(#{1,6})\s*(.+?)\s*$")
 _BULLET = re.compile(r"^(\s*)([-*+])\s+(.*)$")
@@ -489,8 +486,7 @@ def check_update(current, channel=CHANNEL_STABLE, fetch=None, timeout=TIMEOUT,
     if latest is None:
         return STATE_ERROR, {
             "channel": channel, "current": current,
-            "msg": "检查更新失败：%s 上没找到可比的%s Release，"
-                   "请稍后重试。%s" % (repo, channel_label(channel), _MANUAL)}
+            "msg": texts.UPD_CAT_8 % (repo, channel_label(channel), _MANUAL)}
 
     tag = str(latest.get("tag_name") or "")
     info = {
@@ -502,8 +498,7 @@ def check_update(current, channel=CHANNEL_STABLE, fetch=None, timeout=TIMEOUT,
     }
     cmp = compare_versions(tag, current)
     if cmp is None:
-        info["msg"] = ("线上最新是 %s、本机是 %s：版本号写法认不出来，没法比大小，"
-                       "请手动去 %s 看一眼。" % (tag, current, PAGE_RELEASES % repo))
+        info["msg"] = (texts.UPD_CAT_9 % (tag, current, PAGE_RELEASES % repo))
         return STATE_ERROR, info
     if cmp > 0:
         return STATE_UPDATE, info

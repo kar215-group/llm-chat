@@ -29,6 +29,7 @@
 
 import os
 import re
+from .. import texts
 
 AUTO = ""          # 存进配置里表示"没人工指定，走自动判据"
 YES = "yes"
@@ -41,14 +42,14 @@ MODE_SUBJECT = "subject"        # 主体参考：只借图里的人/物/风格
 MODES = (MODE_EDIT, MODE_SUBJECT)
 # 默认档 = 底图重绘：与这两种模式落地之前的行为完全一致（`-i` 那条实测链路）
 DEFAULT_MODE = MODE_EDIT
-MODE_LABEL = {MODE_EDIT: "底图重绘", MODE_SUBJECT: "主体参考"}
+MODE_LABEL = {MODE_EDIT: texts.CAP_DICT, MODE_SUBJECT: texts.CAP_DICT_2}
 # 每种模式在引擎/接口上落在哪个入参上 —— 用于日志与排查（"这一档到底怎么发的"）
-MODE_NOTE = {MODE_EDIT: "按原图重绘",
-             MODE_SUBJECT: "只借图里的主体"}
+MODE_NOTE = {MODE_EDIT: texts.CAP_DICT_3,
+             MODE_SUBJECT: texts.CAP_DICT_4}
 # 两种模式各自的引擎参数（槽位纪律：参数名必须能在 `sd_cli_help.txt` 里查到）
 MODE_FLAG = {MODE_EDIT: "-i", MODE_SUBJECT: "-r"}
 CHOICES = (AUTO, YES, NO)
-CHOICE_LABEL = {AUTO: "自动判断", YES: "支持", NO: "不支持"}
+CHOICE_LABEL = {AUTO: texts.CAP_DICT_5, YES: texts.CAP_DICT_6, NO: texts.CAP_DICT_7}
 LABEL_CHOICE = {v: k for k, v in CHOICE_LABEL.items()}
 
 # 名字里带这些基本就是视觉模型（只是线索，不足以单独定论）
@@ -101,28 +102,25 @@ def auto_detect(cfg):
                 # 同样是"收参考图"，阿里云拿它当底图重绘，MiniMax 拿它当主体/角色参考
                 # （2026-10-01 真机各跑一张实测出来的差别），所以话分两句说
                 if providers.ref_image_mode(p) == "subject":
-                    return YES, "cloud", "这一家的生图接口收参考图（按主体/角色一致性用图）"
-                return YES, "cloud", "这一家的生图接口收参考图（图生图）"
-            return NO, "cloud", ("这一家的生图接口只收文字提示词，参考图请用本地的"
-                                 "〔生图〕模型")
-        return YES, "engine", "生图走引擎的参考图通路（-i），可以附图"
+                    return YES, "cloud", texts.CAP_L2
+                return YES, "cloud", texts.CAP_L2_2
+            return NO, "cloud", (texts.CAP_L2_3)
+        return YES, "engine", texts.CAP_L2_4
     if kind == "video":
         if cloud:
-            return NO, "cloud", "云端生视频只接文生，首帧请用本地的〔生视频〕模型"
+            return NO, "cloud", texts.CAP_L2_5
         if _VIDEO_IMG_IN.search(key):
-            return YES, "variant", "该视频权重是带图像输入通路的变体（fl2va / flf2v / i2v 这类）"
+            return YES, "variant", texts.CAP_L2_6
         if _VIDEO_TEXT_ONLY.search(key):
-            return NO, "variant", "该视频权重是纯文生视频变体（t2v / t2va），没有首帧输入通路"
-        return UNKNOWN, "variant", "认不出这个视频权重的变体，不能确定能不能给首帧"
+            return NO, "variant", texts.CAP_L2_7
+        return UNKNOWN, "variant", texts.CAP_L2_8
     if providers.is_cloud(cfg):
         if _NAME_HINT.search(key):
-            return UNKNOWN, "name-hint", ("名字看着像视觉模型，但云端接口不写能不能看图，"
-                                          "不能只凭名字放行")
-        return UNKNOWN, "none", ("云端各家接口都不写「能不能看图」，需要你在 "
-                                 "设置 → 云端模型 → 服务商与密钥 →「选择模型…」里声明一次「图片输入」")
+            return UNKNOWN, "name-hint", (texts.CAP_L2_9)
+        return UNKNOWN, "none", (texts.CAP_L2_10)
     if is_vl_model(cfg, cfg.get("model", "")):
-        return YES, "mmproj", "找到配对的视觉投影器（mmproj），可以看图"
-    return NO, "mmproj", "没找到配对的视觉投影器（mmproj），本地模型收不了图"
+        return YES, "mmproj", texts.CAP_L2_11
+    return NO, "mmproj", texts.CAP_L2_12
 
 
 
@@ -131,10 +129,10 @@ def resolve(cfg):
     choice = get_choice(cfg)
     if choice == YES:
         return {"verdict": YES, "basis": "user", "explicit": True,
-                "note": "你指定为支持图片输入"}
+                "note": texts.CAP_DNOTE}
     if choice == NO:
         return {"verdict": NO, "basis": "user", "explicit": True,
-                "note": "你指定为不支持图片输入"}
+                "note": texts.CAP_DNOTE_2}
     v, basis, note = auto_detect(cfg)
     return {"verdict": v, "basis": basis, "explicit": False, "note": note}
 
@@ -195,22 +193,22 @@ def resolve_modes(cfg, family=None):
     if providers.is_cloud(cfg):
         p = providers.current_provider(cfg) or {}
         modes = providers.ref_image_modes(p)
-        flag = "官方页" if modes else "none"
+        flag = texts.CAP_IF if modes else "none"
         if not modes:
             return {m: {"ok": False, "flag": flag,
-                        "why": "这一家的生图接口只收文字提示词，带图请改用本地的〔生图〕模型"}
+                        "why": texts.CAP_DWHY}
                     for m in MODES}
         return {m: {"ok": m in modes, "flag": flag,
                     "why": "" if m in modes
-                    else "这一家不带%s，请换一家或改用%s" % (MODE_LABEL[m], MODE_LABEL[DEFAULT_MODE])}
+                    else texts.CAP_CAT % (MODE_LABEL[m], MODE_LABEL[DEFAULT_MODE])}
                 for m in MODES}
     fid = str(family or cfg.get("img_family") or "").strip()
     modes, flag = sdprofile.edit_modes(fid)
     return {m: {"ok": m in modes, "flag": flag,
                 "why": "" if m in modes
-                else "%s 走的是 %s，%s没这条通路" % (
-                    sdprofile.label_of(fid) or "这个模型",
-                    "参考图 -r" if m == MODE_EDIT else "底图 -i", MODE_LABEL[m])}
+                else texts.CAP_CAT_2 % (
+                    sdprofile.label_of(fid) or texts.CAP_N,
+                    texts.CAP_IF_2 if m == MODE_EDIT else texts.CAP_ELSE, MODE_LABEL[m])}
             for m in MODES}
 
 
@@ -238,9 +236,9 @@ def can_take_image(cfg):
 def label_of(res):
     """给界面用的一行结论。"""
     v = res["verdict"]
-    who = "（你指定的）" if res.get("explicit") else ""
+    who = texts.CAP_IF_3 if res.get("explicit") else ""
     if v == YES:
-        return "支持看图" + who
+        return texts.CAP_CAT_3 + who
     if v == NO:
-        return "不支持看图" + who
-    return "看图能力未确认" + who
+        return texts.CAP_CAT_4 + who
+    return texts.CAP_CAT_5 + who

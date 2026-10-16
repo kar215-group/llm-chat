@@ -11,6 +11,7 @@ import threading
 
 from .config import APP_DIR, atomic_write_json
 from .device_ua import valid_cid as _valid_cid
+from .. import texts
 
 SECRETS_PATH = os.path.join(APP_DIR, "secrets.json")
 
@@ -88,10 +89,10 @@ def mask(key):
     """界面显示用：只露首尾，避免截屏/录屏泄漏完整 key。"""
     k = str(key or "")
     if not k:
-        return "（未设置）"
+        return texts.SEC_RET
     if len(k) <= 8:
         return "*" * len(k)
-    return "%s…%s（共 %d 字符）" % (k[:4], k[-4:], len(k))
+    return texts.SEC_CAT % (k[:4], k[-4:], len(k))
 
 
 # ---------------------------------------------------------------------------
@@ -162,7 +163,7 @@ def ensure_personas():
             while pid in pids:
                 pid += "x"
             os_key = str(d.get("os") or "unknown")
-            pers.append({"id": pid, "name": str(d.get("name") or "未知设备")[:20],
+            pers.append({"id": pid, "name": str(d.get("name") or texts.SEC_N)[:20],
                          "os_set": [os_key] if os_key != "unknown" else [],
                          "cids": [], "merged_into": "",
                          "added": str(d.get("added") or "")})
@@ -250,7 +251,7 @@ def finalize_pairing(token_hash, now_iso, *, name, os_key, cid, ip, agent,
                 raise KeyError("merge target gone: %s" % merge_pid)
         else:
             target = {"id": _next_pid(pers),
-                      "name": str(name or "未知设备")[:20],
+                      "name": str(name or texts.SEC_N)[:20],
                       "os_set": [os_key] if os_key and os_key != "unknown" else [],
                       "cids": [], "merged_into": "", "added": now_iso}
             pers.append(target)
@@ -259,7 +260,7 @@ def finalize_pairing(token_hash, now_iso, *, name, os_key, cid, ip, agent,
         if c and c not in target.setdefault("cids", []):
             target["cids"] = ([c] + list(target["cids"]))[:_PERSONA_CID_CAP]
         devs.append({"id": did,
-                     "name": str(name or "未知设备")[:20],
+                     "name": str(name or texts.SEC_N)[:20],
                      "token_hash": str(token_hash),
                      "persona": target["id"],
                      "os": str(os_key or "unknown"),
@@ -352,7 +353,7 @@ def personas_with_creds():
         creds = sorted((dict(d) for d in devs if d.get("persona") == p["id"]),
                        key=lambda d: str(d.get("added") or ""))
         last = max((str(d.get("last_seen") or "") for d in creds), default="")
-        out.append({"id": p["id"], "name": p.get("name") or "未知设备",
+        out.append({"id": p["id"], "name": p.get("name") or texts.SEC_N,
                     "os_set": list(p.get("os_set") or []),
                     "cids": list(p.get("cids") or []),
                     "added": p.get("added") or "", "last_seen": last,
@@ -393,7 +394,7 @@ def add_remote_device(name, token_hash, now_iso):
         while any(d.get("id") == did for d in remote_devices()):
             did += "x"
         _save_devices(remote_devices() + [{
-            "id": did, "name": str(name or "未命名设备"),
+            "id": did, "name": str(name or texts.SEC_N_2),
             "token_hash": str(token_hash), "added": now_iso,
             "last_seen": now_iso}])
         return did

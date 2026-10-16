@@ -12,6 +12,7 @@ image / video = 服务商**原生**协议（connection/cloud_media.py），本�
 """
 
 import re
+from .. import texts
 
 CLOUD_SEP = "::"
 LOCAL = "local"
@@ -413,15 +414,14 @@ def media_price_note(p, kind, seconds=0, model=""):
     """
     per, unit = price_of(p, model, kind)
     if per <= 0:
-        return ("模型「%s」的单价未填（设置 → 云端模型 → 成本估算），"
-                "费用以服务商账单为准。" % model if model else
-                "单价未填（设置 → 云端模型 → 成本估算），费用以服务商账单为准。")
+        return (texts.PRV_CAT % model if model else
+                texts.PRV_ELSE)
     if unit == "秒":
         n = int(seconds or 0)
-        return "预估 %.2f 元/秒 × %d 秒 ≈ %.2f 元。" % (per, n, per * n)
+        return texts.PRV_CAT_2 % (per, n, per * n)
     if unit == "张":
-        return "预估 %.2f 元/张。" % per
-    return "预估 %.2f 元/条。" % per
+        return texts.PRV_CAT_3 % per
+    return texts.PRV_CAT_4 % per
 
 
 def text_cost_note(p, model, usage):
@@ -447,7 +447,7 @@ def text_cost_note(p, model, usage):
             + (pick("completion_tokens", "output_tokens") or 0)
     if tot <= 0:
         return ""
-    return "、费用约 %.2f 元" % (per * tot / 1000.0)
+    return texts.PRV_CAT_5 % (per * tot / 1000.0)
 
 
 def supports_media(p, kind):
@@ -656,13 +656,13 @@ def add_provider(cfg, provider):
     """新增；返回 (ok, 错误说明)。id 唯一且非空，base_url 必填。"""
     p = normalize_provider(provider)
     if not p["id"]:
-        return False, "provider id 不能为空（用作密钥的索引，建议英文短名）"
+        return False, texts.PRV_L1
     if any(c in p["id"] for c in (" ", CLOUD_SEP[0], CLOUD_SEP[1])):
-        return False, "provider id 不能含空格或冒号（模型 id 用 :: 拼接）"
+        return False, texts.PRV_L1_2
     if not p["base_url"]:
-        return False, "base_url 不能为空"
+        return False, texts.PRV_L1_3
     if get_provider(cfg, p["id"]):
-        return False, "id 已存在：%s" % p["id"]
+        return False, texts.PRV_CAT_6 % p["id"]
     cfg.setdefault("cloud_providers", []).append(p)
     return True, ""
 
@@ -852,7 +852,7 @@ def short_labels(models):
 # ---------------------------------------------------------------------------
 FOLD_AT = 15          # 服务商模型数超过这个值才分组（W 定的阈值）
 FOLD_MAX_DEPTH = 2    # 前缀最多取两段
-REST_KEY = "其他"     # 堆叠生效后，凑不成同族组的零散条目统一收进这一组（菜单与勾选窗口共用）
+REST_KEY = texts.PRV_REST_KEY     # 堆叠生效后，凑不成同族组的零散条目统一收进这一组（菜单与勾选窗口共用）
 
 
 def _fam_key(model, depth):
@@ -900,7 +900,7 @@ def display_of_cloud(cfg, model_id):
     sp = split_cloud_id(model_id)
     if not sp:
         return str(model_id or "")
-    return "%s（云）" % short_of(sp[1])
+    return texts.PRV_CAT_7 % short_of(sp[1])
 
 
 
@@ -974,41 +974,35 @@ def validate_for_send(cfg):
     pid = cfg.get("model_provider")
     p = get_provider(cfg, pid)
     if not p:
-        return "云端 provider「%s」不存在或已被删除——请在 设置 → 云端模型 → 服务商与密钥 里检查。" % pid
+        return texts.PRV_CAT_8 % pid
     if not p["enabled"]:
-        return "云端 provider「%s」已停用——请在 设置 → 云端模型 → 服务商与密钥 里勾选启用。" % p["name"]
+        return texts.PRV_CAT_9 % p["name"]
     if not p["base_url"]:
-        return "云端 provider「%s」没填 base_url。" % p["name"]
+        return texts.PRV_CAT_10 % p["name"]
     sp = split_cloud_id(cfg.get("model", ""))
     if not sp:
-        return "当前云模型标识无效：%r" % cfg.get("model")
+        return texts.PRV_CAT_11 % cfg.get("model")
     if sp[1] not in p["models"]:
-        return "模型「%s」不在 provider「%s」的清单里（可能被改过），请重新在菜单里选一次。" % (
+        return texts.PRV_CAT_12 % (
             sp[1], p["name"])
     k = model_kind_of(p, sp[1])
     from . import secrets
     if k == KIND_TEXT:
         if not secrets.has_api_key(p["id"]):
-            return ("还没给「%s」填 API Key——设置 → 云端模型 → 服务商与密钥 → 密钥"
-                    "（密钥单独存在 secrets.json，不会跟配置一起被复制走）。" % p["name"])
+            return (texts.PRV_CAT_13 % p["name"])
         return None
     # 生图 / 生视频走厂商**原生**协议（没有 OpenAI 兼容格式）：先确认这个 provider
     # 认得协议、有根地址、有密钥，否则拦在发送前，别掉进本地 sd-cli 分支
     if not media_api(p):
-        return ("「%s」是%s模型，走的是服务商原生接口，而 provider「%s」没被认出支持这一套。"
-                "\n  解决：在 设置 → 云端模型 → 服务商与密钥 里把该服务商的「原生接口协议」"
-                "选成上面这些之一：%s；或者填「原生接口地址」。"
-                "\n  （%s）"
+        return (texts.PRV_CAT_14
                 % (sp[1], KIND_LABEL[k], p["name"],
                    "、".join(MEDIA_LABEL[a] for a in (MEDIA_ALIYUN, MEDIA_MINIMAX,
                                                    MEDIA_ZHIPU, MEDIA_HUAWEI)),
-                   "只有官方给了 API 的才接得进来；这家若官方没有生图/生视频接口，"
-                   "就请在本地那一组里选模型"))
+                   texts.PRV_L4))
     if not secrets.has_api_key(p["id"]):
-        return ("还没给「%s」填 API Key——设置 → 云端模型 → 服务商与密钥 → 密钥"
-                "（密钥单独存在 secrets.json，不会跟配置一起被复制走）。"
+        return (texts.PRV_CAT_13
                 % p["name"])
     if not media_api_root(p):
-        return ("provider「%s」推不出原生接口地址：请在 设置 → 云端模型 → 服务商与密钥 里填「原生接口地址」。"
+        return (texts.PRV_CAT_15
                 % p["name"])
     return None

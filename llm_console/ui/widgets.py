@@ -15,6 +15,7 @@ import time as _time
 import tkinter as tk
 from tkinter import ttk
 
+from .. import texts
 from . import theme
 
 # 提示气泡的观感：Windows 原生 tooltip 就是这个底色，不抢主窗口的视觉
@@ -535,7 +536,7 @@ class SpotlightGuide(object):
         b = self._nav_bar
         if b is None or not b.winfo_exists():
             b = self._nav_bar = tk.Frame(self.win, bg="#22222e")
-            self._nav_skip = tk.Button(b, text="跳过引导", command=self.close, relief="flat",
+            self._nav_skip = tk.Button(b, text=texts.WDG_GUIDE_SKIP, command=self.close, relief="flat",
                                        bg="#22222e", fg="#a8a8b8", activebackground="#2e2e3c",
                                        activeforeground="#ffffff",
                                        font=("Microsoft YaHei UI", 9))
@@ -548,13 +549,13 @@ class SpotlightGuide(object):
                                        activeforeground="#ffffff",
                                        font=("Microsoft YaHei UI", 9, "bold"))
             self._nav_next.pack(side="right", padx=(0, 6))
-            self._nav_prev = tk.Button(b, text="← 上一步", command=self._prev, relief="flat",
+            self._nav_prev = tk.Button(b, text=texts.WDG_GUIDE_PREV, command=self._prev, relief="flat",
                                        bg="#2b2b38", fg="#d8d8e4", activebackground="#35354a",
                                        activeforeground="#ffffff",
                                        font=("Microsoft YaHei UI", 9))
         last = self.i >= len(self.steps) - 1
         self._nav_step.configure(text="%d / %d" % (self.i + 1, len(self.steps)))
-        self._nav_next.configure(text="完成" if last else "下一步 →")
+        self._nav_next.configure(text=texts.WDG_GUIDE_DONE if last else texts.WDG_GUIDE_NEXT)
         if self.i:
             self._nav_prev.pack(side="right", padx=(0, 6))
         else:
@@ -842,7 +843,7 @@ class SideNav(object):
         self.frame = tk.Frame(parent, background=self.BG, width=width)
         self.frame.pack(side="left", fill="y")
         self.frame.pack_propagate(False)
-        self.title = tk.Label(self.frame, text="设置", font=("Microsoft YaHei UI", 11, "bold"),
+        self.title = tk.Label(self.frame, text=texts.WDG_SETTINGS_TITLE, font=("Microsoft YaHei UI", 11, "bold"),
                               background=self.BG, foreground=self.HDR_FG, anchor="w")
         self.title.pack(fill="x", padx=12, pady=(12, 6))
         tk.Frame(self.frame, background="#dddddd", height=1).pack(fill="x", padx=8)

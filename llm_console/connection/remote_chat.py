@@ -30,6 +30,7 @@ import time
 from ..core.models import display_name, scan_models
 from ..core.server import _query_serving_model, server_state
 from .stream import stream_worker
+from .. import texts
 
 # 会话上限：按**字符数**从头截（不是按轮数——一轮长思考就能吃掉几千字）。
 # 超上下限时 llama-server 会回 400，`friendly_error` 已能把那句原话翻出来，
@@ -38,13 +39,12 @@ HISTORY_CHARS = 24000
 TEXT_MAX_CHARS = 4000           # 与远程生图的提示词同一条上限
 
 # 用户可见文案（W 2026-10-12 批准清单外的新句，逐字待点；口径 = 只给人话 + 指得出去哪儿修）
-NOT_RUNNING_MSG = ("电脑端的文本服务没在跑：在电脑端主界面点「启动服务」。"
-                   "远程不代起服务，也不换模型。")
-LOADING_MSG = "电脑端服务还在加载模型，过几秒再发。"
-NOT_CHAT_MSG = "电脑端现在加载的不是能聊的文本模型（%s）——在电脑端换一个。"
-BUSY_MSG = "上一条还在回答（或电脑端正在忙），等它结束再发。"
-EMPTY_MSG = "先打点什么。"
-TOO_LONG_MSG = "这条太长了（上限 %d 字）。" % TEXT_MAX_CHARS
+NOT_RUNNING_MSG = (texts.RCH_NOT_RUNNING_MSG)
+LOADING_MSG = texts.RCH_LOADING_MSG
+NOT_CHAT_MSG = texts.RCH_NOT_CHAT_MSG
+BUSY_MSG = texts.RCH_BUSY_MSG
+EMPTY_MSG = texts.RCH_EMPTY_MSG
+TOO_LONG_MSG = texts.RCH_CAT % TEXT_MAX_CHARS
 
 
 _PATH_RX = re.compile(r'[A-Za-z]:[\\/]\S+')
@@ -53,7 +53,7 @@ _PATH_RX = re.compile(r'[A-Za-z]:[\\/]\S+')
 def safe_text(msg):
     """错误文本进手机端前抹掉本机绝对路径（坑 238 同一条纪律：`friendly_error`
     翻得好，但它会把 llama-server 的原话带进来，那句里可能有模型文件路径）。"""
-    return _PATH_RX.sub("本机路径", str(msg or ""))
+    return _PATH_RX.sub(texts.RCH_A0, str(msg or ""))
 
 
 # scan_models 的短 TTL 备忘（2026-10-12 评估轮 B1）：`ready()` 被 `/api/caps`
@@ -101,7 +101,7 @@ def ready(cfg):
     for p in chat:
         if os.path.basename(p) == tb:
             return True, "", display_name(cfg, p)
-    return False, NOT_CHAT_MSG % (tb or "未知"), ""
+    return False, NOT_CHAT_MSG % (tb or texts.RCH_N), ""
 
 
 class RemoteChat:
@@ -196,7 +196,7 @@ class RemoteChat:
                 elif kind == "usage":
                     job["usage"] = val
                 elif kind == "error":
-                    job["error"] = safe_text(val or "出错了")
+                    job["error"] = safe_text(val or texts.RCH_N_2)
                     job["state"] = "failed"
                 elif kind == "stopped":
                     job["state"] = "cancelled"

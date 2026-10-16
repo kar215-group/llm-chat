@@ -47,10 +47,11 @@ import os
 import time
 
 from .config import APP_DIR, APP_VERSION
+from .. import texts
 
 VERSION = 1
 TITLE_CHARS = 24
-PLACEHOLDER = "〔这一轮的图没写进记录（原图保存在本机文件里，%d 字符的编码数据太大）〕"
+PLACEHOLDER = texts.CHL_PLACEHOLDER
 
 
 def enabled(cfg):
@@ -82,7 +83,7 @@ def title_of(messages):
         s = " ".join(str(c or "").split()).strip()
         if s:
             return s[:TITLE_CHARS] + ("…" if len(s) > TITLE_CHARS else "")
-    return "（无标题）"
+    return texts.CHL_RET
 
 
 def _shrink(obj):
@@ -114,7 +115,7 @@ def save(cfg, sid, messages, model="", provider="", model_kind="chat"):
     """
     msgs = [m for m in (messages or []) if isinstance(m, dict) and m.get("role")]
     if not msgs:
-        return "", "没有内容可存"
+        return "", texts.CHL_L1
     if not sid:
         sid = new_id()
     p = path_for(cfg, sid)
@@ -160,7 +161,7 @@ def save(cfg, sid, messages, model="", provider="", model_kind="chat"):
             os.remove(tmp)
         except Exception:
             pass
-        return "", "写入失败：%s" % e
+        return "", texts.CHL_CAT % e
     return p, ""
 
 

@@ -45,6 +45,7 @@ import urllib.request
 
 from ..core import capability, config, media, providers
 from . import cloud
+from .. import texts
 
 PROTOCOL_ALIYUN = "aliyun"
 PROTOCOL_MINIMAX = "minimax"
@@ -68,8 +69,7 @@ _STATUS = {
 
 # 会计费的提交类 POST 超时/断连时的追加提示（排查报告 R-04）：请求可能已到达服务端，
 # "没拿到回包"不等于"没建单没扣钱"（与坑 53"提交 200 不等于没扣钱"是同一条纪律的两面）。
-_BILL_NOTE = ("注意：请求可能已到达服务端——这一单可能已经创建并计费。"
-              "重发之前，请先在服务商控制台核对账单/任务列表。")
+_BILL_NOTE = (texts.CME__BILL_NOTE)
 
 _IMG_KEYS = ("image", "image_url", "url", "image_urls", "download_url", "file_url",
              "result_url", "video_url")
@@ -193,7 +193,7 @@ class _Log(object):
             self.f = None
             return
         if title:
-            self.w("=== %s ｜ 提交于 %s ===" % (title, time.strftime("%Y-%m-%d %H:%M:%S")))
+            self.w(texts.CME_CAT % (title, time.strftime("%Y-%m-%d %H:%M:%S")))
 
     def w(self, text):
         if self.f is None:
@@ -228,7 +228,7 @@ def _request(provider, method, url, body=None, extra=None, timeout=60, signed=Fa
     if not signed:
         key = providers.api_key_of(provider)
         if not key:
-            return -2, ("还没给「%s」填 API Key（设置 → 云端模型 → 服务商与密钥 → 密钥）。"
+            return -2, (texts.CME_CAT_2
                         % (provider or {}).get("name", ""))
     data = json.dumps(body, ensure_ascii=False).encode("utf-8") if body is not None else None
     req = urllib.request.Request(url, data=data,
@@ -265,24 +265,23 @@ def _says(text):
 
 
 _HINTS = (
-    ("unpurchased", "这个模型不在你的套餐/已开通范围内——换一个模型，或在服务商控制台开通。"),
-    ("accessdenied", "密钥没有这个模型的权限（可能未开通、或 key 与业务空间不匹配）。"),
-    ("arrearage", "账户欠费，充值后才能继续。"),
-    ("invalidapikey", "API Key 无效：核对 设置 → 云端模型 → 服务商与密钥 → 密钥，以及 key 与域名是否配对。"),
-    ("url error", "接口路径不被这个域名支持：Token Plan 与百炼按量的可用路径不同，别混用。"),
-    ("datainspection", "内容审核没通过：提示词换个说法再试。"),
-    ("inappropriate", "内容审核没通过：提示词换个说法再试。"),
-    ("duration", "时长档位不对（各家允许的秒数不同，见 设置 → 云端模型 → 生图 / 生视频 的时长）。"),
-    ("resolution", "分辨率档位不对（各家允许的档位不同，留空表示用服务端默认）。"),
-    ("size", "尺寸写法不对：阿里云用「宽*高」，例如 1024*1024。"),
-    ("throttling", "触发限流：稍等再发，或把轮询间隔调大。"),
+    ("unpurchased", texts.CME_L1),
+    ("accessdenied", texts.CME_L1_2),
+    ("arrearage", texts.CME_L1_3),
+    ("invalidapikey", texts.CME_L1_4),
+    ("url error", texts.CME_L1_5),
+    ("datainspection", texts.CME_L1_6),
+    ("inappropriate", texts.CME_L1_6),
+    ("duration", texts.CME_L1_7),
+    ("resolution", texts.CME_L1_8),
+    ("size", texts.CME_L1_9),
+    ("throttling", texts.CME_L1_10),
     # v40 新增那几家的说法（MiniMax 的 base_resp 码写在错误消息里，这里按关键词兜底）
-    ("sensitive", "内容审核没通过（MiniMax 分「输入敏感 1026」和「输出敏感 1027」两种）："
-                  "提示词换个说法再试。"),
-    ("balance", "账户余额不足：到服务商控制台充值后再发。"),
-    ("insufficient", "额度或余额不够：到服务商控制台确认这一项服务的开通与剩余量。"),
-    ("rate limit", "触发限流：稍等再发，或把轮询间隔调大。"),
-    ("not activated", "这个模型/服务还没开通：在服务商控制台开通后再发。"),
+    ("sensitive", texts.CME_L1_11),
+    ("balance", texts.CME_L1_12),
+    ("insufficient", texts.CME_L1_13),
+    ("rate limit", texts.CME_L1_10),
+    ("not activated", texts.CME_L1_14),
 )
 
 
@@ -294,9 +293,9 @@ def explain(status, text, provider, endpoint=""):
     带去查错方向（Y4，2026-10-06 实测：阿里云生图超时，报错却指向 `/chat/completions`）。把真实
     端点补一行，日志里本就有它（`log.json("请求 POST …")`），这里让失败文案也带上。
     """
-    tail = ("\n  实际请求端点：%s" % endpoint) if endpoint else ""
+    tail = (texts.CME_CAT_3 % endpoint) if endpoint else ""
     if status in (-1, -2, 0) or status is None:
-        return str(text or "云端请求没有发出") + tail
+        return str(text or texts.CME_N) + tail
     msg = cloud.humanize_http(status, text, provider)
     # 阿里云的错误码（AccessDenied.Unpurchased / UnsupportedOperation …）比 message
     # 更好定位，但 humanize_http 只取 message——这里补一行，别把它丢掉
@@ -305,7 +304,7 @@ def explain(status, text, provider, endpoint=""):
     if isinstance(payload, dict):
         code = str(payload.get("code") or "")
     if code and code not in msg:
-        msg += "\n  错误码：%s" % code
+        msg += texts.CME_CAT_4 % code
     if endpoint and endpoint not in msg:
         msg += tail
     low = (text or "").lower()
@@ -422,7 +421,7 @@ def _proto_error(payload, protocol):
         return ""
     if code == 0:
         return ""
-    return "服务端错误码 %s：%s" % (code, br.get("status_msg") or "（没给说明）")
+    return texts.CME_CAT_5 % (code, br.get("status_msg") or texts.CME_N_2)
 
 
 def _extract_b64(payload):
@@ -456,7 +455,7 @@ def write_b64(items, dest, log=None):
         try:
             data = base64.b64decode(tail or str(s))
         except Exception as e:
-            errs.append("base64 解不开：%s" % e)
+            errs.append(texts.CME_CAT_6 % e)
             continue
         real = ext
         for cand in (".png", ".jpg", ".jpeg", ".webp", ".bmp"):
@@ -471,9 +470,9 @@ def write_b64(items, dest, log=None):
                 f.write(data)
             paths.append(p)
             if log is not None:
-                log.w("已落地 %s（%d 字节，服务端给的是 base64）" % (p, len(data)))
+                log.w(texts.CME_CAT_7 % (p, len(data)))
         except Exception as e:
-            errs.append("写入失败：%s" % e)
+            errs.append(texts.CME_CAT_8 % e)
     return paths, errs
 
 
@@ -511,16 +510,16 @@ def download(url, dest, emit=None, timeout=None, log=None, stop_flag=None):
                     f.write(chunk)
                     done += len(chunk)
                     if emit and (done < 65536 or done % 262144 < 65536):
-                        emit(("progress", "⬇ 下载产物… %.1f MB%s · %ds"
+                        emit(("progress", texts.CME_CAT_9
                               % (done / 1048576.0,
                                  (" / %.1f MB" % (total / 1048576.0)) if total else "",
                                  int(time.time() - t0))))
         if stop_flag is not None and stop_flag.is_set():
             _discard(part)
-            return False, "已取消（产物未落地）"
+            return False, texts.CME_L1_15
         if done < 1024:
             _discard(part)
-            return False, "下载到的文件过小（%d 字节），判定为失败" % done
+            return False, texts.CME_CAT_10 % done
         # 落盘前嗅一眼魔数/内容类型（R-55）：≥1KB 的 HTML/XML/JSON 错误页（签名过期、
         # 额度不足都会回这些）会被当图片/视频存下来并 mark_done，用户拿到一个打不开的"产物"
         try:
@@ -549,16 +548,16 @@ def download(url, dest, emit=None, timeout=None, log=None, stop_flag=None):
                 (ct.startswith("text/") or ct.startswith("application/xml"))
                 and not looks_like_media):
             _discard(part)
-            return False, ("下载到的不是产物文件（像是网页/错误页：%s），已丢弃"
+            return False, (texts.CME_CAT_11
                            % (ct or low_head[:24].decode("latin-1", "replace")))
         os.replace(part, dest)
         if log is not None:
-            log.w("已下载 %s → %s（%.1f MB，%.1fs）"
+            log.w(texts.CME_CAT_12
                   % (url[:160], dest, done / 1048576.0, time.time() - t0))
         return True, ""
     except Exception as e:
         _discard(part)
-        return False, "下载失败：%s" % e
+        return False, texts.CME_CAT_13 % e
 
 
 def _discard(path):
@@ -657,29 +656,29 @@ def ref_data_url(path, protocol):
     """
     lim = ref_limits(protocol)
     if not lim:
-        return "", "这一家的生图接口不支持参考图"
+        return "", texts.CME_L1_16
     p = str(path or "")
     if not os.path.isfile(p):
-        return "", "参考图文件不在了：%s" % (p or "（空路径）")
+        return "", texts.CME_CAT_14 % (p or texts.CME_N_3)
     ext = os.path.splitext(p)[1].lower()
     mime = lim["exts"].get(ext)
     if not mime:
         ok_fmt = " / ".join(sorted({e.lstrip(".").upper() for e in lim["exts"]}))
-        return "", ("这一家的参考图只收 %s，你选的是 %s —— 另存成支持的格式再发"
-                    % (ok_fmt, ext or "无扩展名"))
+        return "", (texts.CME_CAT_15
+                    % (ok_fmt, ext or texts.CME_N_4))
     try:
         size = os.path.getsize(p)
     except Exception:
         size = 0
     if size > REF_MAX_BYTES:
-        return "", "参考图 %.1fMB，超过这一家 10MB 的上限 —— 先把图压小一点" % (size / 1048576.0)
+        return "", texts.CME_CAT_16 % (size / 1048576.0)
     try:
         with open(p, "rb") as f:
             raw = f.read()
     except Exception as e:
-        return "", "读不了这张图：%s" % e
+        return "", texts.CME_CAT_17 % e
     if not raw:
-        return "", "这张图是空文件（0 字节），换一张"
+        return "", texts.CME_L1_17
     return "data:%s;base64,%s" % (mime, base64.b64encode(raw).decode("ascii")), ""
 
 
@@ -695,15 +694,14 @@ def ref_images_error(provider, paths, mode=""):
     proto = protocol_of(provider)
     lim = ref_limits(proto)
     if not lim:
-        return ("这一家的生图接口只收文字提示词，参考图请改用本地的〔生图〕模型"
-                "（图片已保留，不会丢）")
+        return (texts.CME_RET)
     want = str(mode or "").strip()
     if want and not providers.supports_ref_mode(provider, want):
-        return ("这一家不带%s，参考图请改用%s（图片已保留，不会丢）"
+        return (texts.CME_CAT_18
                 % (capability.MODE_LABEL.get(want, want),
-                   capability.MODE_LABEL.get(providers.ref_image_mode(provider), "文生图")))
+                   capability.MODE_LABEL.get(providers.ref_image_mode(provider), texts.CME_A1)))
     if len(paths) > lim["max"]:
-        return ("参考图一次最多 %d 张（这一家的上限），现在选了 %d 张"
+        return (texts.CME_CAT_19
                 % (lim["max"], len(paths)))
     for p in paths:
         _url, err = ref_data_url(p, proto)
@@ -752,7 +750,7 @@ def image_body(model, prompt, size="", negative="", seed=-1, extra=None,
     """
     refs = [u for u in list(ref_images or []) if str(u).strip()]
     if refs:
-        _hint = {"edit": "以此图为本体进行修改。", "subject": "以此图主体为核心进行创作。"}.get(str(ref_mode or "").strip())
+        _hint = {"edit": texts.CME_DEDIT, "subject": texts.CME_DSUBJECT}.get(str(ref_mode or "").strip())
         if _hint:
             prompt = ("%s%s" % (_hint, prompt)) if str(prompt).strip() else _hint
     if protocol == PROTOCOL_MINIMAX:
@@ -832,7 +830,7 @@ def generate_image(cfg, provider, model, prompt, dest, emit=None, stop_flag=None
     if own:
         # 日志落到 media_logs（与产物分开，W 2026-10-11 定）；_Log 的标题沿用原样
         log = _Log(log_path or config.media_log_path(cfg, dest, "cloud"),
-                   "云端生图 %s" % model)
+                   texts.CME_CAT_20 % model)
     timeout = int(cfg.get("cloud_image_wait_seconds", 180) or 180)
     proto = protocol_of(provider)
     bad = ref_images_error(provider, ref_images, mode=ref_mode)
@@ -848,12 +846,12 @@ def generate_image(cfg, provider, model, prompt, dest, emit=None, stop_flag=None
                       extra=providers.media_extra_params(provider, model),
                       protocol=proto, ref_images=urls_in, ref_mode=ref_mode)
     log.json("请求 POST %s" % image_endpoint(provider), _shrink_for_log(body))
-    emit(("line", "云端生图：%s%s" % (providers.short_of(model),
-                                      "（%s %d 张）" % (capability.MODE_LABEL.get(ref_mode,
-                                                                             "参考图"),
+    emit(("line", texts.CME_CAT_21 % (providers.short_of(model),
+                                      texts.CME_CAT_22 % (capability.MODE_LABEL.get(ref_mode,
+                                                                             texts.CME_A1_2),
                                                         len(urls_in))
                                       if urls_in else "")))
-    emit(("progress", "☁ 云端生图中… %ds" % int(time.time() - t0)))
+    emit(("progress", texts.CME_CAT_23 % int(time.time() - t0)))
 
     st, text = _request(provider, "POST", image_endpoint(provider), body, timeout=timeout)
     log.w("回包 HTTP %s" % st)
@@ -867,7 +865,7 @@ def generate_image(cfg, provider, model, prompt, dest, emit=None, stop_flag=None
         return _img_fail(err, t0, log)
     payload = _safe_json(text)
     if not isinstance(payload, dict):
-        return _img_fail("回包不是 JSON，没法解析（原文已存日志）。", t0, log)
+        return _img_fail(texts.CME_A0, t0, log)
     err = _proto_error(payload, proto)
     if err:
         # MiniMax 这类"200 里藏着错误码"的家，直接按错误收
@@ -878,7 +876,7 @@ def generate_image(cfg, provider, model, prompt, dest, emit=None, stop_flag=None
     tid = _task_id_of(payload, proto)
     if not urls and tid:
         # 少数模型即使请求同步也回 task_id：转轮询，别当成失败
-        emit(("progress", "☁ 这个模型回了异步任务，改为轮询… task_id=%s" % tid))
+        emit(("progress", texts.CME_CAT_24 % tid))
         if on_task_id is not None:
             # 先把 task_id 交出去（调用方落台账）再开始轮询：这一步晚做，中间断电
             # 就等于这条结果再也取不回来（坑 136）
@@ -900,21 +898,21 @@ def generate_image(cfg, provider, model, prompt, dest, emit=None, stop_flag=None
             # 成功判定仍然是"文件已经在本地"
             paths, errs = write_b64(b64, dest, log=log)
             out = {"ok": bool(paths), "paths": paths, "urls": [],
-                   "error": "" if paths else (errs[0] if errs else "base64 没解出图片"),
+                   "error": "" if paths else (errs[0] if errs else texts.CME_ELSE),
                    "seconds": round(time.time() - t0, 1), "log_path": log.path,
                    "usage": payload.get("usage") or {}, "task_id": "", "raw": payload}
             if own:
-                log.w("结果：成功 %d 张 ｜ %s" % (len(paths), out["error"] or "无错误"))
+                log.w(texts.CME_CAT_25 % (len(paths), out["error"] or texts.CME_N_5))
                 log.close()
             return out
-        return _img_fail("服务端回包里没有图片地址（结构不认识，原文已存日志）。", t0, log)
+        return _img_fail(texts.CME_A0_2, t0, log)
 
     paths = _dest_paths(dest, urls)
     got, errs = [], []
     for url, p in zip(urls, paths):
         if stop_flag is not None and stop_flag.is_set():
             break
-        emit(("progress", "☁ 出图 %d/%d，下载中… %ds"
+        emit(("progress", texts.CME_CAT_26
               % (len(got) + 1, len(urls), int(time.time() - t0))))
         ok, why = download(url, p, emit=emit, log=log, stop_flag=stop_flag)
         if ok:
@@ -922,18 +920,18 @@ def generate_image(cfg, provider, model, prompt, dest, emit=None, stop_flag=None
         else:
             errs.append(why)
     out = {"ok": bool(got), "paths": got, "urls": urls,
-           "error": "" if got else (errs[0] if errs else "没拿到图片"),
+           "error": "" if got else (errs[0] if errs else texts.CME_ELSE_2),
            "seconds": round(time.time() - t0, 1), "log_path": log.path,
            "usage": payload.get("usage") or {}, "task_id": tid, "raw": payload}
     if own:
-        log.w("结果：成功 %d 张 ｜ %s" % (len(got), out["error"] or "无错误"))
+        log.w(texts.CME_CAT_25 % (len(got), out["error"] or texts.CME_N_5))
         log.close()
     return out
 
 
 def _img_fail(msg, t0, log):
     if log is not None:
-        log.w("失败：%s" % msg)
+        log.w(texts.CME_CAT_27 % msg)
     return {"ok": False, "paths": [], "urls": [], "error": msg,
             "seconds": round(time.time() - t0, 1),
             "log_path": log.path if log else "", "usage": {}, "task_id": "", "raw": None}
@@ -1032,7 +1030,7 @@ def submit_video(cfg, provider, model, prompt, resolution="", duration=0, ratio=
     .log）：这样"建单成功但轮询断了"和"根本没建单"是两回事，翻日志一眼能分开——
     而生视频链路那次"引擎说完成却没落盘"就是靠同名日志结的案。
     """
-    log = _Log(log_path, title or ("云端生视频提交 %s" % model))
+    log = _Log(log_path, title or (texts.CME_CAT_28 % model))
     proto = protocol_of(provider)
     body = video_body(model, prompt, resolution=resolution, duration=duration,
                       ratio=ratio, negative=negative, seed=seed,
@@ -1054,19 +1052,19 @@ def submit_video(cfg, provider, model, prompt, resolution="", duration=0, ratio=
         tid = ""
     if tid:
         err = ""
-        log.w("已建单：task_id=%s" % tid)
+        log.w(texts.CME_CAT_29 % tid)
     elif err:
-        log.w("提交失败：%s" % err)
+        log.w(texts.CME_CAT_30 % err)
     elif st == 200:
         # 200 但没有 task_id：不能报"请求失败（200）"，那是另一种失败——结构不认识
-        err = "服务端回了 200 但没有 task_id（回包结构不认识，原文已存日志）。"
+        err = texts.CME_ERR
         log.w(err)
     else:
         err = explain(st, text, provider, url)
         if st == -1:
             # 同 generate_image：提交超时不等于没建单，必须把"可能已计费"说出来（R-04）
             err += "\n  " + _BILL_NOTE
-        log.w("提交失败：%s" % err)
+        log.w(texts.CME_CAT_30 % err)
     out = {"ok": bool(tid), "task_id": tid, "raw": payload,
            "error": err, "log_path": log.path}
     log.close()
@@ -1086,7 +1084,7 @@ def query_task(provider, task_id, model=""):
     url = task_endpoint(provider, task_id, model)
     if not url:
         return {"status": "unknown", "urls": [], "image_urls": [],
-                "error": "这套协议没有查询任务的端点（原文没处取，日志已尽量保留）。",
+                "error": texts.CME_DERROR,
                 "code": "", "raw": None, "usage": {}, "task_id": task_id,
                 "submit_time": "", "end_time": ""}
     st, text = _request(provider, "GET", url, timeout=45)
@@ -1102,7 +1100,7 @@ def query_task(provider, task_id, model=""):
         # worker 线程静默死掉、不投 exit 事件、界面永久卡在"生成中"。
         # 按"结构不认识"如实上报，由 wait_task 计入失败次数并重试。
         return {"status": "unknown", "urls": [], "image_urls": [],
-                "error": "查询回包不是 JSON 对象（原文：%s）" % str(text or "")[:120],
+                "error": texts.CME_CAT_31 % str(text or "")[:120],
                 "code": "", "raw": None, "usage": {}, "task_id": task_id,
                 "submit_time": "", "end_time": ""}
     err = _proto_error(payload, proto)
@@ -1124,9 +1122,8 @@ def query_task(provider, task_id, model=""):
         # UNKNOWN 一类）绝不能含糊带过：如实报"状态不认识"，由 wait_task 计入查询
         # 失败并重试 —— 原来它会落到"其余即成功"分支，任务还在跑就被判死，真正的
         # 服务端 code/message 被吞（排查报告 R-03）。
-        err = ("服务端返回了不认识的状态（%s）：不能判定成功或失败，"
-               "已按查询失败处理（原文已存日志）。"
-               % str(cont.get("task_status") or cont.get("status") or "空"))
+        err = (texts.CME_CAT_32
+               % str(cont.get("task_status") or cont.get("status") or texts.CME_N_6))
     if proto == PROTOCOL_MINIMAX and not _mm_v2(model) and status == "succeeded" \
             and not urls and not iurls and payload.get("file_id"):
         st2, t2 = _request(provider, "GET", file_endpoint(provider, payload.get("file_id")),
@@ -1136,7 +1133,7 @@ def query_task(provider, task_id, model=""):
             err = explain(st2, t2, provider, file_endpoint(provider, payload.get("file_id")))
             status = "unknown"
         elif not isinstance(p2, dict):
-            err = "文件检索回包不是 JSON（原文已存日志）。"
+            err = texts.CME_ERR_2
             status = "unknown"
         else:
             err = _proto_error(p2, proto)
@@ -1157,8 +1154,8 @@ def query_task(provider, task_id, model=""):
 
 
 
-_LABEL = {"pending": "排队中", "running": "生成中", "succeeded": "已完成",
-          "failed": "失败", "canceled": "已取消", "unknown": "状态未知"}
+_LABEL = {"pending": texts.CME_DPENDING, "running": texts.CME_DRUNNING, "succeeded": texts.CME_DSUCCEEDED,
+          "failed": texts.CME_DFAILED, "canceled": texts.CME_DCANCELED, "unknown": texts.CME_DUNKNOWN}
 
 
 def wait_task(cfg, provider, task_id, dest, kind="video", emit=None, stop_flag=None,
@@ -1174,7 +1171,7 @@ def wait_task(cfg, provider, task_id, dest, kind="video", emit=None, stop_flag=N
     own = log is None
     if own:
         log = _Log(log_path or config.media_log_path(cfg, dest, "cloud"),
-                   "云端生%s %s" % ("图" if kind == "image" else "视频", task_id))
+                   texts.CME_CAT_33 % (texts.CME_IF if kind == "image" else texts.CME_ELSE_3, task_id))
     interval = max(5, int(cfg.get("cloud_poll_seconds", 15) or 15))
     if deadline is None:
         deadline = time.time() + max(60, int(cfg.get("cloud_wait_minutes", 20) or 20) * 60)
@@ -1182,12 +1179,12 @@ def wait_task(cfg, provider, task_id, dest, kind="video", emit=None, stop_flag=N
     last = ""
     bad = 0
     res = {"ok": False, "status": "unknown", "paths": [], "urls": [],
-           "error": "还没查出结果", "seconds": 0.0, "task_id": task_id,
+           "error": texts.CME_DERROR_2, "seconds": 0.0, "task_id": task_id,
            "log_path": log.path, "raw": None, "usage": {}}
     while True:
         if stop_flag is not None and stop_flag.is_set():
             res["status"] = "waiting"
-            res["error"] = "已停止等待：云端任务仍在跑，之后可在对话里的「取回」按钮拿结果。"
+            res["error"] = texts.CME_ASGN
             res["seconds"] = round(time.time() - t0, 1)
             log.w(res["error"])
             if own:
@@ -1200,27 +1197,27 @@ def wait_task(cfg, provider, task_id, dest, kind="video", emit=None, stop_flag=N
             # 会静默死掉、不投 exit 事件，界面就永久卡在"生成中…"（busy 标志不复位）。
             # 折成一次"查询失败"，交给下面的 bad 计数与重试逻辑。
             q = {"status": "unknown", "urls": [], "image_urls": [],
-                 "error": "查询任务出错：%s: %s" % (type(e).__name__, e),
+                 "error": texts.CME_CAT_34 % (type(e).__name__, e),
                  "code": "", "raw": None, "usage": {}, "task_id": task_id,
                  "submit_time": "", "end_time": ""}
         if q["status"] == "unknown":
             # 一切"不认识"（查询异常 / 非 200 / 状态字面量认不出）一律计入查询失败
             # 并重试；**绝不落到下面的成功分支**（排查报告 R-03：原来要求 error 非空
             # 才算失败，服务端回 200+UNKNOWN 时会被当"任务已完成"）。
-            q_err = q["error"] or "状态未知（回包没给原因，原文已存日志）。"
+            q_err = q["error"] or texts.CME_N_7
             try:
-                log.json("查询失败（第 %d 次）" % (bad + 1), q.get("raw"))
+                log.json(texts.CME_CAT_35 % (bad + 1), q.get("raw"))
             except Exception:
                 pass
             bad += 1
             # 单次查询失败（限流 / 网络抖）不该丢掉已经排队的任务：容忍几轮再说
             if bad <= 3:
-                emit(("line", "查询失败（第 %d 次），继续等：%s" % (bad, q_err)))
-                emit(("progress", "☁ 云端任务查询失败，重试中… %ds" % int(time.time() - t0)))
+                emit(("line", texts.CME_CAT_36 % (bad, q_err)))
+                emit(("progress", texts.CME_CAT_37 % int(time.time() - t0)))
                 if _sleep(stop_flag, interval):
                     continue
                 continue
-            res["error"] = "连续 %d 次查不到任务状态：%s" % (bad, q_err)
+            res["error"] = texts.CME_CAT_38 % (bad, q_err)
             res["seconds"] = round(time.time() - t0, 1)
             log.w(res["error"])
             if own:
@@ -1239,16 +1236,15 @@ def wait_task(cfg, provider, task_id, dest, kind="video", emit=None, stop_flag=N
                 except Exception:
                     pass
             last = status
-            log.json("状态 %s ｜ task_id=%s" % (status, task_id), q.get("raw"))
-            emit(("line", "云端任务状态：%s（%s）" % (status, _LABEL.get(status, status))))
+            log.json(texts.CME_CAT_39 % (status, task_id), q.get("raw"))
+            emit(("line", texts.CME_CAT_40 % (status, _LABEL.get(status, status))))
         if status in ("pending", "running"):
-            emit(("progress", "☁ 云端生%s… %s · %ds"
-                  % ("图" if kind == "image" else "视频", _LABEL.get(status, status),
+            emit(("progress", texts.CME_CAT_41
+                  % (texts.CME_IF if kind == "image" else texts.CME_ELSE_3, _LABEL.get(status, status),
                      int(time.time() - t0))))
             if time.time() > deadline:
                 res["status"] = "timeout"
-                res["error"] = ("等满了 %d 分钟还没出结果。任务记录已存进 cloud_jobs.json，"
-                                "之后可以在对话里点「取回」接着拿。"
+                res["error"] = (texts.CME_CAT_42
                                 % int(cfg.get("cloud_wait_minutes", 20) or 20))
                 res["seconds"] = round(time.time() - t0, 1)
                 log.w(res["error"])
@@ -1260,10 +1256,10 @@ def wait_task(cfg, provider, task_id, dest, kind="video", emit=None, stop_flag=N
             continue
         if status in ("failed", "canceled"):
             res["status"] = status
-            res["error"] = q["error"] or ("任务%s" % _LABEL.get(status, status))
+            res["error"] = q["error"] or (texts.CME_CAT_43 % _LABEL.get(status, status))
             res["seconds"] = round(time.time() - t0, 1)
             res["raw"] = q.get("raw")
-            log.w("失败：%s" % res["error"])
+            log.w(texts.CME_CAT_27 % res["error"])
             if own:
                 log.close()
             return res
@@ -1280,19 +1276,19 @@ def wait_task(cfg, provider, task_id, dest, kind="video", emit=None, stop_flag=N
                 res.update({"ok": True, "paths": got, "urls": [], "status": "succeeded",
                             "error": "", "seconds": round(time.time() - t0, 1),
                             "raw": q.get("raw"), "usage": q.get("usage") or {}})
-                log.w("结果：成功（服务端给的是 base64）｜ %s" % "，".join(got))
+                log.w(texts.CME_CAT_44 % "，".join(got))
                 if own:
                     log.close()
                 return res
             res["status"] = "succeeded"
-            res["error"] = "任务已完成，但回包里没有产物地址（原文已存日志）。"
+            res["error"] = texts.CME_ASGN_2
             res["seconds"] = round(time.time() - t0, 1)
             res["raw"] = q.get("raw")
-            log.json("完成但无产物地址", q.get("raw"))
+            log.json(texts.CME_A0_3, q.get("raw"))
             if own:
                 log.close()
             return res
-        emit(("progress", "☁ 云端已完成，下载产物… %ds" % int(time.time() - t0)))
+        emit(("progress", texts.CME_CAT_45 % int(time.time() - t0)))
         paths = _dest_paths(dest, urls)
         got, errs = [], []
         for url, p in zip(urls, paths):
@@ -1300,10 +1296,10 @@ def wait_task(cfg, provider, task_id, dest, kind="video", emit=None, stop_flag=N
                                timeout=int(cfg.get("cloud_download_seconds", 180) or 180))
             (got if ok else errs).append(p if ok else why)
         res.update({"ok": bool(got), "paths": got, "urls": urls, "status": "succeeded",
-                    "error": "" if got else (errs[0] if errs else "没拿到产物"),
+                    "error": "" if got else (errs[0] if errs else texts.CME_ELSE_4),
                     "seconds": round(time.time() - t0, 1), "raw": q.get("raw"),
                     "usage": q.get("usage") or {}})
-        log.w("结果：%s ｜ %s" % ("成功" if got else "失败",
+        log.w(texts.CME_CAT_46 % (texts.CME_IF_2 if got else texts.CME_DFAILED,
                                   res["error"] or "，".join(got)))
         if own:
             log.close()
@@ -1317,19 +1313,16 @@ def cancel(provider, task_id, model=""):
     """
     proto = protocol_of(provider)
     if proto != PROTOCOL_ALIYUN:
-        return False, ("「%s」这一家没有可用的取消任务接口（官方文档里没给，或在另一套鉴权上）。"
-                       "任务已经在云端排队/运行，这边只能停止等待——"
-                       "任务记录已存进 cloud_jobs.json，之后可以点「取回」拿结果。"
+        return False, (texts.CME_CAT_47
                        % (provider or {}).get("name", ""))
     st, text = _request(provider, "POST", task_endpoint(provider, task_id, model) + "/cancel",
                         timeout=30)
     payload = _safe_json(text)
     ok = st == 200 and not (isinstance(payload, dict) and payload.get("code"))
     if ok:
-        return True, "已取消（任务还没开始跑，不会产生费用）。"
+        return True, texts.CME_L1_18
     why = _says(text) or explain(st, text, provider, task_endpoint(provider, task_id, model) + "/cancel")
-    return False, ("取消没成功：%s\n  云端任务一旦开始运行就取消不了，只能不再等它——"
-                   "任务记录已存进 cloud_jobs.json，之后可以点「取回」拿结果。" % why)
+    return False, (texts.CME_CAT_48 % why)
 
 
 
@@ -1354,18 +1347,14 @@ def _safe_json(text):
 def check(cfg, provider, model, kind):
     """返回一句"还不能发"的原因，或空串表示可以发。UI 在提交前调它。"""
     if provider is None:
-        return "找不到这个 provider。"
+        return texts.CME_RET_2
     if not providers.media_api(provider):
-        return ("provider「%s」没接上云端生图/生视频：认不出它的原生接口协议。"
-                "\n  解决：在 设置 → 云端模型 → 服务商与密钥 里选「原生接口协议」"
-                "（阿里云系 / MiniMax / 智谱 / 华为系），或填「原生接口地址」。"
-                "\n  官方没有这类接口的（例如 Kimi），请在本地那一组里选模型。"
+        return (texts.CME_CAT_49
                 % provider.get("name", ""))
     if not providers.media_api_root(provider):
-        return ("provider「%s」推不出原生接口地址：在 设置 → 云端模型 → 服务商与密钥 里"
-                "填「原生接口地址」。" % provider.get("name", ""))
+        return (texts.CME_CAT_50 % provider.get("name", ""))
     if not providers.api_key_of(provider):
-        return "还没给「%s」填 API Key（设置 → 云端模型 → 服务商与密钥 → 密钥）。" % provider.get("name", "")
+        return texts.CME_CAT_2 % provider.get("name", "")
     if kind == "video" and int(cfg.get("cloud_wait_minutes", 20) or 20) <= 0:
-        return "云端生视频的等待上限设成了 0，改回一个正数（设置 → 云端模型 → 生图 / 生视频）。"
+        return texts.CME_RET_3
     return ""

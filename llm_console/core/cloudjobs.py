@@ -16,6 +16,7 @@ import threading
 import time
 
 from .config import APP_DIR, atomic_write_json
+from .. import texts
 
 JOBS_PATH = os.path.join(APP_DIR, "cloud_jobs.json")
 JOBS_VERSION = 1
@@ -153,8 +154,8 @@ def prune(keep_days=7):
 
 def describe(job):
     """界面用的一行：什么能力、哪个模型、什么时候提交、还取不取得回。"""
-    kind = "生图" if str(job.get("kind")) == "image" else "生视频"
+    kind = texts.CJ_IF if str(job.get("kind")) == "image" else texts.CJ_ELSE
     t = time.strftime("%m-%d %H:%M", time.localtime(float(job.get("created_at") or 0)))
-    tail = "（URL 已过 24 小时，取不回来了）" if expired(job) else ""
-    return "☁ 云端%s · %s · 提交于 %s · task_id=%s%s" % (
+    tail = texts.CJ_IF_2 if expired(job) else ""
+    return texts.CJ_CAT % (
         kind, job.get("model") or "?", t, str(job.get("task_id") or "")[:16], tail)

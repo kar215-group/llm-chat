@@ -9,6 +9,7 @@ r"""llm_console.ui.dialogs — 独立对话框：退出确认。
 import tkinter as tk
 from tkinter import ttk
 
+from .. import texts
 from ..core.device_ua import os_label
 from . import theme
 
@@ -18,22 +19,22 @@ class ExitDialog(tk.Toplevel):
 
     def __init__(self, parent):
         super().__init__(parent)
-        self.title("关闭 LLM 对话台")
+        self.title(texts.DLG_EXIT_TITLE)
         theme.style_toplevel(self)   # 经典背景 + 标题栏两件套（坑 186）
         self.resizable(False, False)
         self.result = None
 
-        ttk.Label(self, text="后台模型服务正在运行。",
+        ttk.Label(self, text=texts.DLG_EXIT_RUNNING,
                   font=("Microsoft YaHei UI", 10, "bold")).pack(padx=28, pady=(18, 4))
-        ttk.Label(self, text="关闭程序会同时停止后台服务。", style="Note.TLabel").pack(
+        ttk.Label(self, text=texts.DLG_EXIT_WILL_STOP, style="Note.TLabel").pack(
             padx=28, pady=(0, 14))
         box = ttk.Frame(self)
         box.pack(padx=28, pady=(0, 14))
-        theme.button(box, text="停止服务并退出", width=16,
+        theme.button(box, text=texts.DLG_EXIT_BTN_STOP, width=16,
                    command=lambda: self._done("stop")).pack(side="left", padx=4)
-        theme.button(box, text="取消", width=10,
+        theme.button(box, text=texts.BTN_CANCEL, width=10,
                    command=lambda: self._done("cancel")).pack(side="left", padx=4)
-        ttk.Label(self, text="「取消」返回主窗口，程序与服务继续运行。Esc 也可取消。",
+        ttk.Label(self, text=texts.DLG_EXIT_HINT,
                   style="Muted.TLabel",
                   font=("Microsoft YaHei UI", 9)).pack(padx=28, pady=(0, 14))
 
@@ -62,7 +63,7 @@ class PairConfirmDialog(tk.Toplevel):
 
     def __init__(self, parent, info):
         super().__init__(parent)
-        self.title("远程配对请求")
+        self.title(texts.DLG_PAIR_TITLE)
         theme.style_toplevel(self)
         self.resizable(False, False)
         self.result = None
@@ -70,14 +71,14 @@ class PairConfirmDialog(tk.Toplevel):
         cands = [c for c in (info.get("candidates") or []) if c.get("id")]
         auto_pid = str(info.get("auto") or "")
 
-        ttk.Label(self, text="有设备请求连接远程访问",
+        ttk.Label(self, text=texts.DLG_PAIR_HEAD,
                   font=("Microsoft YaHei UI", 10, "bold")).pack(
             padx=28, pady=(18, 6))
         meta = ttk.Frame(self)
         meta.pack(padx=28, anchor="w")
-        ttk.Label(meta, text="系统：", style="Dim.TLabel").grid(row=0, column=0, sticky="e")
-        ttk.Label(meta, text=str(info.get("os") or "未知设备")).grid(row=0, column=1, sticky="w")
-        ttk.Label(meta, text="来源：", style="Dim.TLabel").grid(row=1, column=0, sticky="e")
+        ttk.Label(meta, text=texts.DLG_PAIR_OS, style="Dim.TLabel").grid(row=0, column=0, sticky="e")
+        ttk.Label(meta, text=str(info.get("os") or texts.DLG_PAIR_UNKNOWN_DEVICE)).grid(row=0, column=1, sticky="w")
+        ttk.Label(meta, text=texts.DLG_PAIR_SOURCE, style="Dim.TLabel").grid(row=1, column=0, sticky="e")
         ttk.Label(meta, text=str(info.get("ip") or "?")).grid(row=1, column=1, sticky="w")
         agent = str(info.get("agent") or "")
         if agent:
@@ -87,42 +88,40 @@ class PairConfirmDialog(tk.Toplevel):
                 padx=28, pady=(4, 2), anchor="w")
         if auto_pid:
             auto_name = next((str(c.get("name") or "?") for c in cands
-                              if c.get("id") == auto_pid), info.get("os") or "已配对设备")
+                              if c.get("id") == auto_pid), info.get("os") or texts.DLG_PAIR_PAIRED_DEVICE)
             ttk.Label(self,
-                      text="识别到这是你已配对的「%s」（换了连接方式或浏览器），"
-                           "默认并入它，之前的历史产物都还在。" % auto_name,
+                      text=texts.DLG_PAIR_AUTO_MERGE % auto_name,
                       style="Note.TLabel", wraplength=420, justify="left").pack(
                 padx=28, pady=(6, 2), anchor="w")
 
-        box = ttk.LabelFrame(self, text="这台设备算作：")
+        box = ttk.LabelFrame(self, text=texts.DLG_PAIR_COUNT_AS)
         box.pack(padx=28, pady=(8, 4), fill="x")
         self.var = tk.StringVar(value=auto_pid or "")
-        ttk.Radiobutton(box, text="一台新设备（独立的历史产物，不与其他设备互通）",
+        ttk.Radiobutton(box, text=texts.DLG_PAIR_NEW,
                         variable=self.var, value="").pack(anchor="w", padx=10, pady=(6, 2))
         if cands:
             for c in cands:
-                oses = "、".join(os_label(k) for k in (c.get("os_set") or [])) or "未知"
+                oses = "、".join(os_label(k) for k in (c.get("os_set") or [])) or texts.DLG_PAIR_UNKNOWN_OS
                 seen = str(c.get("last_seen") or "")
-                tail = ("（%s，最近活跃 %s）" % (oses, seen)) if seen else ("（%s）" % oses)
-                ttk.Radiobutton(box, text="并入「%s」%s —— 共用它的历史产物"
+                tail = (texts.DLG_PAIR_CAND_TAIL_SEEN % (oses, seen)) if seen else (texts.DLG_PAIR_CAND_TAIL % oses)
+                ttk.Radiobutton(box, text=texts.DLG_PAIR_MERGE_INTO
                                           % (str(c.get("name") or "?"), tail),
                                 variable=self.var,
                                 value=str(c["id"])).pack(anchor="w", padx=10, pady=1)
         else:
-            ttk.Label(box, text="（还没有其他已配对设备）", style="Muted.TLabel").pack(
+            ttk.Label(box, text=texts.DLG_PAIR_NO_OTHERS, style="Muted.TLabel").pack(
                 anchor="w", padx=10, pady=(0, 6))
 
-        ttk.Label(self, text="只允许你自己发起的设备接入。选错了随时可在"
-                             "「设置 → 远程访问 → 已配对设备」里吊销。",
+        ttk.Label(self, text=texts.DLG_PAIR_REVOKE_HINT,
                   style="Muted.TLabel", wraplength=420, justify="left",
                   font=("Microsoft YaHei UI", 9)).pack(padx=28, pady=(4, 8))
         btns = ttk.Frame(self)
         btns.pack(padx=28, pady=(0, 16))
         # 「允许」是主操作（primary 描边），「拒绝」中性次按钮——与 ConfirmDialog
         # 的主次口径一致（2026-10-15 UI 走查，此前两颗同灰、没有视觉主次）
-        theme.button(btns, text="允许", width=10, bootstyle="primary-outline",
+        theme.button(btns, text=texts.DLG_PAIR_BTN_ALLOW, width=10, bootstyle="primary-outline",
                      command=self._allow).pack(side="left", padx=4)
-        theme.button(btns, text="拒绝", width=10,
+        theme.button(btns, text=texts.DLG_PAIR_BTN_DENY, width=10,
                      command=self._deny).pack(side="left", padx=4)
 
         self.bind("<Escape>", lambda e: self._deny())
@@ -154,8 +153,8 @@ class ConfirmDialog(tk.Toplevel):
     ExitDialog、PairConfirmDialog 同一套：style_toplevel + theme.button。
     """
 
-    def __init__(self, parent, title, message, *, ok_text="确定",
-                 cancel_text="取消", danger=False, wrap=420):
+    def __init__(self, parent, title, message, *, ok_text=texts.BTN_OK,
+                 cancel_text=texts.BTN_CANCEL, danger=False, wrap=420):
         super().__init__(parent)
         self.title(title)
         theme.style_toplevel(self)
@@ -202,8 +201,8 @@ class PromptDialog(tk.Toplevel):
     调用方仍按自己的规则 strip / 夹长度（与 askstring 调用点行为一致）。
     """
 
-    def __init__(self, parent, title, prompt, *, initial="", ok_text="确定",
-                 cancel_text="取消"):
+    def __init__(self, parent, title, prompt, *, initial="", ok_text=texts.BTN_OK,
+                 cancel_text=texts.BTN_CANCEL):
         super().__init__(parent)
         self.title(title)
         theme.style_toplevel(self)

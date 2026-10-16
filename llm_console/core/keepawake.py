@@ -22,6 +22,7 @@ tick 重试）—— 宁可多保持一会儿唤醒，不做静默的反向伤�
 
 import os
 import threading
+from .. import texts
 
 ES_CONTINUOUS = 0x80000000
 ES_SYSTEM_REQUIRED = 0x00000001
@@ -155,7 +156,7 @@ class KeepAwake:
                 ok = self._exec(ES_CONTINUOUS | ES_SYSTEM_REQUIRED)
                 self._active = ok
                 last_flags = ES_CONTINUOUS | ES_SYSTEM_REQUIRED
-                self._last_error = "" if ok else "系统拒绝了睡眠抑制请求"
+                self._last_error = "" if ok else texts.KA_ELSE
             elif last_flags is not None:
                 # 从"要"变"不要"：清一次（单独的 ES_CONTINUOUS = 清除）
                 self._exec(ES_CONTINUOUS)

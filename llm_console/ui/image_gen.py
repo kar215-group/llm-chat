@@ -9,6 +9,7 @@ import time
 import tkinter as tk
 from tkinter import ttk
 
+from .. import texts
 from ..core import capability, cloudjobs, config, providers, sdprofile
 from . import theme
 from ..core.media import (batch_count_of, batch_out_paths, build_img_cmd,
@@ -39,18 +40,14 @@ class ImageGenMixin:
         sd = self.cfg.get("sd_dir", "")
         cli = os.path.join(sd, "sd-cli.exe")
         if not os.path.isfile(cli):
-            self._append("\n[提示] 未找到生图引擎 %s —— 请在 设置 → 本地模型 → 生图（sd.cpp） 里把「sd.cpp 目录」"
-                         "指向你部署的 sd.cpp（内含 sd-cli.exe）。\n"
-                         % (cli or "（还没填目录）"), "error")
+            self._append(texts.IMG_NO_ENGINE % (cli or texts.MEDIA_NO_DIR), "error")
             return
         # 扩散模型一律走统一出口（绝对路径）：菜单选中 → 默认生图模型 → 扫描到的第一个。
         # 原来这里是"取 basename 再拼回 image_model_dir"，模型不在那个目录就必然报未找到
         # （出厂默认 `image_model_dir` 为空时必坏，见 core/media.resolve_img_model_path）。
         diffusion = resolve_img_model_path(self.cfg)
         if not diffusion:
-            self._append("\n[提示] 未找到生图模型：把扩散权重（.gguf / .safetensors / .ckpt）放进"
-                         "生图模型目录，或在模型菜单里重新选一个。\n"
-                         "  目录在 设置 → 本地模型 → 生图（sd.cpp） 的「生图模型文件夹」里改。\n", "error")
+            self._append(texts.IMG_NO_MODEL, "error")
             return
         # 配套文件由模型族决定（Qwen-Image 要 LLM+VAE，Flux 要 clip_l+t5xxl+VAE，SDXL
         # 单文件就够了），所以按 sdprofile 的 require 预检；缺件就地报错，别把不存在
@@ -59,13 +56,10 @@ class ImageGenMixin:
         # 人工指定的配套件没找到：逐条点名（R-20——曾经静默换成自动发现的文件，
         # 用错 VAE/编码器只会表现为出图糊/风格错，用户查不到这项配置头上）
         for _s, _w in (files.get("manual_missing") or []):
-            self._append("\n[提示] 人工指定的%s没找到：%s——没有自动换成别的文件；"
-                         "请在设置里改正路径，或把该项清空改回自动发现。\n"
-                         % (sdprofile.slot_name(_s), _w), "error")
+            self._append(texts.MEDIA_MANUAL_MISSING % (sdprofile.slot_name(_s), _w), "error")
         missing = sdprofile.missing_slots(files["family"], files)
         if missing:
-            self._append("\n[提示] 这个生图模型（识别为 %s）缺配套文件：%s\n"
-                         "  放进生图模型目录，或在 设置 → 本地模型 → 生图（sd.cpp） 的「配套文件」里指名。\n"
+            self._append(texts.IMG_MISSING_SLOTS
                          % (sdprofile.label_of(files["family"]), "、".join(missing)), "error")
             return
         # 带图两档：**在 Popen 之前**定档并判这一族走不走得通。认不出族 / 这一族没这条通路
@@ -75,7 +69,7 @@ class ImageGenMixin:
         modes = capability.resolve_modes(self.cfg, files["family"])
         mode = str(ref_mode or "").strip()
         if refs and mode and not modes.get(mode, {}).get("ok"):
-            self._append("\n[提示] %s\n" % modes[mode]["why"], "error")
+            self._append(texts.IMG_MODE_WHY % modes[mode]["why"], "error")
             return
         mode = mode or capability.default_ref_mode(self.cfg, files["family"])
         used, dropped, drop_note = plan_ref_images(refs, mode)
@@ -125,15 +119,15 @@ class ImageGenMixin:
         # 消费掉输入框后立即重算星星显隐（R-89）：原来要靠 _render_status 的
         # 3 秒兜底才消失，期间点它没反应，看着像坏按钮
         self._opt_star_refresh()
-        self._append("\n【你】\n" + prompt + "\n", "user")
+        self._append(texts.MEDIA_USER_PREFIX + prompt + "\n", "user")
         prompt = self._doc_merge(prompt, doc)
         for p in used:
             self._append_image(p, max_w=320)
         if used:
             # 措辞一律问 capability（模式名只有那一处定义），不自己写"图生图"
-            self._append("[%s] 参考图 %d 张%s\n"
-                         % (capability.MODE_LABEL.get(mode, "带图"), len(used),
-                            "" if not drop_note else "（%s）" % drop_note), "meta")
+            self._append(texts.IMG_REF_LINE
+                         % (capability.MODE_LABEL.get(mode, texts.IMG_REF_GENERIC), len(used),
+                            "" if not drop_note else texts.IMG_DROP_PAREN % drop_note), "meta")
             if mode == capability.MODE_EDIT:
                 # 强度在这里算一次、拼命令行时原样交出去（`strength=`）：
                 # 回显说 0.7 而引擎收到 0.9 是这类 bug 最难查的一种。
@@ -145,9 +139,9 @@ class ImageGenMixin:
                 _hint = mask_hint(_st_tier, auto=not str(
                     self._img_strength_tier or "").strip(),
                     has_mask=bool(mask_path))
-                self._append("　重绘强度 %s（%s）%s%s\n"
+                self._append(texts.IMG_STRENGTH
                              % (st_value, st_why,
-                                "｜遮罩：只重绘涂抹区" if mask_path else "",
+                                texts.IMG_MASK_TAG if mask_path else "",
                                 _hint), "meta")
         self._img_gen += 1
         mygen = self._img_gen
@@ -197,7 +191,7 @@ class ImageGenMixin:
             self._img_busy = False
             self._img_proc = None
             self._set_busy_ui(False)
-            self._append("[错误] 启动生图引擎失败: %s\n" % e, "error")
+            self._append(texts.IMG_START_FAIL % e, "error")
             return
         # 日志路径走参数而不是 self._img_log：取消后立刻重开一次任务时，
         # 旧线程会把自己的输出追加进新任务的日志里（与生视频同一处理）
@@ -216,21 +210,20 @@ class ImageGenMixin:
         # 问题发给服务端再解析它的 401（与本地链路"Popen 前预检"是同一条纪律）
         err = cloud_media.check(self.cfg, provider, model, "image")
         if err:
-            self._append("\n[云端生图] %s\n" % err, "error")
+            self._append(texts.IMG_CLOUD_ERR % err, "error")
             return
         outdir = config.cloud_media_dir(self.cfg, "image")
         try:
             os.makedirs(outdir, exist_ok=True)
         except Exception as e:
-            self._append("\n[云端生图] 存放目录建不出来：%s\n"
-                         "  目录可在 设置 → 云端模型 → 生图 / 生视频 里改。\n" % e, "error")
+            self._append(texts.MEDIA_CLOUD_DIR_FAIL % (texts.IMG_CLOUD_TAG, e), "error")
             return
         out = os.path.join(outdir, time.strftime("img_%Y%m%d_%H%M%S") + ".png")
         # 预检（check + 建目录）都过了才消费输入框与附件（坑 133，同本地链路）
         self.input.delete("1.0", "end")
         self.clear_attachment()
         self._opt_star_refresh()      # 同 _start_chat_image（R-89）
-        self._append("\n【你】\n" + prompt + "\n", "user")
+        self._append(texts.MEDIA_USER_PREFIX + prompt + "\n", "user")
         prompt = self._doc_merge(prompt, doc)
         # 参考图在发送前已由 chat.send_message 过一遍 capability + ref_images_error（含档位
         # 校验），这里只负责显示回对话流并交给 worker（缩略图与本地生图同一套形态）。
@@ -244,22 +237,22 @@ class ImageGenMixin:
                 mode = providers.ref_image_mode(provider)
             for p in refs:
                 self._append_image(p, max_w=320)
-            self._append("[云端生图] %s：%d 张（%s）\n"
-                         % (capability.MODE_LABEL.get(mode, "参考图"), len(refs),
+            self._append(texts.IMG_CLOUD_REF_LINE
+                         % (capability.MODE_LABEL.get(mode, texts.IMG_REF_GENERIC_CLOUD), len(refs),
                             os.path.basename(refs[0])
-                            + ("等" if len(refs) > 1 else "")), "meta")
+                            + (texts.IMG_ETC if len(refs) > 1 else "")), "meta")
         # 费用就近打在对话流里，而且必须打在**提交之前**：生图不弹二次确认（同步、
         # 单次几分钱，每次都问只会让人不看内容按回车），但那不等于不告诉。
         # 单价按模型查，没填就明说"以账单为准"，不编数字。
-        self._append("[云端生图] 模型 %s · %s\n"
-                     % (model or "（未选）",
+        self._append(texts.IMG_CLOUD_MODEL_LINE
+                     % (model or texts.IMG_UNSELECTED,
                         providers.media_price_note(provider, providers.KIND_IMAGE,
                                                    0, model)), "meta")
         gen, q, stop = self._cloud_begin("image")
         self._cloud_pid = str(provider["id"])
         self._img_out = out
         self._img_log = config.media_log_path(self.cfg, out)
-        self._update_img_progress_line("☁ 云端生图中… %s（%s）"
+        self._update_img_progress_line(texts.IMG_CLOUD_RUNNING
                                        % (providers.short_of(model),
                                           provider.get("name") or ""))
         threading.Thread(target=self._cloud_image_worker,
@@ -362,7 +355,7 @@ class ImageGenMixin:
                         new_tid, status=st if st in cloudjobs.OPEN_STATUS else "unknown",
                         error=str(res.get("error") or "")[:600])
             if not paths:
-                q.put(("line", "[ERROR] %s" % (res.get("error") or "云端生图失败"), gen))
+                q.put(("line", "[ERROR] %s" % (res.get("error") or texts.IMG_CLOUD_FAILED), gen))
             q.put(("exit", 0 if paths else 1, gen))
         except Exception as e:
             # 兜底（2026-10-11 排查报告）：worker 体内任何未捕获异常都不许吞掉 exit
@@ -454,7 +447,7 @@ class ImageGenMixin:
             self._img_batch_n = int(mb.group(2))
             if self._img_batch_n > 1:
                 self._update_img_progress_line(
-                    "🎨 生成中… 第 %d/%d 张 · %ds"
+                    texts.IMG_PROG_BATCH
                     % (self._img_batch_i, self._img_batch_n, elapsed))
             return
         if "generating image" in line:
@@ -469,19 +462,19 @@ class ImageGenMixin:
                 if (getattr(self, "_img_batch_n", 1) or 1) > 1:
                     # 批量：带批号（W 2026-10-13 逐字批准）
                     self._update_img_progress_line(
-                        "🎨 生成中… 第 %d/%d 张 · %d/%d 步 · %ds"
+                        texts.IMG_PROG_BATCH_STEPS
                         % (max(1, self._img_batch_i), self._img_batch_n,
                            cur, total, elapsed))
                 else:
                     self._update_img_progress_line(
-                        "🎨 生成中… %d/%d 步 · %ds" % (cur, total, elapsed))
+                        texts.IMG_PROG_STEPS % (cur, total, elapsed))
             return
         if "decoding" in line and "latent" in line:
             self._saw_decode = True
             _n = getattr(self, "_img_batch_n", 1) or 1
             self._update_img_progress_line(
-                ("🎨 解码 %d 张图片… %ds" % (_n, elapsed)) if _n > 1
-                else ("🎨 解码图片… %ds" % elapsed))
+                (texts.IMG_DECODE_BATCH % (_n, elapsed)) if _n > 1
+                else (texts.IMG_DECODE % elapsed))
         elif "error" in low or "failed" in low or "out of memory" in low:
             # 报错当场固化在进度行上，别等它被进度行一起删掉
             self._update_img_progress_line("🎨 %s" % line.strip()[:160])
@@ -518,7 +511,7 @@ class ImageGenMixin:
             self.chat.configure(state="disabled")
         self._img_mark = None           # 收尾即封死 mark（同 _cancel_chat_image；R-13）
         if cancelled:
-            self._append("🎨 [已取消生成]\n", "meta")
+            self._append(texts.IMG_CANCELLED, "meta")
             self._append("────────────────\n", "meta")
             return
         if rc == 0 and found:
@@ -542,38 +535,38 @@ class ImageGenMixin:
                 if thumb is not None:
                     self.chat.image_create("end", image=thumb)
                     self.chat.insert("end", "  ", "meta")      # 图片与按钮的间距
-                btn = theme.button(self.chat, text="打开原图",
+                btn = theme.button(self.chat, text=texts.IMG_OPEN_ORIG,
                                  command=lambda p=out: os.startfile(p))
                 self.chat.window_create("end", window=btn)
                 self.chat.insert("end", "  ", "meta")
-                btn2 = theme.button(self.chat, text="打开所在文件夹",
+                btn2 = theme.button(self.chat, text=texts.MEDIA_OPEN_FOLDER,
                                   command=lambda p=out: self._open_containing(p))
                 self.chat.window_create("end", window=btn2)
-                self.chat.insert("end", "\n🎨 已保存：%s · 耗时 %ds\n" % (out, elapsed), "meta")
+                self.chat.insert("end", texts.IMG_SAVED % (out, elapsed), "meta")
                 extra = [p for p in (getattr(self, "_img_extra_paths", []) or [])
                          if p and os.path.isfile(p)]
                 if extra:
-                    self.chat.insert("end", "🎨 同批还有 %d 张：%s\n"
+                    self.chat.insert("end", texts.IMG_BATCH_MORE
                                      % (len(extra), "、".join(os.path.basename(p)
                                                               for p in extra)), "meta")
                 self.chat.insert("end", "────────────────\n", "meta")
                 self.chat.see("end")
             except Exception as e:
-                self._append("🎨 [回显失败: %s] 图片已保存：%s\n" % (e, out), "error")
+                self._append(texts.IMG_ECHO_FAIL % (e, out), "error")
             self.chat.configure(state="disabled")
         else:
             # 与生视频同一套失败回显：本地是"退出码 + 引擎末几行"，云端是"服务端原话"
-            src = "云端" if cloud else "引擎"
+            src = texts.MEDIA_SRC_CLOUD if cloud else texts.MEDIA_SRC_ENGINE
             # 前导换行：进度行是 delete(mark,"end") 整行删掉的，连它自带的那个换行一起没了，
             # 不加回来这行就会粘在上一行尾巴上
-            self._append("\n🎨 生成失败（%s）。\n"
-                         % ("退出码 %s" % rc if rc else "%s 没有交付文件" % src), "error")
+            self._append(texts.IMG_FAIL
+                         % (texts.MEDIA_RC % rc if rc else texts.IMG_NO_FILE % src), "error")
             tail = [x for x in (getattr(self, "_img_tail", []) or []) if x][-6:]
-            self._append("%s最后输出：\n  " % src + "\n  ".join(tail) + "\n" if tail
-                         else "（没有可用的输出）\n", "error")
+            self._append(texts.MEDIA_LAST_OUTPUT % src + "\n  ".join(tail) + "\n" if tail
+                         else texts.IMG_NO_OUTPUT, "error")
             log = getattr(self, "_img_log", "")
             if log and os.path.isfile(log):
-                self._append("完整日志：%s\n" % log, "meta")
+                self._append(texts.MEDIA_LOG_PATH % log, "meta")
             self._append("────────────────\n", "meta")
 
     def _cancel_chat_image(self):

@@ -34,6 +34,7 @@ import zipfile
 
 from . import updater
 from . import engine_install
+from .. import texts
 
 # 程序自己的打包资产与可执行文件名（打包口径见 .github/workflows/build.yml 与 03 §5）
 EXE_NAME = "llm-chat.exe"
@@ -94,14 +95,13 @@ def find_download(channel, fetch=None, token=None, cache=None, repo=updater.REPO
     latest = updater.pick_latest(items, channel)
     if latest is None:
         raise updater.UpdaterError(
-            "更新失败：%s 上没找到可比的%s Release，请稍后重试。"
+            texts.SU_CAT
             % (repo, updater.channel_label(channel)))
     tag = str(latest.get("tag_name") or "")
     url, digest = pick_asset(latest)
     if not url:
         raise SelfUpdateError(
-            "更新失败：线上版本 %s 没挂 Windows 安装包（%s），"
-            "请到发布页手动下载。" % (updater.display_version(tag), repo))
+            texts.SU_CAT_2 % (updater.display_version(tag), repo))
     size = 0
     for a in latest.get("assets") or []:            # 资产大小给"磁盘还装不装得下"用
         a = a or {}
@@ -154,8 +154,7 @@ def download_zip(url, dest, emit=None, stop_flag=None, digest="", retries=None):
     时宁可让用户去发布页手动下，也不做无校验的自替换。
     """
     if not str(digest or "").strip():
-        return False, ("拿不到这个安装包的官方校验值（sha256），不敢自动更换程序。"
-                       "请到发布页手动下载。")
+        return False, (texts.SU_L1)
     kw = {} if retries is None else {"retries": retries}
     return engine_install.download(url, dest, emit=emit, stop_flag=stop_flag,
                                    digest=digest, **kw)
@@ -174,17 +173,17 @@ def extract_exe(zip_path, root):
             bad = next((n for n in z.namelist()
                         if engine_install._zip_member_unsafe(n)), None)
             if bad is not None:
-                return None, "压缩包里的文件路径不对（%s），已拒收。" % bad
+                return None, texts.SU_CAT_3 % bad
             z.extractall(root)
     except SelfUpdateError:
         raise
     except Exception as e:
-        return None, "解压失败：%s" % e
+        return None, texts.SU_CAT_4 % e
     if not engine_install._flatten_for_exe(root, EXE_NAME):
-        return None, "压缩包里没找到 %s —— 这个包不是本程序发布的安装包。" % EXE_NAME
+        return None, texts.SU_CAT_5 % EXE_NAME
     exe = os.path.join(root, EXE_NAME)
     if not os.path.isfile(exe):
-        return None, "压缩包里没找到 %s。" % EXE_NAME
+        return None, texts.SU_CAT_6 % EXE_NAME
     return exe, ""
 
 
@@ -223,11 +222,9 @@ def smoke_test(exe_path, expected, timeout=SMOKE_TIMEOUT, runner=None):
         r = run([exe_path, "--version"], capture_output=True, timeout=timeout,
                 env=child_env())
     except Exception as e:
-        return False, ("新版启动自检没跑起来（%s），不敢替换正在用的程序。"
-                       "请到发布页手动下载。" % e)
+        return False, (texts.SU_CAT_7 % e)
     if getattr(r, "returncode", 1) != 0:
-        return False, ("新版启动自检失败（退出码 %s），不敢替换正在用的程序。"
-                       "请到发布页手动下载。" % (
+        return False, (texts.SU_CAT_8 % (
                            getattr(r, "returncode", "?"),))
     txt = ""
     for stream in (getattr(r, "stdout", None), getattr(r, "stderr", None)):
@@ -235,8 +232,7 @@ def smoke_test(exe_path, expected, timeout=SMOKE_TIMEOUT, runner=None):
             stream, (bytes, bytearray)) else str(stream or "")
     m = re.search(r"LLM Chat\s+(\S+)", txt)
     if m and m.group(1).lstrip("vV") != str(expected).lstrip("vV"):
-        return False, ("新版自检报的版本是 %s，不是要装的 %s —— "
-                       "发布包可能与 tag 对不上，已停下。"
+        return False, (texts.SU_CAT_9
                        % (m.group(1), updater.display_version(expected)))
     return True, ""
 
@@ -358,19 +354,15 @@ def apply_update(new_exe, cur_exe, expect=None):
         os.close(pfd)
         os.remove(probe)
     except Exception as e:
-        return False, ("程序所在文件夹写不进去（%s）。把它整个文件夹挪到可写的普通位置"
-                       "（别放在 C:\\Program Files 这类系统目录）再更新，"
-                       "或到发布页手动下载。" % e)
+        return False, (texts.SU_CAT_10 % e)
     if stamp_changed(cur_exe, expect):
-        return False, ("本机程序文件已经被另一个窗口更新过了。请关闭本程序，"
-                       "重新打开就是新版；这次更新到此为止。")
+        return False, (texts.SU_L1_2)
     old = pending_old(cur_exe)
     _try_remove(old)            # 每次只留一代：先清上一代（删不掉也无妨，改名那步会兜住）
     try:
         os.replace(cur_exe, old)
     except Exception as e:
-        return False, ("改不动正在运行的程序（%s）。可能是杀毒软件在拦，也可能是程序文件"
-                       "被别的窗口占用；请关掉其他本程序窗口后重试，或到发布页手动下载。" % e)
+        return False, (texts.SU_CAT_11 % e)
     # 新版先落 `cur_exe + ".new"` 再**同目录原子改名**：复制中途断电最多留下半个 .new，
     # 正位上要么没有、要么是完整的 —— 半份 exe 冒充程序那种最坏局面不再出现（2026-10-06）。
     new_tmp = cur_exe + ".new"
@@ -383,7 +375,7 @@ def apply_update(new_exe, cur_exe, expect=None):
             os.replace(old, cur_exe)
         except Exception:
             pass
-        return False, "新版放不进程序目录（%s），已恢复原样，本机版本没有动。" % e
+        return False, texts.SU_CAT_12 % e
     return True, ""
 
 
