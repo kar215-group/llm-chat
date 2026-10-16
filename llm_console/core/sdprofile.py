@@ -468,8 +468,8 @@ def detect_file(path, kind=None, forced="", name=None):
 # 没在开发机实测过的视频家族，其张量名只能当**辅助**：要求"文件名带线索 + 至少 N 个标记
 # 命中"才算视频主体。原因是 `patch_embedding` 这类名字在 PixArt / Flux 等图模型里也能见到，
 # 单凭张量名会把生图模型抢进视频列表。判错方向的代价是"这个视频模型进不了菜单"
-# ——那还有 设置 → 本地模型 → 生视频（sd.cpp） 的手填文件名 这条出口救，比"生图模型莫名其妙
-# 消失"轻得多。
+# ——2026-10-16 起生视频一律认菜单选中的那个主体（旧「扩散主体文件名」手填出口已删），
+# 所以认错方向的代价以"菜单里看不到"为准，别再退回手填思路。
 UNVERIFIED_VIDEO = (
     ((b"patch_embedding", b"text_embedding", b"time_projection",
       b"blocks.0.self_attn.qkv"), 2, ("wan", "ti2v", "t2v", "i2v", "vace")),

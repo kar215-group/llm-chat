@@ -332,15 +332,35 @@ class _RemoteHandler(http.server.BaseHTTPRequestHandler):
         dev_name = name or os_label
         auto = secrets.find_persona_by_cid(cid) if cid else None
         # 电脑端确认弹窗的决策：False=拒绝；{"pid":"p_N"}=并入该逻辑设备；
-        # {"pid":""}/缺省=新设备。候选列表给弹窗画单选（坑 283）
+        # {"pid":""}/缺省=新设备。候选列表给弹窗画单选（坑 283）。
+        # 候选只列**同系统**设备（坑 291，W 2026-10-16）：「是不是之前同一台」
+        # 只在系统对得上时才是真问题，unknown 不与谁同系统；cid 命中的那台
+        # 即便系统记录对不上也照列——128bit 随机 id 命中基本就是同一设备
+        # （W 2026-10-16 拍板），不带上它、直接按新设备落盘会把同一 cid 挂到
+        # 两台 persona 上，此后 find_persona_by_cid 撞号返 None、永远无法自动归并。
+        # 候选顺序固定按首次配对时间升序（pool 已按 added 升序，补插 cid 命中
+        # 后重排一次保序）；询问本身照发（无候选时弹窗只剩允许/拒绝，W 拍板）。
+        pool = secrets.personas_with_creds()
+        auto_id = str((auto or {}).get("id", ""))
+        cands = [{"id": c.get("id"), "name": c.get("name"),
+                  "os_set": c.get("os_set") or [], "added": c.get("added") or "",
+                  "last_seen": c.get("last_seen") or ""}
+                 for c in pool
+                 if os_key not in ("", "unknown")
+                 and os_key in (c.get("os_set") or [])]
+        if auto_id and all(c["id"] != auto_id for c in cands):
+            hit = next((c for c in pool if c.get("id") == auto_id), None)
+            if hit:
+                cands.append({"id": hit.get("id"), "name": hit.get("name"),
+                              "os_set": hit.get("os_set") or [],
+                              "added": hit.get("added") or "",
+                              "last_seen": hit.get("last_seen") or ""})
+        cands.sort(key=lambda c: str(c.get("added") or ""))
         decision = self.server.confirm_pair({
             "ip": ip, "name": dev_name, "os_key": os_key, "os": os_label,
             "agent": ua[:160], "cid": cid or "",
-            "auto": (auto or {}).get("id", ""),
-            "candidates": [{"id": c.get("id"), "name": c.get("name"),
-                            "os_set": c.get("os_set") or [],
-                            "last_seen": c.get("last_seen") or ""}
-                           for c in secrets.personas_with_creds()]})
+            "auto": auto_id,
+            "candidates": cands})
         if not decision:
             _audit(self, "pair", False, "denied on PC")
             return self._json(403, {"error": texts.REM_DERROR_2})

@@ -121,7 +121,7 @@ def _is_mmproj(name):
 
 
 def extra_sources(cfg):
-    """「手动定向模型」加入的来源（文件夹或 `.gguf` 完整路径），只保留**仍存在**的。
+    """「模型来源」窗加入的附加来源（文件夹或 `.gguf` 完整路径），只保留**仍存在**的。
 
     这些路径只登记在配置里（`extra_models`），**不移动任何文件**；扫描时按"额外的模型目录 /
     额外的模型文件"处理（见 `scan_models` / `video_scan_dirs`）。已删掉的项在这里滤掉，
@@ -263,14 +263,16 @@ def video_component_role(path):
     return sdprofile.video_role(s[1], os.path.basename(path))
 
 def video_scan_dirs(cfg):
-    """视频组件的扫描目录：配置的视频目录优先，其次模型目录顶层与其一级子目录。
+    """视频组件的扫描目录：**默认约定** `<模型目录>/生视频` 优先，其次模型目录顶层
+    与其一级子目录 + 「模型来源」登记的来源树。
 
-    生图目录不参与（那里的 kv=0 文件是生图扩散模型，不是视频组件）。
+    生图目录（默认 `<模型目录>/生图`）不参与（那里的 kv=0 文件是生图扩散模型，
+    不是视频组件）。2026-10-16 收口：`video_model_dir` / `image_model_dir` 两个
+    覆盖键已删，只剩默认推导。
     """
     d = cfg.get("models_dir") or os.path.dirname(cfg.get("model", "")) or "."
-    vd = cfg.get("video_model_dir") or os.path.join(d, VIDEO_SUBDIR)
-    img_dir = os.path.normpath(cfg.get("image_model_dir")
-                               or os.path.join(d, IMAGE_SUBDIR))
+    vd = os.path.join(d, VIDEO_SUBDIR)
+    img_dir = os.path.normpath(os.path.join(d, IMAGE_SUBDIR))
     out = []
     for folder in (vd, d):
         np = os.path.normpath(folder) if folder else ""
@@ -326,8 +328,7 @@ def scan_models(cfg):
     → 并入聊天列表（可看图）。
     """
     d = cfg.get("models_dir") or os.path.dirname(cfg.get("model", "")) or "."
-    img_dir = os.path.normpath(cfg.get("image_model_dir")
-                               or os.path.join(d, IMAGE_SUBDIR))
+    img_dir = os.path.normpath(os.path.join(d, IMAGE_SUBDIR))   # 默认约定（2026-10-16 去覆盖键）
 
     def _ggufs(folder):
         try:
@@ -638,7 +639,7 @@ def find_vl_pairs(cfg):
     在同目录只有一个能聊天的模型时也认给它。
     """
     d = cfg.get("models_dir") or os.path.dirname(cfg.get("model", "")) or "."
-    img_dir = cfg.get("image_model_dir") or os.path.join(d, IMAGE_SUBDIR)
+    img_dir = os.path.join(d, IMAGE_SUBDIR)      # 默认约定（2026-10-16 去覆盖键）
     folders = _expand_dirs(d)
     if (os.path.isdir(img_dir)
             and os.path.normpath(img_dir) not in [os.path.normpath(f) for f in folders]):

@@ -95,7 +95,7 @@ NAV_SPEC = [
          "help": "扫描模型目录、补全每个模型缺的层数 / 上下文 / 视觉投影器记录，"
                  "以及把散落的模型文件整理成「一个模型一个文件夹」。\n"
                  "进这一页会自动补全一次（10 分钟内不重复）；缺归属的文件可用"
-                 "「手动定向模型」把文件夹或单个 .gguf 加进来。\n"
+                 "「模型来源…」把文件夹或单个 .gguf 加进来。\n"
                  "整理是**先预览、后执行，只移动不删除**；判不出归属的文件保持原位。"},
         # 「模型文件管理」与「引擎管理」本来就同一页，左栏合成一项（W 2026-10-02：两项
         # 各自一行是重复劳动）。`nav_hide` 让它不在左栏成行，但区块照旧建、jump="eng"
@@ -108,7 +108,7 @@ NAV_SPEC = [
                  "引擎已在自己机器上、只是换了位置：进这一屏会自动扫一遍软件所在文件夹，"
                  "也可以用「手动定向」自己指 —— 两个引擎与模型文件同处一个目录也认得出。\n"
                  "CUDA 档要连运行库一起下（几百 MB），所以下之前会先说清多大；"
-                 "装完回「服务参数」把路径指过去。\n"
+                 "装完会自动指到刚装的那份。\n"
                  "「检查更新」联网查可用版本，查到新版本它自己变成「更新引擎」，"
                  "装的过程中可点「取消安装」；网络不通下不动时还有「复制下载链接」"
                  "（给的是选中档位的安装包直链）。"},
@@ -364,27 +364,6 @@ def _upd_help_text():
     if secrets.get_github_token():
         tail += texts.SET_UPD_HELP_TEXT_TAIL_2
     return (texts.SET_UPD_HELP_TEXT_CAT + tail + "。")
-
-
-def _local_model_shown(cfg):
-    """"服务参数 → model"只回显本地路径。该键是本地路径与云端复合 id `"pid::model"`
-    共用的（坑 146），原样回显会把云端内部 id 摆到本地参数里。"""
-    return "" if providers.is_cloud(cfg) else str(cfg.get("model", "") or "")
-
-
-def _kind_of_local_model(cfg, path):
-    """按扫描结果定 chat / image；扫不到返回 None，调用方保持原值（猜错类别比留错更糟）。"""
-    try:
-        probe = dict(cfg)
-        probe["model"] = str(path or "")
-        _d, chat, image = scan_models(probe)
-    except Exception:
-        return None
-    p = os.path.normpath(str(path or ""))
-    for lst, kind in ((image, "image"), (chat, "chat")):
-        if any(os.path.normpath(x) == p for x in lst):
-            return kind
-    return None
 
 
 def _nav_leaves(items=None, out=None):
@@ -968,13 +947,11 @@ class SettingsMixin:
         @section("local_text", "svc")
         def _t2(t2, r2):
 
-            # 「model」只回显本地路径：cfg["model"] 是本地路径与云端复合 id 共用的键（坑 146），
-            # 原样回显会让本地参数里出现云端模型；写回语义见 _apply_settings。
-            v["model"] = tk.StringVar(value=_local_model_shown(self.cfg))
-            ent(t2, r2, "model", "model",
-                texts.SET_LTSVC_A4, width=30)
-            ent(t2, r2, "models_dir", "models_dir",
-                texts.SET_LTSVC_A4_2, width=30)
+            # 2026-10-16 清理（W 定）：原来这里还有 model（模型位置）/ models_dir（模型文件夹）/
+            # exe（server 路径）三行 —— "手填路径"时代的遗留设计。选模型的正路是主界面模型
+            # 菜单（外挂来源走「模型来源…」），模型目录与引擎归「模型文件与引擎」页管
+            # （模型来源… / 引擎管理），三行全是重复入口，已删；连坑 146 那套
+            # 「cloud id 不能串进本地参数」的特例写回也一并消失（见 _apply_settings）。
             # ngl：显示/修改的是"当前模型"的值（按模型分别记忆）
             v["ngl"] = tk.StringVar(value=str(current_ngl(self.cfg)))
             e_ngl = theme.entry(t2, textvariable=v["ngl"], width=8)
@@ -1001,12 +978,10 @@ class SettingsMixin:
                               values=["default", "off", "budget"], width=8, state="readonly")
             row(t2, r2, "reasoning", cb,
                 texts.SET_LTSVC_A4_6)
-            ent(t2, r2, "exe", texts.SET_LTSVC_A3,
-                texts.SET_LTSVC_A4_7, width=30)
 
             # 「高级参数」：硬件属性（自动探测预填，平时不用看）、线程数、
             # 思考预算（只在 reasoning=budget 时用）、附加命令行 —— 都是"配一次就不管"的，
-            # 收起来；常用那几个（模型 / 层数 / 上下文 / 端口 / 思考模式 / server 路径）留在外面
+            # 收起来；常用那几个（层数 / 上下文 / 端口 / 思考模式）留在外面
             fold_svc = "local_text:svc"
             _fold_head(t2, r2, fold_svc,
                        ("gpu_name", "vram_gb", "ram_gb", "threads",
@@ -1035,8 +1010,10 @@ class SettingsMixin:
         def _t3(t3, r3):
             if simple:
                 # 普通用户模式（2026-10-07 W 定）：分辨率 + 输出目录 + 打开输出目录 三件；
-                # 引擎目录 / 模型文件夹 / 模型族 / 步数 / CFG 与全部配套件都在高级模式
+                # 模型文件夹 / 模型族 / 步数 / CFG 与全部配套件都在高级模式
                 # （程序按扫描与模型族表自动安排，普通用户不需要碰）。
+                # 引擎目录（sd_dir）2026-10-16 起两档都不再放了 —— 引擎由「模型文件与引擎 →
+                # 引擎管理」统一管（进页自动定向 + 手动定向 + 装完自动指路）。
                 _size_entry(t3, r3, "img_size", texts.SET_LMIMG_A3,
                     texts.SET_LMIMG_A4,
                     width=12, hint=texts.SET_LMIMG_N)
@@ -1067,12 +1044,10 @@ class SettingsMixin:
 
             img_state = tk.StringVar(value="")
             _state_row(t3, r3, img_state, _fill_state, img_state)
-            ent(t3, r3, "sd_dir", texts.SET_LMIMG_A3_2,
-                texts.SET_LMIMG_A4_4, width=30)
-            ent(t3, r3, "image_model_dir", texts.SET_LMIMG_A3_3,
-                texts.SET_LMIMG_A4_5, width=30)
-            ent(t3, r3, "img_model_file", texts.SET_LMIMG_A3_4,
-                texts.SET_LMIMG_A4_6, width=30)
+            # 「生图模型文件夹 / 默认生图模型」两行 2026-10-16 已删（W 定）：用哪个模型
+            # 一律认主菜单里选中的那个（坏选中就报错让重选，不静默换）；"模型在哪"归
+            # 「模型来源…」——旧两个键既不显示也不再生效，老配置目录会在 load_config
+            # 里一次性折进 extra_models（见 core/config.py 迁移段、`13` §7.58）。
             # 模型族：识别结果只决定"拼哪些参数、要哪些配套件"，参数值仍来自下面这些设置
             _fam_opts = sdprofile.family_choices("image")
             _code2label = {c: t for c, t in _fam_opts}
@@ -1092,11 +1067,14 @@ class SettingsMixin:
                 row=_fam_row, column=2, sticky="w", padx=(0, 10), pady=5)
 
             def refresh_img_note(*_a):
-                """回显识别结果。内容长度固定 —— 状态类 Label 拼长文案会引发整页重排（坑 92）。"""
+                """回显识别结果，按**当前选中的**生图模型现算（2026-10-16 收口）。
+                内容长度固定 —— 状态类 Label 拼长文案会引发整页重排（坑 92）。"""
                 code = {t: c for c, t in sdprofile.family_choices("image")}.get(
                     v["img_family"].get(), sdprofile.AUTO)
-                img_dir = str(self.cfg.get("image_model_dir", "") or "")
-                path = os.path.join(img_dir, str(self.cfg.get("img_model_file", "") or ""))
+                path = media.resolve_img_model_path(self.cfg)
+                if not path:
+                    img_note.set(texts.SET_LMIMG_N_15)
+                    return
                 fid, _basis, _ = sdprofile.detect_file(path, kind="image", forced=code)
                 # 只留族名：「通用（只喂文件）」那半句是给下拉看的说明，贴进状态行
                 # 会把这一行顶出右边界（坑 76）
@@ -1203,15 +1181,61 @@ class SettingsMixin:
         @section("local_media", "vid")
         def _t3b(t3b, r3b):
             if simple:
-                # 普通用户模式（2026-10-07 W 定）：分辨率 / 帧率 / 帧数 / 输出目录 /
+                # 普通用户模式（2026-10-07 W 定）：分辨率 / 帧率 / 秒数 / 输出目录 /
                 # 打开输出目录 五件；主体文件 / 模型族 / 步数 / CFG 与全部配套件在高级模式。
+                # 「秒数」（2026-10-17 W）：普通用户想的是"生成多长"，不是帧数——
+                # 落盘仍折回 vid_frames = 秒数 × 帧率（帧是引擎口径，1~2000 帧的
+                # 区间与高级模式共用 _NUM_RANGE 一处）；回显 = cfg 帧数 ÷ cfg 帧率、
+                # 一位小数。帧本来就会被引擎"自动对齐"（坑 39），回显舍入的 ±1 帧
+                # 差不改变出片档位。
                 _size_entry(t3b, r3b, "vid_size", texts.SET_LMIMG_A3,
                     texts.SET_LMVID_A4, width=12)
                 ent(t3b, r3b, "vid_fps", texts.SET_LMVID_A3,
                     texts.SET_LMVID_A4_2)
-                ent(t3b, r3b, "vid_frames", texts.SET_LMVID_A3_2,
-                    texts.SET_LMVID_A4_3,
-                    hint=texts.SET_LMVID_N)
+
+                def _fps_int(raw):
+                    try:
+                        n = int(str(raw).strip())
+                    except Exception:
+                        n = 0
+                    return n if n > 0 else int(DEFAULT_CONFIG["vid_fps"])
+
+                def _frames_int(raw):
+                    try:
+                        n = int(str(raw).strip())
+                    except Exception:
+                        n = 0
+                    return n if n > 0 else int(DEFAULT_CONFIG["vid_frames"])
+
+                v["_vid_sec"] = tk.StringVar(t3b, value="%g" % round(
+                    _frames_int(self.cfg.get("vid_frames"))
+                    / float(_fps_int(self.cfg.get("vid_fps"))), 1))
+                _sec_ent = theme.entry(t3b, textvariable=v["_vid_sec"], width=8)
+                row(t3b, r3b, texts.SET_LMVID_SEC, _sec_ent,
+                    texts.SET_LMVID_SEC_DESC, hint=texts.SET_LMVID_SEC_HINT)
+
+                def _sec_hook():
+                    """「秒数」→ vid_frames = 秒数 × 帧率（底部「保存」钩子）。
+
+                    坏值开口不落盘（与 _num_error 同口径）：非数字回「要填数字」，
+                    折出的帧数出 1~2000 界就按**当前帧率**反算成秒数区间告诉用户。
+                    """
+                    raw = str(v["_vid_sec"].get()).strip()
+                    try:
+                        sec = float(raw)
+                    except Exception:
+                        return False, (texts.SET_NUM_ERROR_CAT_3
+                                       % (texts.SET_LMVID_SEC, raw[:20]))
+                    fps = _fps_int(v["vid_fps"].get())
+                    lo, hi = _NUM_RANGE["vid_frames"]
+                    frames = sec * fps
+                    if not (sec > 0) or not (lo <= frames <= hi):
+                        return False, (texts.SET_NUM_ERROR_CAT_4
+                                       % (texts.SET_LMVID_SEC, lo / float(fps),
+                                          hi / float(fps), sec))
+                    self.cfg["vid_frames"] = int(round(frames))
+                    return True, ""
+                save_hooks[t3b] = _sec_hook
                 ent(t3b, r3b, "vid_output_dir", texts.SET_OPEN_OUTDIR_A0,
                     texts.SET_LMVID_A4_4,
                     width=30, hint=texts.SET_LMIMG_N_2)
@@ -1239,11 +1263,9 @@ class SettingsMixin:
 
             vid_state = tk.StringVar(value="")
             _state_row(t3b, r3b, vid_state, _fill_state, vid_state)
-            ent(t3b, r3b, "video_model_dir", texts.SET_LMVID_A3_3,
-                texts.SET_LMVID_A4_6,
-                width=30)
-            ent(t3b, r3b, "vid_model_file", texts.SET_LMVID_A3_4,
-                texts.SET_LMVID_A4_7, width=30)
+            # 「视频模型文件夹 / 扩散主体文件名」两行 2026-10-16 已删（W 定）：主体一律认
+            # 主菜单里选中的那个生视频模型（坏选中报错让重选，不再静默换"扫描第一个"）；
+            # "组件在哪"归「模型来源…」（见 core/config.py 迁移段、`13` §7.58）。
             _vf_opts = sdprofile.family_choices("video")
             _vf2code = {t: c for c, t in _vf_opts}
             v["vid_family"] = tk.StringVar(
@@ -1260,18 +1282,18 @@ class SettingsMixin:
                 row=_vfam_row, column=2, sticky="w", padx=(0, 10), pady=5)
 
             def refresh_vid_note(*_a):
-                """回显识别结果：一行、长度固定（长文案塞进 Label 会引发整页重排，坑 92）。"""
+                """回显识别结果，按**当前选中的**生视频模型现算（2026-10-16 收口）；
+                一行、长度固定（长文案塞进 Label 会引发整页重排，坑 92）。"""
                 code = {t: c for c, t in sdprofile.family_choices("video")}.get(
                     v["vid_family"].get(), sdprofile.AUTO)
-                vdir = str(self.cfg.get("video_model_dir", "") or "")
-                name = str(self.cfg.get("vid_model_file", "") or "")
-                path = os.path.join(vdir, name) if name else ""
-                if not (path and os.path.isfile(path)):
-                    try:
-                        vids, _e = scan_video_models(self.cfg)
-                        path = vids[0] if vids else ""
-                    except Exception:
-                        path = ""
+                cur = str(self.cfg.get("model") or "")
+                path = ""
+                if str(self.cfg.get("model_kind") or "") == "video" and cur:
+                    if os.path.isfile(cur):
+                        path = cur
+                if not path:
+                    vid_note.set(texts.SET_LMVID_N_6)
+                    return
                 fid, _basis, _ = sdprofile.detect_file(path, kind="video", forced=code)
                 vid_note.set(texts.SET_LMIMG_CAT_2 % sdprofile.label_of(fid).split("（")[0])
 
@@ -4344,21 +4366,15 @@ class SettingsMixin:
                     rf()
 
                 def _apply_dir(kk, folder):
-                    """把选中的文件夹写回该引擎的指路项，并把已建的输入框一起回填。
+                    """把选中的文件夹写回该引擎的指路项。
 
                     形状归一（llama 存 exe 路径 / sd 存目录）在 `engine_install.set_dir` 一处
                     —— **首次打开的自动扫描走的是同一个函数**，不在这里再写一遍（坑 128）。
-                    回填是为了免得底部「保存」把旧值又写回去（那个页可能已经建过输入框）。
+                    （原来还要回填「服务参数」的 exe 与生图页的 sd_dir 输入框防旧值回写；
+                    那两行 2026-10-16 已删 —— 这两个键现在只有本屏一处入口，没人再会覆盖它们。）
                     """
                     engine_install.set_dir(self.cfg, kk, folder)
                     save_config(self.cfg)
-                    key2 = engine_install.path_key(kk)
-                    var = v.get(key2) if isinstance(v, dict) else None
-                    if var is not None:
-                        try:
-                            var.set(self.cfg[key2])
-                        except Exception:
-                            pass
                     # 引擎刚就位往往就是"第一个可用模型"的时刻（模型早就下好了只差引擎）
                     # ⇒ 立刻切过去，不等状态轮询（坑 150）
                     try:
@@ -4796,11 +4812,11 @@ class SettingsMixin:
         def _t5(t5, r5):
             if simple:
                 # 普通用户模式（2026-10-07 W 定）：管理本地模型 / 全部重新计算 /
-                # 手动定向模型 三件 + 引擎管理那一屏（eng 区块本身不变）。
+                # 模型来源 三件 + 引擎管理那一屏（eng 区块本身不变）。
                 # 「补全缺失项」与「整理模型文件夹」在高级模式；进页自动补全照旧在后台跑。
                 for _txt, _cmd in ((texts.SET_FILES_L0, self.open_local_models),
                                    (texts.MDL_RECALC_TITLE, lambda: self._manual_scan(True)),
-                                   (texts.MDL_POINT_TITLE, self._manual_point_model)):
+                                   (texts.MDL_POINT_BTN, self._open_model_sources)):
                     theme.button(t5, text=_txt, width=18, command=_cmd).grid(
                         row=r5["i"], column=0, columnspan=3, sticky="w", pady=4)
                     r5["i"] += 1
@@ -4845,8 +4861,8 @@ class SettingsMixin:
             fr2 = ttk.Frame(t5)
             theme.button(fr2, text=texts.MDL_TIDY_TITLE, width=18,
                        command=self._open_tidy_dialog).pack(side="left", padx=(0, 6))
-            theme.button(fr2, text=texts.MDL_POINT_TITLE, width=18,
-                       command=self._manual_point_model).pack(side="left")
+            theme.button(fr2, text=texts.MDL_POINT_BTN, width=18,
+                       command=self._open_model_sources).pack(side="left")
             row(t5, r5, texts.SET_FILES_A2_3, fr2,
                 texts.SET_FILES_A4_3)
 
@@ -5142,19 +5158,10 @@ class SettingsMixin:
                 _p = media.parse_size(c.get(k, ""))
                 if _p:
                     c[k] = "%dx%d" % _p
-        # 「model」不在 STR_KEYS 里，这里单独处理：留空 = 不动当前选择（否则选着云端模型时
-        # 会被抹成切回本地）；非空 = 明确切到该本地模型，连带复位 model_provider（坑 146）。
-        if "model" in v:
-            _m = str(v["model"].get()).strip()
-            if _m:
-                c["model"] = _m
-                c["model_provider"] = providers.LOCAL
-                c["model_auto_picked"] = True   # 用户自己选的 ⇒ 别再自动接管（坑 150）
-                _k = _kind_of_local_model(c, _m)
-                if _k:
-                    c["model_kind"] = _k
-            elif not providers.is_cloud(c):
-                c["model"] = ""          # 本地选中且被清空 = 用户不要这个模型了
+        # 「model」的写回特例（坑 146）已随「服务参数」那一栏一起删除（2026-10-16）：
+        # 那个入口曾经是"手填路径"时代的遗留，写回语义（留空≠切回本地、非空=切回本地）
+        # 整段只服务于它；现在选模型只有主界面菜单与「模型来源…」两条正路，
+        # 不经设置页保存。
         # 模型族下拉显示的是中文标签，配置里要存回 sdprofile 的家族代码；
         # 选"自动判断"存空串——别让界面文案跑到配置里去。
         for k, kind in (("img_family", "image"), ("vid_family", "video")):

@@ -341,7 +341,12 @@ def revoke_persona(pid):
 
 
 def personas_with_creds():
-    """已配对设备窗的聚合视图：每个**存活** persona 一条，含入口清单与最近活跃。"""
+    """已配对设备窗的聚合视图：每个**存活** persona 一条，含入口清单与最近活跃。
+
+    顺序固定按**首次配对时间**（persona 的 added，建号时写入、合并不改写）
+    升序（坑 291）：设备窗与配对确认候选共用本视图，都要一个不随最近活跃
+    漂移的稳定顺序；added 同分钟的按落盘序稳定排。
+    """
     with _LOCK:
         data = load_secrets()
         devs = _devices_locked(data)
@@ -358,7 +363,7 @@ def personas_with_creds():
                     "cids": list(p.get("cids") or []),
                     "added": p.get("added") or "", "last_seen": last,
                     "credentials": creds})
-    out.sort(key=lambda x: x["last_seen"], reverse=True)
+    out.sort(key=lambda x: x["added"])
     return out
 
 def remote_devices():

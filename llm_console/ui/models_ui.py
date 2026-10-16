@@ -341,7 +341,9 @@ class ModelsMixin:
         if kind == "image":
             self._append(texts.MDL_PICK_IMAGE % disp, "meta")
         elif kind == "video":
-            missing = resolve_video_files(self.cfg)["missing"]
+            # 传刚选中的 path：缺件回显要按**这一个**模型算（不传会按 resolve 的默认口径，
+            # 2026-10-16 收口前它可能描述的是另一个模型）
+            missing = resolve_video_files(self.cfg, path)["missing"]
             self._append(texts.MDL_PICK_VIDEO
                          % (disp, texts.MDL_VIDEO_MISSING % "、".join(missing) if missing else ""),
                          "meta")
@@ -859,13 +861,15 @@ class ModelsMixin:
         threading.Thread(target=self._scan_and_fill, args=(force,),
                          daemon=True).start()
 
-    # ---- 手动定向模型（登记额外来源，不动文件；W 2026-10-05）----
-    def _manual_point_model(self):
-        """「手动定向模型」：选一个文件夹或一个模型文件加入来源。
+    # ---- 模型来源（主目录 + 附加来源的完整管理：增 / 删 / 换；W 2026-10-16 重构）----
+    def _open_model_sources(self):
+        """「模型来源…」窗：说清"模型在哪"的**唯一入口**。
 
-        文件夹按"一个目录"并入扫描（里面能聊天的 .gguf 与生图 / 生视频权重一起收），
-        单文件按它自己的类型收进对应清单。**只登记路径、不移动文件**（判据在
-        `models.extra_sources`，扫描侧 `scan_models` / `video_scan_dirs` 会认）。
+        重构口径（W 2026-10-16，坑 287）：此前"服务参数 → 模型文件夹"（手填 models_dir）、
+        首次打开的自动定向、以及只能加不能删的「手动定向模型」三处各说各话，整理判
+        "分散"时还把人支去别处改配置。现在：主目录（models_dir）可更换（不可移除）、
+        附加来源（extra_models）可增可删，全部**只登记路径、不移动文件**；整理"分散"
+        的出路就在本窗（移除多余来源 / 换主目录，见 MDL_TIDY_SCATTERED）。
         """
         if self._any_busy():
             messagebox.showinfo(texts.MDL_POINT_TITLE, texts.MDL_BUSY_POINT)
@@ -880,34 +884,107 @@ class ModelsMixin:
         d = tk.Toplevel(host)
         d.withdraw()                    # 先藏起来，摆正了再显示（否则左上角闪一下）
         d.title(texts.MDL_POINT_TITLE)
-        theme.style_toplevel(d)   # 经典背景 + 标题栏两件套（坑 186）
-        ttk.Label(d, text=texts.MDL_POINT_HEAD,
-                  font=("Microsoft YaHei UI", 10, "bold")).pack(
-            anchor="w", padx=14, pady=(12, 2))
-        ttk.Label(d, text=texts.MDL_POINT_HINT,
-                  style="Hint.TLabel", justify="left",
-                  font=("Microsoft YaHei UI", 9)).pack(anchor="w", padx=14)
+        theme.style_toplevel(d)         # 经典背景 + 标题栏两件套（坑 186）
+        d.geometry("780x430")
+        d.minsize(600, 320)
+        d.transient(host)
 
-        def _pick_dir():
+        ttk.Label(d, text=texts.MDL_SRC_HINT, style="Hint.TLabel", justify="left",
+                  font=("Microsoft YaHei UI", 9)).pack(anchor="w", padx=14, pady=(12, 6))
+
+        # 底部按钮先 pack 到底部，中间列表再矮也只压滚动区
+        bot = ttk.Frame(d)
+        bot.pack(side="bottom", fill="x", padx=14, pady=(6, 12))
+        page = widgets.ScrollPage(d)
+        body = ttk.Frame(page.inner)
+        page.set_page(body)
+
+        def _busy_guard():
+            # 开窗后可能才开始任务：动作前再查一次（与开窗那条同一判据）
+            if self._any_busy():
+                messagebox.showinfo(texts.MDL_POINT_TITLE, texts.MDL_BUSY_POINT)
+                return True
+            return False
+
+        def _add(ask_file):
+            if _busy_guard():
+                return
+            if ask_file:
+                p = filedialog.askopenfilename(
+                    title=texts.MDL_PICK_FILE_TITLE, parent=d,
+                    filetypes=[(texts.MDL_FT_MODEL,
+                                "*.gguf *.safetensors *.sft *.ckpt *.pt *.bin"),
+                               (texts.MDL_FT_ALL, "*.*")])
+            else:
+                p = filedialog.askdirectory(title=texts.MDL_PICK_DIR_TITLE, parent=d)
+            if p:
+                self._register_extra_model(p)
+                _rebuild()
+
+        def _change_main():
+            if _busy_guard():
+                return
             p = filedialog.askdirectory(title=texts.MDL_PICK_DIR_TITLE, parent=d)
-            if p:
-                d.destroy()
-                self._register_extra_model(p)
+            if p and self._set_models_dir(p):
+                _rebuild()
 
-        def _pick_file():
-            p = filedialog.askopenfilename(
-                title=texts.MDL_PICK_FILE_TITLE, parent=d,
-                filetypes=[(texts.MDL_FT_MODEL, "*.gguf *.safetensors *.sft *.ckpt *.pt *.bin"),
-                           (texts.MDL_FT_ALL, "*.*")])
-            if p:
-                d.destroy()
-                self._register_extra_model(p)
+        def _remove(p):
+            if _busy_guard():
+                return
+            if self._remove_extra_model(p):
+                _rebuild()
 
-        bf = ttk.Frame(d)
-        bf.pack(padx=14, pady=(10, 14), anchor="e")
-        theme.button(bf, text=texts.MDL_BTN_PICK_DIR, command=_pick_dir).pack(side="left", padx=(0, 6))
-        theme.button(bf, text=texts.MDL_BTN_PICK_FILE, command=_pick_file).pack(side="left", padx=(0, 6))
-        theme.button(bf, text=texts.BTN_CANCEL, command=d.destroy).pack(side="left")
+        def _open_path(p):
+            q = p
+            if os.path.isfile(q):
+                q = os.path.dirname(q)      # 单文件来源：开它所在文件夹
+            try:
+                if not os.path.isdir(q):
+                    raise OSError(q)
+                os.startfile(q)
+            except Exception:
+                messagebox.showwarning(texts.MDL_POINT_TITLE,
+                                       texts.MDL_SRC_OPEN_FAIL % p)
+
+        def _rebuild():
+            """按 cfg 现算重建来源列表（增/删/换之后就地刷新，不重开窗）。"""
+            for ch in body.winfo_children():
+                ch.destroy()
+            rows = [("main", str(self.cfg.get("models_dir") or ""))]
+            rows += [("extra", str(p)) for p in (self.cfg.get("extra_models") or [])]
+            for kind, path in rows:
+                rowf = ttk.Frame(body)
+                rowf.pack(fill="x", pady=2)
+                if kind == "main":
+                    ttk.Label(rowf, text=texts.MDL_SRC_MAIN_TAG, width=6, anchor="w",
+                              font=("Microsoft YaHei UI", 9, "bold")).pack(side="left")
+                else:
+                    ttk.Label(rowf, text="", width=6).pack(side="left")
+                btnf = ttk.Frame(rowf)
+                btnf.pack(side="right")
+                if kind == "main":
+                    theme.button(btnf, text=texts.MDL_SRC_CHANGE, width=8,
+                               command=_change_main).pack(side="left", padx=(0, 4))
+                else:
+                    theme.button(btnf, text=texts.MDL_SRC_REMOVE, width=6,
+                               command=lambda pp=path: _remove(pp)).pack(
+                        side="left", padx=(0, 4))
+                theme.button(btnf, text=texts.MDL_SRC_OPEN, width=6,
+                           command=lambda pp=path: _open_path(pp)).pack(side="left")
+                lbl = ttk.Label(rowf, text=path or texts.MDL_MANAGE_DIR_UNSET,
+                                style="Dim.TLabel")
+                lbl.pack(side="left", fill="x", expand=True)
+                # 路径长了跟着窗口宽换行（同「管理本地模型…」窗的 dir_lbl 口径）
+                rowf.bind("<Configure>",
+                          lambda e, L=lbl: L.configure(wraplength=max(e.width - 230, 160)))
+        _rebuild()
+
+        theme.button(bot, text=texts.MDL_BTN_ADD_DIR,
+                   command=lambda: _add(False)).pack(side="left", padx=(0, 6))
+        theme.button(bot, text=texts.MDL_BTN_ADD_FILE,
+                   command=lambda: _add(True)).pack(side="left")
+        theme.button(bot, text=texts.MDL_SRC_CLOSE,
+                   command=d.destroy).pack(side="right")
         widgets.center_on(d, host)
         d.deiconify()
 
@@ -915,6 +992,12 @@ class ModelsMixin:
         """把选中的路径写进 `extra_models` 并立刻补一次参数（用户亲手加的动作不受冷却限制）。"""
         p = os.path.normpath(str(path or "").strip())
         if not p:
+            return
+        # 「模型来源」窗重构（2026-10-16）补的守卫：主目录换个身份再进附加来源
+        # 没有意义，列表里会出现两条一样的路径（扫描侧虽会按路径去重，界面会困惑）
+        _md = str(self.cfg.get("models_dir") or "").strip()
+        if _md and os.path.normcase(p) == os.path.normcase(os.path.normpath(_md)):
+            messagebox.showinfo(texts.MDL_POINT_TITLE, texts.MDL_SOURCE_IS_MAIN)
             return
         lst = list(self.cfg.get("extra_models") or [])
         if p in lst:
@@ -932,6 +1015,52 @@ class ModelsMixin:
             self._maybe_adopt_first_model(force=True)
         except Exception:
             pass
+
+    def _set_models_dir(self, path):
+        """更换模型主目录（models_dir）：写配置 + 重扫补全 + 菜单跟上。
+
+        目录只是"扫描根"：不预检里面有没有模型（照实扫，扫到什么算什么），
+        也不移动任何文件 —— 与「模型来源」窗的纪律一致。返回是否真的改了。
+        """
+        p = os.path.normpath(str(path or "").strip())
+        if not p:
+            return False
+        cur = os.path.normpath(str(self.cfg.get("models_dir") or ""))
+        if cur and os.path.normcase(p) == os.path.normcase(cur):
+            return False
+        self.cfg["models_dir"] = p
+        save_config(self.cfg)
+        self._append(texts.MDL_MAINDIR_NOTE % p, "meta")
+        threading.Thread(target=self._scan_and_fill, args=(False,), daemon=True).start()
+        # 换了主目录往往就是"第一个可用模型"的时刻（同 _register_extra_model）
+        try:
+            self._maybe_adopt_first_model(force=True)
+        except Exception:
+            pass
+        return True
+
+    def _remove_extra_model(self, path):
+        """移除一个附加来源（extra_models）：**只删登记，不删文件**。
+
+        2026-10-16 补上的能力（坑 288）：此前「手动定向模型」只能加不能删 ——
+        来源加错后没有任何回退出口，整理判"分散"时用户被卡死。返回是否真的移除了。
+        """
+        p = os.path.normpath(str(path or "").strip())
+        if not p:
+            return False
+        if not messagebox.askyesno(texts.MDL_POINT_TITLE,
+                                   texts.MDL_SRC_REMOVE_ASK % p):
+            return False
+        old = list(self.cfg.get("extra_models") or [])
+        lst = [x for x in old
+               if os.path.normcase(os.path.normpath(str(x))) != os.path.normcase(p)]
+        if len(lst) == len(old):
+            return False
+        self.cfg["extra_models"] = lst
+        save_config(self.cfg)
+        self._append(texts.MDL_SRC_REMOVED_NOTE % p, "meta")
+        threading.Thread(target=self._scan_and_fill, args=(False,), daemon=True).start()
+        return True
 
     def _reindex_after_tidy(self):
         """整理移动后：清理失效记录并按新位置重新配对 mmproj。"""
@@ -1047,13 +1176,15 @@ class ModelsMixin:
                             hit_rec = True
                     if hit_rec:
                         c["model_mmproj"] = rec
-                    # 其余"记了路径"的键跟着搬；**纯文件名**的 img_*/vid_* 键按 basename
-                    # 命中时升级成新绝对路径——文件搬进新目录后，"老目录拼文件名"必然
-                    # 找不到（R-11：菜单里看得见、发送侧报"未找到生图模型"）
+                    # 其余"记了路径"的键跟着搬；**纯文件名**的 img_*/vid_* 配套槽位按
+                    # basename 命中时升级成新绝对路径——文件搬进新目录后，"老目录拼文件名"
+                    # 必然找不到（R-11：菜单里看得见、发送侧报"未找到生图模型"）。
+                    # （主体的 img_model_file / vid_model_file 两个键 2026-10-16 已删除，
+                    #   主体一律认菜单选中项，不再需要跟着搬。）
                     base_src = os.path.normcase(os.path.basename(src))
-                    for key in ("img_model_file", "img_vae_file", "img_llm_file",
+                    for key in ("img_vae_file", "img_llm_file",
                                 "img_clip_l_file", "img_clip_g_file", "img_t5_file",
-                                "img_tokenizer_file", "vid_model_file", "vid_vae_file",
+                                "img_tokenizer_file", "vid_vae_file",
                                 "vid_llm_file", "vid_t5_file", "vid_tokenizer_file",
                                 "vid_high_noise_file", "vid_audio_vae_file"):
                         v = str(c.get(key) or "")

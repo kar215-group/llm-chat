@@ -1144,7 +1144,9 @@ def _build_round_buttons():
     border_c = colors.get("border")
     input_fg = colors.get("inputfg")
     for ttk_style, is_combo in (("Round.TEntry", False), ("Round.TCombobox", True)):
-        pad = (scale_x(8), scale_x(4), scale_x(22) if is_combo else scale_x(8),
+        # 右侧 14 = 箭头贴右缘但让开 8px 圆角（W 2026-10-17：再往右一点），
+        # 也给 textarea 的裁断点与箭头之间留一线空隙
+        pad = (scale_x(8), scale_x(4), scale_x(14) if is_combo else scale_x(8),
                scale_x(4))
         el = ttk_style + ".field"
         image_element(
@@ -1154,11 +1156,17 @@ def _build_round_buttons():
                     "disabled": _round_png(None, _blend(border_c, bg, 0.5), 1)},
             border=(BTN_RADIUS, BTN_RADIUS, BTN_RADIUS, BTN_RADIUS),
             padding=pad, sticky=NSEW)
-        children = [El("textarea", sticky=NSEW)]
+        # 箭头先占右缘、textarea 带 expand 收余下宽度 —— Tk 官方 TCombobox 布局
+        # 就是这个顺序。textarea 不能排在箭头前面：ttk 的 packing 按"需求宽"顺序
+        # 分配，选中文字比框长的下拉（如「模型族」的"自动判断（按张量名与文件名
+        # 识别）"）会把箭头挤成零宽 / 挤贴在文字尾上，看着像"箭头跑进文字里、
+        # 下拉没有箭头"（坑 292）。过长的文字由 textarea 在自己的格子里裁掉。
+        children = []
         if is_combo:
             # clam 引擎的原生箭头元素，保留系统下拉手感。
             # sticky 必须显式给空串：El 的默认值是 nswe，箭头贴图会被拉伸变形
             children.append(El("Combobox.downarrow", side=RIGHT, sticky=""))
+        children.append(El("textarea", sticky=NSEW, expand=True))
         layout(_style, ttk_style, El(el, sticky=NSEW, children=children))
         _style.configure(ttk_style, borderwidth=0, relief="flat",
                          foreground=input_fg, insertbackground=input_fg)

@@ -22,7 +22,7 @@ import shutil
 import threading
 
 from . import config, sdprofile
-from .models import (IMAGE_SUBDIR, _is_mmproj, find_vl_pairs, scan_models,
+from .models import (IMAGE_SUBDIR, _is_mmproj, find_vl_pairs,
                      scan_video_models, video_scan_dirs)
 from .. import texts
 
@@ -89,26 +89,21 @@ def _wh(size, fallback, multiple=1):
     return fw, fh
 
 
-def _folders_for(cfg, main_path, extra_dirs=(), include_models_dir=True,
-                 include_image_dir=True):
+def _folders_for(cfg, main_path, extra_dirs=(), include_models_dir=True):
     """配套文件的搜索目录：主体所在目录最优先，其次配置里指定的目录，再回退默认位置。
 
     两个边界都是实测换来的：
       · `include_models_dir=False` 给生图用 —— 改造前 `resolve_img_files` 只看生图目录，
         放宽到整个模型库会让"挑文本编码器"抓到顶层那堆聊天模型（它们是 kv>0 的合法
         语言模型，判据分不清"编码器"和"聊天模型"，只能靠目录边界）。
-      · `include_image_dir=False` 给生视频用 —— 否则生图目录里的
-        `qwen_image_2.1_vae_bf16.safetensors` 会被当成视频 VAE（坑 29）。
+      · `image_model_dir` / `video_model_dir` 两个旧覆盖目录 2026-10-16 已随"隐形来源"
+        收口删除（模型位置统一归「模型来源」）——图像组件按"与主体同目录"找（整理的
+        摆法就是这个），特殊摆放用专用槽位显式指定。
     """
     out = []
     if main_path:
         out.append(os.path.dirname(main_path))
-    tails = list(extra_dirs)
-    if include_image_dir:
-        tails.append(cfg.get("image_model_dir", ""))
-    if include_models_dir:
-        tails.append(cfg.get("models_dir", ""))
-    for d in tails:
+    for d in list(extra_dirs):
         raw = str(d or "").strip()
         if not raw:
             continue
@@ -117,6 +112,12 @@ def _folders_for(cfg, main_path, extra_dirs=(), include_models_dir=True,
         np = os.path.normpath(raw)
         if np and os.path.isdir(np) and np not in [os.path.normpath(x) for x in out]:
             out.append(np)
+    if include_models_dir:
+        raw = str(cfg.get("models_dir", "") or "").strip()
+        if raw:
+            np = os.path.normpath(raw)
+            if np and os.path.isdir(np) and np not in [os.path.normpath(x) for x in out]:
+                out.append(np)
     return out
 
 
@@ -148,48 +149,28 @@ def img_out_dir(cfg):
 
 
 def img_dir_of(cfg):
-    """生图目录：`image_model_dir` 优先，**留空 = `<模型目录>/生图`**。
+    """生图目录（**默认约定**）：`<模型目录>/生图` —— 与扫描侧同一口径。
 
-    这条兜底**与扫描侧同一口径**（`core.models.scan_models` / `video_scan_dirs` 都是这么算的）。
-    发送侧原来只读 `image_model_dir`，于是"留空"的出厂默认机器上会出现
-    **菜单里看得见生图模型、一发就报「未找到生图模型」** —— 扫描侧找得到、发送侧找不到，
-    两边判据分叉（坑 128 同族）。
+    2026-10-16 收口：`image_model_dir` 覆盖项已删（"模型在哪"统一归「模型来源」管），
+    这里只剩默认推导；`build_img_cmd` 的 mmproj 兜底仍用它。
     """
     c = cfg or {}
     base = str(c.get("models_dir") or os.path.dirname(str(c.get("model") or "")) or ".")
-    return str(c.get("image_model_dir") or "") or os.path.join(base, IMAGE_SUBDIR)
+    return os.path.join(base, IMAGE_SUBDIR)
 
 
 def resolve_img_model_path(cfg):
     """这次生图该用哪个扩散模型 → **绝对路径**；定不出来返回空串。
 
-    发送侧拿扩散模型的唯一出口，顺序：
-      ① 菜单里选中的就是生图模型（`model_kind == "image"`，扫描给的就是绝对路径）→ 用它；
-      ② `img_model_file`：绝对路径且在 → 直接用；否则按 `img_dir_of` 拼一次；**给了名字却
-         找不到就返回空串**（显式设置该报错就报错，不偷偷换一个模型）；
-      ③ 扫描到的第一个生图模型（`scan_models` 返回的本来就是绝对路径）。
-
-    为什么不再"取 basename 再拼回生图目录"：模型不在那个目录里时（手动定向到别处、或
-    放在模型目录顶层）那样必然找不到，报出来的却是"未找到生图模型"（坑 42 同族：拼出
-    错路径 / 相对路径，症状与根因对不上）。
+    发送侧拿扩散模型的唯一出口（2026-10-16 收口，W 定）：**菜单里选中的那个就是用的那个**
+    —— `model_kind == "image"` 且文件还在 → 返回它；文件被删 / 搬走 → 空串，调用方报错
+    让用户重选（不再静默落到"默认生图模型 / 扫描第一个"）。旧链与 `img_model_file` /
+    `image_model_dir` 两个入口一起删除，口径见 `13` §7.57。
     """
     c = cfg or {}
     cur = str(c.get("model") or "")
     if str(c.get("model_kind") or "") == "image" and cur and os.path.isfile(cur):
         return cur
-    name = str(c.get("img_model_file") or "").strip()
-    if name:
-        if os.path.isabs(name) and os.path.isfile(name):
-            return name
-        p = os.path.join(img_dir_of(c), name)
-        return p if os.path.isfile(p) else ""
-    try:
-        _d, _chat, images = scan_models(c)
-    except Exception:
-        images = []
-    for p in images or []:
-        if os.path.isfile(p):
-            return p
     return ""
 
 
@@ -890,34 +871,25 @@ def _video_component_missing_label(name):
 def resolve_video_files(cfg, diffusion_path=None):
     """定位视频链路所需文件 → dict(diffusion, llm, vae, ..., family, missing)。
 
-    与生图同一套思路：先认族，再按那一族要求的槽位去找。三个改动点：
-      · **人工指定的文件即使没被扫描识别也直接采用**（名字不规范 / 放在别的目录时，
-        原来是"扫描没命中就当缺件"，用户只能改文件名，很别扭）；
-      · 家族要求里带 `t5xxl` 的（Wan / LTX / HunyuanVideo）不再逼用户去找一个
-        `--llm` 编码器；MiniMax-H3 仍然要求 llm + vae，与改造前一致；
-      · missing 的说明按槽位生成，会点名引擎参数名。
+    主体口径与生图对齐（2026-10-16 收口，W 定）：**菜单里选中的那个就是用的那个**
+    （`model_kind == "video"` 且文件还在）；不传 `diffusion_path` 时按此判，坏选中 →
+    `diffusion` 空串（调用方先查它、报错让用户重选，不再静默换扫描第一个）。旧的
+    「扩散主体文件名 → 扫描第一个」链已随入口一起删除。
+    其余定位不变：先认族再按槽位找；**人工指定的文件即使没被扫描识别也直接采用**
+    （名字不规范 / 放在别的目录时，原来是"扫描没命中就当缺件"，用户只能改文件名，很别扭）；
+    家族要求里带 `t5xxl` 的（Wan / LTX / HunyuanVideo）不再逼用户去找一个 `--llm` 编码器；
+    MiniMax-H3 仍然要求 llm + vae。missing 的说明按槽位生成，会点名引擎参数名。
     """
-    vids, encs = scan_video_models(cfg)
-
-    def _by_name(pool, want):
-        w = str(want or "").strip()
-        if not w:
-            return ""
-        if os.path.isabs(w) and os.path.isfile(w):
-            return w
-        for p in pool:
-            if os.path.basename(p).lower() == w.lower():
-                return p
-        for base in filter(None, (cfg.get("video_model_dir", ""),
-                                  cfg.get("models_dir", ""),
-                                  cfg.get("image_model_dir", ""))):
-            p = os.path.join(base, w)
-            if os.path.isfile(p):
-                return p
-        return ""
-
-    diffusion = (diffusion_path or _by_name(vids, cfg.get("vid_model_file"))
-                 or (vids[0] if vids else ""))
+    if diffusion_path is None:
+        cur = str(cfg.get("model") or "")
+        if str(cfg.get("model_kind") or "") == "video" and cur and os.path.isfile(cur):
+            diffusion_path = cur
+    if not diffusion_path:
+        # 坏选中 / 没选中：给一份"没得跑"的最小结果（调用方先查 diffusion 空串）
+        return {"diffusion": "", "llm": "", "vae": "", "family": "", "basis": "",
+                "note": "", "missing": [], "manual_missing": []}
+    _vids, encs = scan_video_models(cfg)
+    diffusion = diffusion_path
     fid, basis, why = family_of(cfg, diffusion, "video", "vid_family")
 
     want = {}
@@ -928,9 +900,8 @@ def resolve_video_files(cfg, diffusion_path=None):
         if str(cfg.get(key, "") or "").strip():
             want[slot] = str(cfg[key]).strip()
 
-    folders = _folders_for(cfg, diffusion, (cfg.get("video_model_dir", ""),),
-                           include_image_dir=False)
-    # 视频目录没单独配时，沿用原来的扫描范围（顶层 + 一级子目录，不含生图目录）
+    folders = _folders_for(cfg, diffusion)
+    # 视频的配套件还可以散在扫描范围内的任何目录（顶层 + 一级子目录 + 来源树）
     folders = folders + [f for f in video_scan_dirs(cfg) if f not in folders]
     files = sdprofile.discover(folders, fid, diffusion, want, encoders=encs)
     files["diffusion"] = diffusion

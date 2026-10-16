@@ -82,7 +82,6 @@ DLG_PAIR_NEW = "一台新设备（独立的历史产物，不与其他设备互�
 DLG_PAIR_CAND_TAIL_SEEN = "（%s，最近活跃 %s）"
 DLG_PAIR_CAND_TAIL = "（%s）"
 DLG_PAIR_MERGE_INTO = "并入「%s」%s —— 共用它的历史产物"
-DLG_PAIR_NO_OTHERS = "（还没有其他已配对设备）"
 DLG_PAIR_REVOKE_HINT = ("只允许你自己发起的设备接入。选错了随时可在"
                         "「设置 → 远程访问 → 已配对设备」里吊销。")
 DLG_PAIR_BTN_ALLOW = "允许"
@@ -171,7 +170,7 @@ SVC_SCENE_MAIN = "主页面"
 
 # 「启动服务」闸门三态：悬停气泡版（TIP）与输出栏版（NOTE），一一对应
 SVC_BLOCK_ENGINE_TIP = "llama文本引擎还没就位：在 设置 → 模型文件与引擎 → 引擎管理 里定向或下载。"
-SVC_BLOCK_MODEL_TIP = "这台机器上还没有可用的本地文本模型：在 设置 → 模型文件与引擎 里补全或手动定向模型。"
+SVC_BLOCK_MODEL_TIP = "这台机器上还没有可用的本地文本模型：在 设置 → 模型文件与引擎 里补全或加入模型来源。"
 SVC_BLOCK_STALE_TIP = "当前选中的模型文件已经不在了：点顶部模型名重选一个可用的本地文本模型。"
 SVC_BLOCK_ENGINE_NOTE = "llama文本引擎还没就位（在 设置 → 模型文件与引擎 → 引擎管理 里定向或下载）。"
 SVC_BLOCK_MODEL_NOTE = "这台机器上还没有可用的本地文本模型（引擎与模型都要就位）。"
@@ -206,7 +205,7 @@ SVC_KV_EST = "[服务] %s场景 context=%d，KV cache 预估：共 %.1fGB（显�
 SVC_INTERRUPTED = "[服务] 服务操作中断：%s"
 SVC_START_FAIL_RAW = "[服务] 启动失败: "
 SVC_READY = "[服务] 就绪，可以开始对话。"
-SVC_START_FAIL_TIMEOUT = "[服务] 启动失败或超时——请检查模型路径与参数（高级模式设置 → 服务参数）。"
+SVC_START_FAIL_TIMEOUT = "[服务] 启动失败或超时——请检查模型路径与参数（模型文件与引擎 → 模型来源）。"
 SVC_STOPPING = "\n[服务] 正在停止…\n"
 SVC_STOPPED = "[服务] 服务已停止。"
 SVC_NO_PROC = "[服务] 没有找到监听端口 %d 的服务进程。"
@@ -236,11 +235,11 @@ MEDIA_LAST_OUTPUT = "%s最后输出：\n  "  # %s=云端/引擎
 # 发送前预检（缺引擎 / 缺模型 / 缺配套件），打在对话流
 IMG_NO_ENGINE = ("\n[提示] 未找到生图引擎 %s —— 请在 设置 → 模型文件与引擎 → sd.cpp（生图/生视频引擎）里"
                  "定向或下载引擎。\n")
-IMG_NO_MODEL = ("\n[提示] 未找到生图模型：把相关模型文件放进"
-                "生图模型目录，或在模型菜单里重新选一个。\n"
-                "  目录在 设置 → 模型文件与引擎 → 手动定向模型 里添加。\n")
+IMG_NO_MODEL = ("\n[提示] 没选中可用的生图模型：点顶部模型名重选一个"
+                "（选中的文件被删或被搬走时会看到这句）。\n"
+                "  菜单里没有它：用 设置 → 模型文件与引擎 → 模型来源… 加入它所在的文件夹。\n")
 IMG_MISSING_SLOTS = ("\n[提示] 这个生图模型（识别为 %s）缺配套文件：%s\n"
-                     "  放进生图模型目录，或在 设置 → 模型文件与引擎 → 手动定向模型 里定向缺失文件。\n")
+                     "  把它们放进主体模型所在的文件夹，或在 设置 → 本地模型 → 生图（sd.cpp）→ 高级参数 里点名。\n")
 IMG_MODE_WHY = "\n[提示] %s\n"
 IMG_START_FAIL = "[错误] 启动生图引擎失败: %s\n"
 
@@ -288,9 +287,12 @@ VID_NO_ENGINE = ("\n[提示] 未找到生视频引擎 %s—— "
                  "请在 设置 → 模型文件与引擎 → sd.cpp（生图/生视频引擎） 定向或下载引擎，"
                  "并确认该版本支持视频生成。\n")
 VID_MISSING = ("\n[提示] 视频链路组件不全，缺：\n  · %s\n\n"
-               "把文件放进「%s」后重新发一次即可（可在 设置 → 模型文件与引擎 → 手动定向模型 里定向）。"
+               "把这些文件放进主体模型所在的文件夹后重新发一次即可"
+               "（也可在 设置 → 本地模型 → 生视频（sd.cpp）→ 高级参数 里逐项点名）。"
                "扩散主体、文本编码器、视频 VAE 缺一不可。")
-VID_DEFAULT_DIR = "生视频"             # 没配视频模型目录时，提示里的目录名
+VID_NO_MODEL = ("\n[提示] 没选中可用的生视频模型：点顶部模型名重选一个"
+                "（选中的文件被删或被搬走时会看到这句）。\n"
+                "  菜单里没有它：用 设置 → 模型文件与引擎 → 模型来源… 加入它所在的文件夹。\n")
 VID_START_FAIL = "[错误] 启动生视频引擎失败: %s\n"
 VID_FIRST_FRAME = "[图生视频] 首帧：%s（引擎会自动裁剪缩放到 %s）\n"
 
@@ -559,7 +561,7 @@ CHAT_CLOUD_VIDEO_NOFRAME = ("\n[云端] 云端生视频目前只支持文生视�
 CHAT_SVC_NOT_READY = "\n[提示] 服务未就绪：请先点「启动服务」，等状态变为 ● 运行中 再发送。\n"
 CHAT_RELOADING = "\n[服务] 正在加载新模型 %s（GPU 层数 %d），就绪后自动发送你的消息…\n"
 CHAT_RELOAD_READY = "[服务] 新模型 %s 就绪，继续对话（历史上下文已随消息携带）。"
-CHAT_RELOAD_FAIL = "[服务] 加载失败或超时——请检查模型与参数（设置 → 服务参数）。"
+CHAT_RELOAD_FAIL = "[服务] 加载失败或超时——请检查模型与参数（模型文件与引擎 → 模型来源）。"
 CHAT_RELOAD_INTERRUPT = "[服务] 换载模型中断：%s"
 
 # 纯图片 / 纯文档消息兜底
@@ -606,7 +608,7 @@ MDL_NO_ENGINE = ("还没就位的引擎：\n· %s（本地对话）\n· %s（本
                  "只想用云端：在 设置 → 云端模型 → 服务商与密钥 填密钥，"
                  "再到「选择模型」里勾上要用那几个。")
 MDL_NO_GGUF = ("模型文件夹里没有找到 .gguf 文件：\n%s\n\n"
-               "可在 设置 → 服务参数 → models_dir 修改目录；"
+               "可在 设置 → 本地模型 → 模型文件与引擎 的「模型来源…」里加入模型所在文件夹；"
                "生图模型放在其下的「生图」子文件夹，"
                "视频组件放在「生视频」子文件夹；"
                "云端模型在 设置 → 云端模型 → 服务商与密钥 里配置。")
@@ -636,7 +638,7 @@ MDL_PICK_START = ("\n[服务] 已选择模型：%s（GPU 层数 %d）。点「�
                   "状态变 ● 运行中 后即可对话。\n")
 
 # 选云端模型后的输出
-MDL_KEY_MISSING = "（还没填 API Key：设置 → 云端模型 → 服务商与密钥 → 密钥）"
+MDL_KEY_MISSING = "（还没填 API Key：设置 → 云端模型 → 服务商与密钥 → 填密钥）"
 MDL_CLOUD_TEXT_NOTE = "无需启动服务，直接发消息即可；不影响正在运行的本地服务。"
 MDL_CLOUD_NO_NATIVE = "「%s」没有可用的原生%s接口，发送前会拦下；可改选本地那组。"
 MDL_VIDEO_BILLING = "异步任务，按秒计费，开始运行后就取消不了（发送前确认一次费用）。"
@@ -688,21 +690,31 @@ MDL_RECALC_Q = ("将清空所有模型的 层数/context/mmproj 自动记录并�
 MDL_RECALC_ALL = "全部重新计算模型参数"
 MDL_RECALC_MISSING = "补全缺失项"
 MDL_MM_BEGIN = "\n[模型管理] 开始%s…\n"
-MDL_POINT_TITLE = "手动定向模型"
+MDL_POINT_TITLE = "模型来源"                 # 窗名（消息框标题共用）
+MDL_POINT_BTN = "模型来源…"                  # 文件页入口按钮
 MDL_BUSY_POINT = ("当前有任务正在进行（生成 / 生图 / 生视频 / 服务操作），\n"
-                  "请等任务结束、服务停止后再加入模型来源。")
-MDL_POINT_HEAD = "加入一个模型来源（只登记路径，不移动文件）"
-MDL_POINT_HINT = ("文件夹：把里面能聊天的 .gguf 与生图 / 生视频权重一起收进来；\n"
-                  "单个文件：按它自己的类型收进对应清单。")
+                  "请等任务结束、服务停止后再改模型来源。")
+MDL_SRC_HINT = ("这些位置的模型都会进主页菜单；更换主目录、添加或移除来源都只登记路径，不移动文件。\n"
+                "添加文件夹 = 把里面能聊天的 .gguf 与生图 / 生视频权重一起收；单个文件 = 按它自己的类型收进对应清单。")
+MDL_SRC_MAIN_TAG = "主目录"
+MDL_SRC_CHANGE = "更换…"
+MDL_SRC_REMOVE = "移除"
+MDL_SRC_OPEN = "打开"
+MDL_SRC_CLOSE = "关闭"
+MDL_BTN_ADD_DIR = "添加文件夹…"
+MDL_BTN_ADD_FILE = "添加模型文件…"
 MDL_PICK_DIR_TITLE = "选择模型文件夹"
 MDL_PICK_FILE_TITLE = "选择模型文件"
 MDL_FT_MODEL = "模型文件"
 MDL_FT_ALL = "全部文件"
-MDL_BTN_PICK_DIR = "选择文件夹…"
-MDL_BTN_PICK_FILE = "选择模型文件…"
 MDL_SOURCE_EXISTS = "这个来源已经在列表里了：\n%s"
+MDL_SOURCE_IS_MAIN = "这已经是当前主目录了，不需要再加。"
 MDL_SOURCE_NOTE = "\n[模型管理] 已加入模型来源：%s\n"
 MDL_SOURCE_MSG = "已加入：\n%s\n\n文件没有移动 —— 扫描与模型菜单会认它。"
+MDL_SRC_REMOVE_ASK = "从扫描列表移除「%s」？\n只移除登记，不删除任何文件。"
+MDL_SRC_REMOVED_NOTE = "\n[模型管理] 已移除模型来源：%s\n"
+MDL_MAINDIR_NOTE = "\n[模型管理] 模型主目录已更换为：%s\n"
+MDL_SRC_OPEN_FAIL = "打开失败，路径可能已经不在了：\n%s"
 
 # 整理模型文件夹
 MDL_TIDY_TITLE = "整理模型文件夹"
@@ -710,8 +722,7 @@ MDL_BUSY_TIDY = ("当前有任务正在进行（生成 / 生图 / 生视频 / �
                  "请等任务结束、服务停止后再整理文件。")
 MDL_TIDY_SCATTERED = ("暂不整理：模型分散在多个文件夹里。\n\n装着模型的目录：\n%s\n\n"
                       "整理只在\"模型都放在同一个目录\"时生效，不会跨目录搬动文件。\n"
-                      "想整理：先把手动定向来源收敛成一个目录，或在 设置 → 服务参数 → "
-                      "models_dir 把模型目录指到那个目录。")
+                      "想整理：先在「模型来源…」里把多余的来源移除，或把主目录换到要整理的那个目录。")
 MDL_TIDY_EMPTY = ("未发现需要整理的文件：\n"
                   "顶层没有散落的模型（或它们已在各自文件夹内）。")
 MDL_TIDY_PREVIEW_TITLE = "整理模型文件夹 - 预览"
@@ -737,14 +748,14 @@ MDL_BTN_EXEC = "执行"
 APP_WINDOW_TITLE = "LLM 本地对话台 - llama.cpp"
 
 # 启动时的状态提示
-APP_PROXY_NOT_STARTED = ("API 代理没有启动：这台机器上还没有可转发的本地文本模型。"
-                         "备好引擎与模型后在 设置 → 本地模型 API 里启用。")
+APP_PROXY_NOT_STARTED = ("API 代理无法启动：没有可转发的本地文本模型。"
+                         "备好引擎与模型后在 高级模式设置 → 本地模型 API 里启用。")
 APP_ANOTHER_INSTANCE = ("[配置] 检测到另一个程序实例正在运行——两边同时改设置会互相覆盖，"
                         "建议只保留一个（之后的保存会被拒并在这里说明）。")
 APP_OTHER_INSTANCE_MARK = "另一个程序实例"   # 与 core/config 写盘拒绝原因做子串匹配的标记
 APP_CONFIG_LOCKED = "[配置] %s\n"
 APP_CONFIG_WRITE_FAIL = ("[配置] 写不进去：%s（%s）—— 设置不会保存。"
-                         "把本程序换到一个可写的文件夹，或在 设置 → 关于与诊断 里点「一键诊断」。")
+                         "请把本程序换到一个可写的文件夹。")
 
 # 签名信任
 APP_CODESIGN_UNKNOWN = ("[签名] 这台机器判断不了本程序的签名状态（%s）。"
@@ -805,29 +816,29 @@ APP_READY_HOW_LOCAL = "点「启动服务」加载，状态变 ● 运行中 后
 APP_LANG_TAG = "（语言模型）"
 
 # 远程访问启停提示（%s=错误；crashlog 里的技术记录不在此）
-APP_REMOTE_FAIL = "远程访问启动失败：%s——到 设置 → 远程访问 重新拨一次开关可重试。"
+APP_REMOTE_FAIL = "远程访问启动失败：%s—— 设置 → 远程访问 可重试。"
 APP_REMOTE_FAIL_CERT = ("远程访问启动失败（证书或端口问题），暂未开启——"
-                        "到 设置 → 远程访问 重新拨一次开关可重试。")
-APP_REMOTE_OK = "远程服务已启动（网址与配对码在 设置 → 远程访问）"
+                        " 设置 → 远程访问 可重试。")
+APP_REMOTE_OK = "远程服务已启动（详情在 设置 → 远程访问）"
 APP_REMOTE_KIND_CHAT = "对话"   # 远程忙碌种类（生图复用 CHAT_ACTION_IMG）
 
 # 云端任务取回 / 取消
 APP_JOBS_HEAD = ("\n[云端] 有 %d 个云端任务的结果还没落地"
-                 "（产物地址只活 24 小时）：\n")
+                 "（产物地址只生效 24 小时）：\n")
 APP_BTN_WAIT = "继续等"
 APP_BTN_RETRIEVE = "取回"
 APP_RECOVER_BUSY = "\n[云端] 现在正忙，等当前任务结束后再取回。\n"
-APP_RECOVER_EXPIRED = "\n[云端] 这个任务超过 24 小时了，产物地址已失效，取不回来。\n"
+APP_RECOVER_EXPIRED = "\n[云端] 该任务已超 24 小时，产物地址已失效。\n"
 APP_RECOVER_NO_PROVIDER = "\n[云端] 取不回 %s：provider「%s」已经不在了。\n"
 APP_RECOVER_DIR_FAIL = "\n[云端] 存放目录建不出来：%s\n"
-APP_RECOVER_FETCH = "\n[云端] 取回 task_id=%s…（查状态，已完成就直接下载）\n"
+APP_RECOVER_FETCH = "\n[云端] 取回 task_id=%s…（查状态）\n"
 APP_CANCEL_NOSTOP_WAIT = ("%s [已停止等待] 提交请求还在路上，任务号还没回来——任务号一到会"
                           "自动发起取消；若云端已建单，这一单可能仍会继续跑并计费"
-                          "（取消结果稍后如实告知）。\n")
-APP_CANCEL_NO_PROVIDER = "取消不了：找不到对应的服务商。任务可能还在云端跑，之后可在对话里点「取回」。"
+                          "（取消结果稍后提醒）。\n")
+APP_CANCEL_NO_PROVIDER = "取消不了：找不到对应的服务商。任务可能还在云端跑，稍后可在对话里点「取回」。"
 APP_CANCEL_LINE = "%s %s\n────────────────\n"
 APP_CANCEL_REQ_ERR = "取消请求出错：%s: %s"
-APP_CANCEL_LATE_OK = "%s [云端取消] 迟到的任务号（%s…）已取消成功：它还在排队，不会产生费用。"
+APP_CANCEL_LATE_OK = "%s [云端取消] 迟到的任务号（%s…）已取消成功，不会产生费用。"
 APP_CANCEL_LATE_FAIL = "%s [云端取消] 迟到的任务号（%s…）没能取消：%s"
 
 # 开机缺件催办
@@ -854,8 +865,7 @@ APP_CLOUD_RETRY = "\n[云端] %s\n"
 APP_FILEPLAN = "\n[附件] %s\n"
 APP_TRUNC_HINT = ("[提示] 本轮回复被 max_tokens 上限截断"
                   "（思考过程 + 正式回答共享该额度，思考较长时会挤掉回答）。\n"
-                  "解决：设置 → 生成参数 调大 max_tokens；或 服务参数 把 "
-                  "reasoning 设为 off（不思考，直接回答）。\n")
+                  "解决：设置 → 生成参数 调大 max_tokens或关闭模型思考。\n")
 APP_INCOMPLETE_HINT = "[提示] 本轮回复没有收到结束标记（流被中断），以上内容可能不完整。\n"
 APP_STOPPED_MARK = "\n\n[已停止生成——已生成内容已保留，补充新信息后可直接继续发送]"
 APP_ERROR_PREFIX = "\n\n[错误] "
@@ -880,13 +890,12 @@ SET_SIZE_WARN_RES = '写法不合格'  # settings.py L39（SIZE_WARN_RES）
 SET_NEW_PROVIDER_LABEL = '＋ 新建服务商…'  # settings.py L460（NEW_PROVIDER_LABEL）
 
 # —— settings.py _upd_help_text() ——
-SET_UPD_HELP_TEXT_TAIL = '进入本页时会自动按「正式版」查一次'  # settings.py L362（TAIL）
-SET_UPD_HELP_TEXT_TAIL_2 = '；开发者模式下还会在后台定期查'  # settings.py L364（TAIL）
-SET_UPD_HELP_TEXT_CAT = ('检查更新：按右边选的通道向 GitHub 查最新 Release。\n'
-                         '正式版 = 只看正式发布的 Release；测试版 = 把预发布一起算，给最新的那个。\n'
-                         '查到新版本会弹「发现新版本」窗口，点「立即更新」就下载并替换本程序，替换前会再确认一次（需要关闭程序）。\n'
-                         '自动检查弹的窗被关掉后，同一个版本不再自动弹第二次；手动点「检查更新」永远弹。\n'
-                         '打开下载页 = 查到新版本时跳到它的下载页。\n'
+SET_UPD_HELP_TEXT_TAIL = '进入本页时会自动查一次'  # settings.py L362（TAIL）
+SET_UPD_HELP_TEXT_TAIL_2 = '；开发者模式填入令牌后还可自动后台查询'  # settings.py L364（TAIL）
+SET_UPD_HELP_TEXT_CAT = ('检查更新：向 GitHub 查最新版本。\n'
+                         '正式版 = 只看Release；测试版 =检查包括pre Release在内。\n'
+                         '查到新版本弹「发现新版本」窗口，点「立即更新」下载并替换本程序（需要关闭程序）。\n'
+                         '打开下载页 = 跳到新版本的下载页。\n'
                          '')  # settings.py L365（CAT）
 
 # —— settings.py _open_outdir() ——
@@ -909,14 +918,14 @@ SET_API_CONFIG_TEXT_CAT = ('服务类型: OpenAI 兼容 (Chat Completions)\n'
                            '模型名:   %s\n'
                            '—— 客户端填法 ——\n'
                            '在 agent 应用中选择 OpenAI Compatible / 自定义 OpenAI，逐项粘贴以上四项；\n'
-                           '模型名支持模糊匹配（略写、带不带 .gguf 都可命中）。')  # settings.py L558（CAT）
+                           '模型名支持模糊匹配。')  # settings.py L558（CAT）
 SET_API_CONFIG_TEXT_N = '（暂无可用聊天模型）'  # settings.py L566（N）
 
 # —— settings.py _gen_api_key() ——
 SET_GEN_API_KEY_CAT = '已生成新的 API Key：\n\n%s\n\n注意：Key 是服务启动参数，需「重启服务」后生效。'  # settings.py L573（CAT）
 
 # —— settings.py _restart_proxy() ——
-SET_RESTART_PROXY_A0 = '\n[API] 这台机器上还没有可转发的本地文本模型，代理不起 —— 先在 设置 → 本地模型 备好引擎与模型。\n'  # settings.py L581（A0）
+SET_RESTART_PROXY_A0 = '\n[API] 这台机器上还没有可转发的本地文本模型，请先在 设置 → 本地模型 备好引擎与模型。\n'  # settings.py L581（A0）
 SET_RESTART_PROXY_A0_2 = '\n[API] 代理已停用（设置中可重新启用并重启代理）。\n'  # settings.py L589（A0）
 
 # —— settings.py _render_fold() ——
@@ -926,40 +935,36 @@ SET_RENDER_FOLD_CAT_2 = '%s 高级参数%s'  # settings.py L732（CAT）
 # —— 本地文本·生成参数 ——
 SET_LTGEN_N = '展示思考过程'  # settings.py L915（N）
 SET_LTGEN_A3 = '随机性'  # settings.py L918（A3）
-SET_LTGEN_A4 = '采样温度（0~2）：越高输出越发散有创意，越低越稳定保守；接近 0 时几乎固定。'  # settings.py L919（A4）
+SET_LTGEN_A4 = '采样温度（0~2）：越高越发散有创意，越低越稳定保守；接近 0 时几乎固定。'  # settings.py L919（A4）
 SET_LTGEN_N_2 = '系统提示词'  # settings.py L924（N）
 SET_LTGEN_A4_2 = '核采样（0~1）：只在累计概率达到 p 的候选词里抽样。'  # settings.py L940（A4）
-SET_LTGEN_A4_3 = '单次回复上限（token）。注意：思考过程 + 正式回答共享该额度，Qwen3 思考较长，建议 ≥4096；到上限会被截断并提示。'  # settings.py L942（A4）
+SET_LTGEN_A4_3 = '单次回复上限（token）。注意：思考过程 + 正式回答共享该额度，建议 ≥4096；到上限会被截断并提示。'  # settings.py L942（A4）
 SET_LTGEN_N_3 = '思考与回答共用'  # settings.py L944（N）
 SET_LTGEN_A1 = '系统提示词：给模型的人设与规则，自动放在每轮对话最前面。'  # settings.py L950（A1）
-SET_LTGEN_N_4 = '在对话中显示模型的思考过程（reasoning，灰色斜体）'  # settings.py L966（N）
+SET_LTGEN_N_4 = '在对话中显示模型的思考过程'  # settings.py L966（N）
 SET_LTGEN_A4_4 = '每一步只在概率最高的 k 个词中选取，常用 40。'  # settings.py L974（A4）
-SET_LTGEN_A4_5 = '重复惩罚（通常 1.0~1.3）：大于 1 抑制复读式重复，1.0 表示关闭。'  # settings.py L976（A4）
+SET_LTGEN_A4_5 = '重复惩罚（通常 1.0~1.3）：大于 1 抑制复读式重复，1.0 关闭。'  # settings.py L976（A4）
 SET_LTGEN_A4_6 = '随机种子：-1 表示随机；填固定数字可复现同一次输出。'  # settings.py L979（A4）
 
 # —— 本地文本·服务参数 ——
-SET_LTSVC_A4 = '当前**本地**模型 GGUF 完整路径（也可直接点主页模型名切换）。选中云端模型时这一栏留空；填了并保存即切回本地。'  # settings.py L989（A4）
-SET_LTSVC_A4_2 = '模型文件夹：主页模型下拉列表扫描此目录下所有 .gguf 文件。'  # settings.py L992（A4）
-SET_LTSVC_A4_3 = '放进显存的层数（当前模型）。新模型会按显存与模型大小自动计算并按模型分别记忆；此处修改仅对当前模型生效。0 = 全部放 CPU。'  # settings.py L997（A4）
-SET_LTSVC_A4_4 = '上下文长度（token）：容纳 系统提示 + 全部对话 + 工具定义 + 回答。按模型分别记忆，切换模型时自动带上各自的值；新模型会按显存与内存预算自动推算一个安全值。KV 成本差别很大：35B-A3B 约 2.5GB / 64K，而 27B（大 head_dim）约 16GB / 64K —— 后者请适当降低，否则占用大量内存/显存（启动时界面会显示 KV 预估）。'  # settings.py L1009（A4）
+SET_LTSVC_A4_3 = '当前模型加载进显存的层数。新模型会按显存与模型大小自动计算并记忆，此处修改仅对当前模型生效。0 = 全部放 CPU。'  # settings.py L997（A4）
+SET_LTSVC_A4_4 = '上下文长度（token）：容纳 系统提示 + 全部对话 + 工具定义 + 回答。按模型分别记忆，切换模型时自动带上各自的值；新模型会按显存与内存预算自动推算一个安全值。'  # settings.py L1009（A4）
 SET_LTSVC_N = '按模型记忆'  # settings.py L1014（N）
 SET_LTSVC_A4_5 = 'API 端口，默认 8080。'  # settings.py L1016（A4）
-SET_LTSVC_A4_6 = '思考模式：default 跟随模型模板；off 关闭思考（更快、不吃 max_tokens 额度）；budget 限制思考 token 数。'  # settings.py L1023（A4）
-SET_LTSVC_A3 = 'server 路径'  # settings.py L1025（A3）
-SET_LTSVC_A4_7 = 'llama-server.exe 完整路径。'  # settings.py L1026（A4）
+SET_LTSVC_A4_6 = '思考模式：default 跟随模型模板；off 关闭思考；budget 限制思考 token 数。'  # settings.py L1023（A4）
 SET_LTSVC_A3_2 = 'GPU 型号'  # settings.py L1035（A3）
 SET_LTSVC_A4_8 = '显卡型号（首次启动自动探测预填，可手动修改）。'  # settings.py L1036（A4）
 SET_LTSVC_A3_3 = '显存 (GB)'  # settings.py L1037（A3）
 SET_LTSVC_A4_9 = '显存容量：新模型 GPU 层数自动计算直接使用此值，不再临时询问系统；探测失败或多卡时可手动填写。'  # settings.py L1038（A4）
 SET_LTSVC_A3_4 = '内存 (GB)'  # settings.py L1040（A3）
-SET_LTSVC_A4_10 = '系统内存总量（首次启动自动探测预填，可修改）。加入 / 启动模型的性能分级用它判「装不装得下」。'  # settings.py L1041（A4）
-SET_LTSVC_A4_11 = 'CPU 线程数，0 = 自动。一般留 0。'  # settings.py L1045（A4）
-SET_LTSVC_A4_12 = '思考预算：reasoning=budget 时，思考最多用多少 token。'  # settings.py L1047（A4）
+SET_LTSVC_A4_10 = '系统内存总量（预填，有误可修改）。用来判断模型是否可以启动。'  # settings.py L1041（A4）
+SET_LTSVC_A4_11 = 'CPU 线程数，0 = 自动。'  # settings.py L1045（A4）
+SET_LTSVC_A4_12 = '思考预算：思考模式填budget 时，思考最多用多少 token。'  # settings.py L1047（A4）
 SET_LTSVC_A4_13 = '附加命令行参数（高级）：空格分隔，原样追加给 llama-server。'  # settings.py L1049（A4）
 
 # —— 本地媒体·生图 ——
 SET_LMIMG_A3 = '分辨率'  # settings.py L1063（A3）
-SET_LMIMG_A4 = '宽x高，如 1024x1024；填 832*480、832，480 也认，会自动归一成 x。分辨率越高越慢。会自动补到本族要求的倍数（SD 系 8 的倍数、Flux/SD3/Wan 16 的倍数），不合适的尺寸会被抬上去。'  # settings.py L1064（A4）
+SET_LMIMG_A4 = '宽x高，如 1024x1024；832*480；832，480。分辨率越高越慢。会自动补到模型要求的倍数。'  # settings.py L1064（A4）
 SET_LMIMG_N = '宽x高'  # settings.py L1067（N）
 SET_LMIMG_A4_2 = '本地生图的落地目录；留空 = 产物文件夹下的 本地\\image。填相对路径时按程序目录解析。'  # settings.py L1069（A4）
 SET_LMIMG_N_2 = '留空=产物文件夹'  # settings.py L1071（N）
@@ -968,22 +973,16 @@ SET_LMIMG_A1 = '生图输出目录'  # settings.py L1076（A1）
 SET_LMIMG_A2 = '本地生图 → 输出目录'  # settings.py L1077（A2）
 SET_LMIMG_A4_3 = '生成结果写在「输出目录」指定的文件夹（留空 = 产物文件夹\\本地\\image）下的 img_时间戳.png。'  # settings.py L1079（A4）
 SET_LMIMG_CAT = '生图模型：认出 %d 个'  # settings.py L1091（CAT）
-SET_LMIMG_A0 = '还没认到生图模型：先填下面两项，或去「模型文件与引擎」扫描'  # settings.py L1093（A0）
-SET_LMIMG_A3_2 = '引擎目录'  # settings.py L1097（A3）
-SET_LMIMG_A4_4 = 'sd.cpp 引擎所在目录（内含 sd-cli.exe / sd-server.exe）。'  # settings.py L1098（A4）
-SET_LMIMG_A3_3 = '生图模型文件夹'  # settings.py L1099（A3）
-SET_LMIMG_A4_5 = '扩散模型与它的配套件（VAE、文本编码器、视觉投影器 mmproj）都放这里；留空 = 模型目录下的「生图」子文件夹。'  # settings.py L1100（A4）
-SET_LMIMG_A3_4 = '默认生图模型'  # settings.py L1102（A3）
-SET_LMIMG_A4_6 = '默认选中的扩散模型文件名（.gguf / .safetensors / .ckpt 都行）。'  # settings.py L1103（A4）
+SET_LMIMG_A0 = '还没认到生图模型：用「模型文件与引擎 → 模型来源…」加入模型所在文件夹'  # settings.py L1093（A0）
 SET_LMIMG_A2_2 = '模型族'  # settings.py L1114（A2）
 SET_LMIMG_A4_7 = '按权重文件里的张量名与文件名自动认这一族；认错了在这里手动指定。'  # settings.py L1115（A4）
 SET_LMIMG_CAT_2 = '识别为：%s'  # settings.py L1131（CAT）
 SET_LMIMG_A3_5 = '默认步数'  # settings.py L1136（A3）
-SET_LMIMG_A4_8 = '默认采样步数（1~200）：少 = 快、多 = 细节更多，耗时大致与步数成正比（8 步与 20 步差两倍多）。具体到某个模型族的推荐值，看它自己页面的说明。'  # settings.py L1137（A4）
+SET_LMIMG_A4_8 = '默认采样步数（1~200）：少 = 快、多 = 细节多，模型推荐步数看模型介绍。'  # settings.py L1137（A4）
 SET_LMIMG_N_4 = '8 步最快'  # settings.py L1139（N）
 SET_LMIMG_A3_6 = '默认分辨率'  # settings.py L1140（A3）
 SET_LMIMG_A3_7 = '默认 CFG'  # settings.py L1145（A3）
-SET_LMIMG_A4_9 = '提示词服从度。Qwen-Image 官方推荐 2.5；Flux dev/schnell 常给 1.0，SDXL/SD1.5 常给 6~8。切族时记得改这一档。'  # settings.py L1146（A4）
+SET_LMIMG_A4_9 = '提示词服从度。Qwen-Image 官方推荐 2.5；Flux dev/schnell 常给 1.0，SDXL/SD1.5 常给 6~8。切模型时记得改这一档。'  # settings.py L1146（A4）
 SET_LMIMG_A4_10 = '本地生图的落地目录；留空 = 产物文件夹下的 本地\\image（产物文件夹在 设置 → 云端模型 → 生图 / 生视频 的「修改产物位置」里改）。填相对路径时按程序目录解析。'  # settings.py L1158（A4）
 SET_LMIMG_A3_8 = 'VAE 文件'  # settings.py L1162（A3）
 SET_LMIMG_A4_11 = '留空 = 在本族要求的目录里自动找（按文件名含 vae / ae）。放了多个家族的权重又挑错时，在这里指名。'  # settings.py L1163（A4）
@@ -1024,6 +1023,7 @@ SET_LMIMG_N_13 = '0=跟 CFG'  # settings.py L1226（N）
 SET_LMIMG_A3_19 = '参考图参数'  # settings.py L1227（A3）
 SET_LMIMG_A4_26 = '主体参考档专用：sd-cli --ref-image-args，键值对串原样拼进命令行（例如 strength=0.8）。--help 写明留空 = 按模型权重自动判断，留空就不传。参数名按 --help，数值未实测（坑 95）。'  # settings.py L1228（A4）
 SET_LMIMG_N_14 = '打开图片输出文件夹'  # settings.py L1236（N）
+SET_LMIMG_N_15 = '（先选一个生图模型）'  # settings.py L1072（N）
 SET_LMIMG_A2_4 = '生图（sd.cpp） → 高级参数 → 输出目录'  # settings.py L1240（A2）
 SET_LMIMG_A4_27 = '生成结果写在「输出目录」指定的文件夹（留空 = 产物文件夹\\本地\\image）下的 img_时间戳.png；引擎每次按需拉起，进程退出即释放显存。'  # settings.py L1242（A4）
 
@@ -1031,19 +1031,22 @@ SET_LMIMG_A4_27 = '生成结果写在「输出目录」指定的文件夹（留�
 SET_LMVID_A4 = '宽x高，如 512x512；填 832*480、832，480 也认，会自动归一成 x。视频分辨率对显存和耗时都很敏感，先小后大。'  # settings.py L1257（A4）
 SET_LMVID_A3 = '帧率'  # settings.py L1259（A3）
 SET_LMVID_A4_2 = '每秒帧数。MiniMax-H3 的参考视频按 24fps 组织。'  # settings.py L1260（A4）
-SET_LMVID_A3_2 = '帧数'  # settings.py L1261（A3）
+SET_LMVID_A3_2 = '帧数'  # settings.py L1261（A3，高级模式）
 SET_LMVID_A4_3 = '视频长度 = 帧数 ÷ 帧率。**不需要自己凑 4n+1**：引擎会自行对齐到合法帧数（例如填 17 会按 22 帧出片），估算时长也按对齐之后的算。'  # settings.py L1262（A4）
+# 普通模式生视频的「秒数」行（2026-10-17 W：普通用户想的是"生成多长"不是帧数；
+# 保存时折回 vid_frames = 秒数 × 帧率）
+SET_LMVID_SEC = '秒数'  # settings.py 普通模式生视频行标签
+SET_LMVID_SEC_HINT = '按帧率折算'  # settings.py 秒数行 hint（坑 90：收到 4~5 字）
+SET_LMVID_SEC_DESC = ('视频时长。保存时按 秒数 × 帧率 折算成帧数；引擎会把帧数对齐到'
+                      '合法档位，不用自己凑 4n+1。')  # 普通模式无 "?"，暂不显示
 SET_LMVID_N = '引擎自动对齐'  # settings.py L1264（N）
 SET_LMVID_A4_4 = '本地生视频的落地目录；留空 = 产物文件夹下的 本地\\video。填相对路径时按程序目录解析。'  # settings.py L1266（A4）
 SET_LMVID_A1 = '生视频输出目录'  # settings.py L1273（A1）
 SET_LMVID_A2 = '本地生视频 → 输出目录'  # settings.py L1274（A2）
 SET_LMVID_A4_5 = '生成结果写在「输出目录」指定的文件夹（留空 = 产物文件夹\\本地\\video）下的 vid_时间戳.webm。'  # settings.py L1276（A4）
 SET_LMVID_CAT = '视频模型：认出 %d 个'  # settings.py L1288（CAT）
-SET_LMVID_A0 = '还没认到视频模型：先填下面两项，或去「模型文件与引擎」扫描'  # settings.py L1290（A0）
-SET_LMVID_A3_3 = '视频模型文件夹'  # settings.py L1294（A3）
-SET_LMVID_A4_6 = '视频组件存放目录：扩散主体 + 文本编码器（LLM 或 T5-XXL）+ 视频 VAE，MiniMax-H3 与 Wan 都是这套摆法。该目录不存在时会自动改扫 models_dir 顶层与各子目录，所以文件散放在模型库里也能识别。'  # settings.py L1295（A4）
-SET_LMVID_A3_4 = '扩散主体文件名'  # settings.py L1299（A3）
-SET_LMVID_A4_7 = '留空 = 用扫描到的第一个视频扩散 GGUF。'  # settings.py L1300（A4）
+SET_LMVID_A0 = '还没认到视频模型：用「模型文件与引擎 → 模型来源…」加入模型所在文件夹'  # settings.py L1290（A0）
+SET_LMVID_N_6 = '（先选一个生视频模型）'  # settings.py L1249（N）
 SET_LMVID_A4_8 = '同一套 sd-cli 可以跑多个视频家族；认错了在这里手动指定。'  # settings.py L1311（A4）
 SET_LMVID_A3_5 = '采样步数'  # settings.py L1342（A3）
 SET_LMVID_A4_9 = '步数直接决定耗时；链路先通再逐步加大。'  # settings.py L1343（A4）
@@ -1429,11 +1432,11 @@ SET_DEV_N_9 = '将本软件签名列入系统级信任（所有用户）'  # set
 # —— 文件·引擎 ——
 SET_FENG_L1 = 'llama.cpp（对话引擎）'  # settings.py L4293（L1）
 SET_FENG_L5 = 'llama-server 所在目录'  # settings.py L4297（L5）
-SET_FENG_L6 = '本地模型 → 服务参数'  # settings.py L4298（L6）
+SET_FENG_L6 = '本地模型 → 模型文件与引擎'  # settings.py L4298（L6）
 SET_FENG_L7 = 'CUDA 版还要把 cudart 包里的运行库一起放进同一目录，否则启动时报缺 dll。'  # settings.py L4299（L7）
 SET_FENG_L1_2 = 'stable-diffusion.cpp（生图 / 生视频引擎）'  # settings.py L4301（L1）
 SET_FENG_L5_2 = 'sd.cpp 引擎目录'  # settings.py L4306（L5）
-SET_FENG_L6_2 = '本地模型 → 生图（sd.cpp）'  # settings.py L4307（L6）
+SET_FENG_L6_2 = '本地模型 → 模型文件与引擎'  # settings.py L4307（L6）
 SET_FENG_L7_2 = '生图与生视频共用这一个可执行文件，只是参数不同；同目录还要有一堆运行库 dll。'  # settings.py L4308（L7）
 SET_FENG_L0 = '未就位：还没指路（「打开目标目录」会告诉你该放去哪儿）'  # settings.py L4319（L0）
 SET_FENG_CAT = '已就位：'  # settings.py L4322（CAT）
@@ -1491,7 +1494,7 @@ SET_FILES_A4 = '三组模型与各自的配套件（VAE / 文本编码器 / CLIP
 SET_FILES_A2_2 = '匹配参数'  # settings.py L5025（A2）
 SET_FILES_A4_2 = '补全 = 只为缺记录的模型计算（不覆盖手动调整过的值）；全部重新计算 = 清空全部自动记录后重算（含覆盖手调值，会二次确认）。进这一页会自动补全一次（10 分钟内不重复）。'  # settings.py L5026（A4）
 SET_FILES_A2_3 = '文件整理'  # settings.py L5035（A2）
-SET_FILES_A4_3 = '把模型按 文本模型 / 生图模型 / 生视频模型 归入模型目录下的 model 文件夹；共用同一文本编码器的模型（如 qwen-image 2.1 的两个量化版本）收进同一个子文件夹（先预览、后执行；只移动不删除；名称无法判断归属的保持原位）。「手动定向模型」把别处的文件夹或单个 .gguf 加进来源 —— 只登记，不动文件。'  # settings.py L5036（A4）
+SET_FILES_A4_3 = '把模型按 文本模型 / 生图模型 / 生视频模型 归入模型目录下的 model 文件夹；共用同一文本编码器的模型（如 qwen-image 2.1 的两个量化版本）收进同一个子文件夹（先预览、后执行；只移动不删除；名称无法判断归属的保持原位）。「模型来源」把别处的文件夹或单个 .gguf 加进来源 —— 只登记，不动文件。'  # settings.py L5036（A4）
 
 # —— settings.py _build_section() ——
 SET_BUILD_SECTION_N = '（这个区块还没接上构建函数）'  # settings.py L5083（N）
@@ -1583,8 +1586,8 @@ DIAG_ELSE_15 = '换 python.org 的完整安装包，或装上系统发行版提�
 DIAG_PYTHON_FACT = '打包 exe 用自带运行库，不适用'  # core/diagnose.py L430（A4）
 DIAG_SERVER_EXE_TITLE = '没有指定推理引擎'  # core/diagnose.py L435（A3）
 DIAG_SERVER_EXE_FACT = '设置里的「引擎程序」是空的'  # core/diagnose.py L436（A4）
-DIAG_CAT_5 = '去 设置 → 本地模型 → 服务参数 里指向 %s。'  # core/diagnose.py L437（CAT）
-DIAG_L1_4 = '本地模型 → 服务参数'  # core/diagnose.py L439（L1）
+DIAG_CAT_5 = '去 设置 → 本地模型 → 模型文件与引擎 → 引擎管理 里用「手动定向」指向 %s。'  # core/diagnose.py L437（CAT）
+DIAG_L1_4 = '本地模型 → 模型文件与引擎'  # core/diagnose.py L439（L1）
 DIAG_CAT_6 = '找不到推理引擎 %s'  # core/diagnose.py L442（CAT）
 DIAG_SERVER_EXE_FIX = '引擎不随本程序分发（许可与体积原因）。在 设置 → 本地模型 → 模型文件与引擎 点「检查更新」→「更新引擎」装 llama.cpp（CUDA 档会连运行库一起下），或用「手动定向」指到已经放在本机的那一份（那一屏进页会先自动找一遍）。'
 DIAG_SERVER_EXE_TITLE_2 = '推理引擎已就位'  # core/diagnose.py L449（A3）

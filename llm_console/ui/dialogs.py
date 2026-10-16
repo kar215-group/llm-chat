@@ -56,8 +56,10 @@ class PairConfirmDialog(tk.Toplevel):
     """远程配对确认（坑 283）：新设备 / 并入已有逻辑设备，二选一 + 拒绝。
 
     info = {ip, os(系统标签), os_key, agent, cid, auto(自动识别到的 persona id),
-            candidates:[{id,name,os_set,last_seen}…]}。
+            candidates:[{id,name,os_set,added,last_seen}…]}。
     result = None（拒绝/关窗/Esc）或 `{"pid": "p_N" | ""}`（空串=新设备）。
+    候选由服务端收窄成同系统设备 + cid 命中的那台（坑 291）；候选为空时
+    不出现「这台设备算作」一节，只剩允许 / 拒绝（W 2026-10-16 拍板）。
     cid 命中过已有设备时默认选并入那台并给提示；否则默认"新设备"。
     """
 
@@ -70,6 +72,8 @@ class PairConfirmDialog(tk.Toplevel):
         info = info or {}
         cands = [c for c in (info.get("candidates") or []) if c.get("id")]
         auto_pid = str(info.get("auto") or "")
+        if auto_pid and all(c.get("id") != auto_pid for c in cands):
+            auto_pid = ""    # 预选的并入目标必须真在候选里，否则"允许"会并到没展示的设备
 
         ttk.Label(self, text=texts.DLG_PAIR_HEAD,
                   font=("Microsoft YaHei UI", 10, "bold")).pack(
@@ -94,12 +98,13 @@ class PairConfirmDialog(tk.Toplevel):
                       style="Note.TLabel", wraplength=420, justify="left").pack(
                 padx=28, pady=(6, 2), anchor="w")
 
-        box = ttk.LabelFrame(self, text=texts.DLG_PAIR_COUNT_AS)
-        box.pack(padx=28, pady=(8, 4), fill="x")
+        # var 无论有没有候选都建：空串 = 新设备，_allow 靠它回决策
         self.var = tk.StringVar(value=auto_pid or "")
-        ttk.Radiobutton(box, text=texts.DLG_PAIR_NEW,
-                        variable=self.var, value="").pack(anchor="w", padx=10, pady=(6, 2))
         if cands:
+            box = ttk.LabelFrame(self, text=texts.DLG_PAIR_COUNT_AS)
+            box.pack(padx=28, pady=(8, 4), fill="x")
+            ttk.Radiobutton(box, text=texts.DLG_PAIR_NEW,
+                            variable=self.var, value="").pack(anchor="w", padx=10, pady=(6, 2))
             for c in cands:
                 oses = "、".join(os_label(k) for k in (c.get("os_set") or [])) or texts.DLG_PAIR_UNKNOWN_OS
                 seen = str(c.get("last_seen") or "")
@@ -108,9 +113,6 @@ class PairConfirmDialog(tk.Toplevel):
                                           % (str(c.get("name") or "?"), tail),
                                 variable=self.var,
                                 value=str(c["id"])).pack(anchor="w", padx=10, pady=1)
-        else:
-            ttk.Label(box, text=texts.DLG_PAIR_NO_OTHERS, style="Muted.TLabel").pack(
-                anchor="w", padx=10, pady=(0, 6))
 
         ttk.Label(self, text=texts.DLG_PAIR_REVOKE_HINT,
                   style="Muted.TLabel", wraplength=420, justify="left",

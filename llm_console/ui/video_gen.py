@@ -31,13 +31,15 @@ class VideoGenMixin:
             self._append(texts.VID_NO_ENGINE % (cli or texts.MEDIA_NO_DIR), "error")
             return
         files = resolve_video_files(self.cfg)
+        if not files.get("diffusion"):
+            # 选中项坏了（文件被删 / 搬走）：报错让用户重选，不静默换一个模型（2026-10-16 收口）
+            self._append(texts.VID_NO_MODEL, "error")
+            return
         # 人工指定的配套件没找到：逐条点名（R-20，与生图预检同一口径/同一句文案）
         for _s, _w in (files.get("manual_missing") or []):
             self._append(texts.MEDIA_MANUAL_MISSING % (sdprofile.slot_name(_s), _w), "error")
         if files["missing"]:
-            self._append(texts.VID_MISSING
-                         % ("\n  · ".join(files["missing"]),
-                            self.cfg.get("video_model_dir") or texts.VID_DEFAULT_DIR), "error")
+            self._append(texts.VID_MISSING % "\n  · ".join(files["missing"]), "error")
             return
         # "必闪退"档启动确认（2026-10-06）：摆在消费输入框之前，点否一个字都不丢（坑 133）
         if not self._confirm_fatal_perf(files["diffusion"], "video", files=files):

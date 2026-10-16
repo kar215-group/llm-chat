@@ -31,7 +31,7 @@ CONFIG_PATH = os.path.join(APP_DIR, "gui_config.json")
 
 # 版本号：发版时改这一处（--selfcheck / --version 会打印它）。
 # GitHub Release 的 tag 要与它一致（tag 去掉开头的 v），Actions 工作流会做一致性校验。
-APP_VERSION = "2.0.0"
+APP_VERSION = "2.0.1"
 
 CFG_VERSION = 3
 
@@ -91,7 +91,10 @@ DEFAULT_CONFIG = {
     "show_usage": True,            # 每轮结束后显示 token 用量（云端计费可见性）
     # ---- 模型分类 ----
     "model_kind": "chat",          # 当前选中模型的类型：chat / image / video
-    "image_model_dir": "",           # 生图大模型子文件夹；留空 = models_dir/生图
+    # （image_model_dir / video_model_dir / img_model_file / vid_model_file 四个旧键
+    #   2026-10-16 已收口删除：生图 / 生视频用哪个模型一律认**菜单选中的那个**；
+    #   "模型在哪"统一归「模型来源」（load_config 会把老配置里 set 过的目录折进
+    #   extra_models 一次，见下方迁移段）。）
     # 「已经替用户自动选中过一个模型」的标记（坑 150）。程序只自动接管一次：用户自己
     # 在菜单 / 设置页选过也置位。只有"一个可用的模型都不剩"时才会清掉重新武装 ——
     # 所以删光全部模型后再配第一个，这条会再生效一次。不用 cfg_version 升级那道闸：
@@ -99,7 +102,6 @@ DEFAULT_CONFIG = {
     "model_auto_picked": False,
     # ---- 生图（sd.cpp；参数形状由 core/sdprofile 按模型族决定）----
     "sd_dir": "",                    # sd.cpp 部署目录（含 sd-cli.exe）；在设置里指路
-    "img_model_file": "",          # 生图扩散模型文件名（在 image_model_dir 下）
     "img_steps": 20,               # 采样步数：8 步 ~1m20s，12 步 ~1m50s，20 步 ~2m50s（细节更多）
     "img_size": "1024x1024",
     "img_cfg": 2.5,                # 官方推荐值
@@ -137,8 +139,6 @@ DEFAULT_CONFIG = {
     "img_extra_args": "",          # 原样拼进命令行的人工出口
     # ---- 生视频（sd.cpp，与生图同一引擎、不同链路）----
     # 注意：以下档位是"能跑通链路"的保守默认值，尚未在开发机 8GB 显存上实测校准
-    "video_model_dir": "",           # 视频组件目录；留空/不存在时回退扫描 models_dir
-    "vid_model_file": "",          # 视频扩散主体文件名（留空 = 用扫描到的第一个）
     "vid_llm_file": "",            # 视频文本编码器文件名（留空 = 自动配对同目录编码器）
     "vid_vae_file": "",            # 视频 VAE 文件名（缺失时启动前就提示，不浪费排队时间）
     "vid_family": "",              # 模型族人工覆盖（minimax-h3 / wan / ltx / generic …）
@@ -283,7 +283,7 @@ DEFAULT_CONFIG = {
     # 「查询到新版本」还是"已经是最新"。手动定向 / 用户自己放的引擎不写这里 ⇒ 会被当成
     # "可能有新版"（程序无从知道他那份是什么版本）。
     "engine_installed": {},
-    # ---- 手动定向的模型来源（设置 → 模型文件与引擎 →「文件整理 → 手动定向模型」）----
+    # ---- 手动登记的模型来源（设置 → 模型文件与引擎 →「模型来源…」窗）----
     # 用户手动加入的文件夹或 .gguf 完整路径；**只登记、不动文件**，扫描时一并收进三组清单。
     "extra_models": [],
 }
@@ -303,12 +303,11 @@ FLOAT_KEYS = ("temperature", "top_p", "repeat_penalty", "vram_gb", "ram_gb",
 
 # 「model」故意不在这里：它与云端复合 id 共用（坑 146），写回另有分支（settings._apply_settings）
 STR_KEYS = ("models_dir", "host", "api_key", "reasoning_mode",
-            "extra_args", "exe", "gpu_name", "sd_dir", "image_model_dir",
-            "img_model_file", "img_size", "img_family", "img_ref_mode", "img_ref_args",
+            "extra_args", "exe", "gpu_name", "sd_dir",
+            "img_size", "img_family", "img_ref_mode", "img_ref_args",
             "img_vae_file", "img_llm_file", "img_clip_l_file", "img_clip_g_file",
             "img_t5_file", "img_tokenizer_file", "img_backend", "img_params_backend",
             "img_negative", "img_extra_args",
-            "video_model_dir", "vid_model_file",
             "vid_llm_file", "vid_vae_file", "vid_format", "vid_size",
             "vid_family", "vid_t5_file", "vid_tokenizer_file", "vid_high_noise_file",
             "vid_audio_vae_file",
@@ -387,6 +386,41 @@ def load_config():
         # 云端「展示思考过程」新键首次落地：继承本地开关的当前值，升级前后行为不变；
         # 此后两个键完全独立（各自页面各自改）。
         cfg["cloud_show_reasoning"] = bool(cfg.get("show_reasoning", True))
+    # 生图 / 生视频模型位置收口（2026-10-16，W 定）：image_model_dir / video_model_dir
+    # 两个"隐形来源"（放进它们目录的模型直接进菜单，却不出现在「模型来源」窗、整理也不
+    # 认）并入 extra_models，键清掉；img_model_file / vid_model_file 两个失效键直接删
+    # （发送侧改为一律认菜单选中的那个模型，见 media.resolve_img_model_path）。
+    # **幂等**：折过一次键就没了，重复 load 不会再动 extra_models（所以不必过 cfg_version 闸）。
+    try:
+        _em = list(cfg.get("extra_models") or [])
+        _base = os.path.normcase(os.path.normpath(str(cfg.get("models_dir") or "")))
+
+        def _covered(_np):
+            """归一化路径是否已被模型目录树或某个来源树覆盖（嵌套的不用再登记）。"""
+            e = os.path.normcase(_np)
+            if _base and (e == _base or e.startswith(_base + os.sep)):
+                return True
+            for x in _em:
+                xc = os.path.normcase(os.path.normpath(str(x)))
+                if e == xc or e.startswith(xc + os.sep):
+                    return True
+            return False
+
+        for _k in ("image_model_dir", "video_model_dir"):
+            _v = str(cfg.pop(_k, "") or "").strip()
+            if not _v:
+                continue
+            _np = os.path.normpath(_v)
+            if not os.path.isdir(_np):
+                continue                    # 目录已不在：不用搬进来源
+            if _covered(_np):
+                continue                    # 已被模型目录树 / 来源树覆盖：不用重复登记
+            _em.append(_np)
+        cfg["extra_models"] = _em
+    except Exception:
+        pass
+    for _k in ("img_model_file", "vid_model_file"):
+        cfg.pop(_k, None)
     cfg["cfg_version"] = CFG_VERSION
     # 内置服务商种进清单（幂等，只补不覆盖）；这里延迟导入避开 config ↔ providers 的环
     try:

@@ -42,9 +42,9 @@ class ImageGenMixin:
         if not os.path.isfile(cli):
             self._append(texts.IMG_NO_ENGINE % (cli or texts.MEDIA_NO_DIR), "error")
             return
-        # 扩散模型一律走统一出口（绝对路径）：菜单选中 → 默认生图模型 → 扫描到的第一个。
-        # 原来这里是"取 basename 再拼回 image_model_dir"，模型不在那个目录就必然报未找到
-        # （出厂默认 `image_model_dir` 为空时必坏，见 core/media.resolve_img_model_path）。
+        # 扩散模型一律走统一出口（绝对路径）：**菜单里选中的那个就是用的那个**
+        # （2026-10-16 收口：默认生图模型 / 扫描第一个两条旧兜底已删——坏选中报错让重选，
+        #  不再静默换模型；resolve 返回空串即"当前选中文件不在了"，见 media.resolve_img_model_path）。
         diffusion = resolve_img_model_path(self.cfg)
         if not diffusion:
             self._append(texts.IMG_NO_MODEL, "error")

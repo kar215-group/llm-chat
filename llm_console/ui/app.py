@@ -139,7 +139,7 @@ class App(ChatMixin, ImageGenMixin, VideoGenMixin, ServiceMixin, ModelsMixin, Se
         # 挂 App（不是窗口上）→ 关掉设置窗再开仍在，与 _upd_check 同一条口径。
         self._model_scan = throttle.AutoThrottle(throttle.AUTO_SCAN_COOLDOWN)
         # 「第一个可用的模型配好了就切过去」那条兜底轮询的冷却（坑150）。真正让主页面
-        # "立即响应"的是事件钩子（设置页保存 / 引擎装完 / 手动定向模型，都是 force=True），
+        # "立即响应"的是事件钩子（设置页保存 / 引擎装完 / 模型来源增删，都是 force=True），
         # 这一处只是安全网：用户在程序外面放了模型、或密钥是别的进程写进去的。
         self._auto_pick = throttle.AutoThrottle(throttle.AUTO_PICK_COOLDOWN)
         # 开发者模式（W 2026-10-04）：入口是"关于页那行版本号连点 5 次"，见 ui/settings.py。
@@ -395,8 +395,8 @@ class App(ChatMixin, ImageGenMixin, VideoGenMixin, ServiceMixin, ModelsMixin, Se
     def _first_open_scan(self):
         """首次打开扫一遍引擎与模型（W 2026-10-05 第二轮）。
 
-        引擎：两份**都没就位**时按「自动定向」的判据找一次并写回指路 —— 判据 / 落点就是
-        `engine_install.auto_locate` / `set_dir`，与界面那个「自动定向」按钮**同一个函数**。
+        引擎：两份**都没就位**时按自动定向的判据找一次并写回指路 —— 判据 / 落点就是
+        `engine_install.auto_locate` / `set_dir`，与「引擎管理」进页自动扫描**同一个函数**。
         模型目录：当前指的目录里**一个 `.gguf` 都没有**、又没手动定向来源时，按
         `models.auto_locate_models_dir` 找一个装着模型的目录写回（廉价判据：只看文件名）。
         这两步**同步**做：引导第一屏的缺件判据下一刻就要算，异步的话会显示成"还没配好"。
