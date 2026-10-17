@@ -27,10 +27,10 @@ import re
 import threading
 import time
 
+from .. import texts
 from ..core.models import display_name, scan_models
 from ..core.server import _query_serving_model, server_state
 from .stream import stream_worker
-from .. import texts
 
 # 会话上限：按**字符数**从头截（不是按轮数——一轮长思考就能吃掉几千字）。
 # 超上下限时 llama-server 会回 400，`friendly_error` 已能把那句原话翻出来，
@@ -39,7 +39,8 @@ HISTORY_CHARS = 24000
 TEXT_MAX_CHARS = 4000           # 与远程生图的提示词同一条上限
 
 # 用户可见文案（W 2026-10-12 批准清单外的新句，逐字待点；口径 = 只给人话 + 指得出去哪儿修）
-NOT_RUNNING_MSG = (texts.RCH_NOT_RUNNING_MSG)
+NOT_RUNNING_MSG = ("电脑端的文本服务没在跑：在电脑端主界面点「启动服务」。"
+                   "远程不代起服务，也不换模型。")
 LOADING_MSG = texts.RCH_LOADING_MSG
 NOT_CHAT_MSG = texts.RCH_NOT_CHAT_MSG
 BUSY_MSG = texts.RCH_BUSY_MSG
@@ -101,7 +102,7 @@ def ready(cfg):
     for p in chat:
         if os.path.basename(p) == tb:
             return True, "", display_name(cfg, p)
-    return False, NOT_CHAT_MSG % (tb or texts.RCH_N), ""
+    return False, NOT_CHAT_MSG % (tb or texts.DLG_PAIR_UNKNOWN_OS), ""
 
 
 class RemoteChat:
@@ -113,9 +114,13 @@ class RemoteChat:
     会被拒，反过来也是。
     """
 
-    def __init__(self, cfg, local_busy=None):
+    def __init__(self, cfg, local_busy=None, note_fn=None):
         self.cfg = cfg
         self._local_busy = local_busy or (lambda: False)
+        # 桌面端输出栏的话（16 §4.3）：手机那头开始一轮对话时说一声。
+        # 只在"从空闲进入运行"时报一次，不在每个 token 上报（这层拿不到 token 事件，
+        # 但一轮 = 一次 submit，天然就是一问一句）。
+        self.note = note_fn or (lambda msg: None)
         self._lock = threading.Lock()        # 护 _job 与 _sessions
         self._job = None                     # 运行中的那条（单槽的"槽"就是它）
         self._sessions = {}                  # device_id -> [ {role, content} ]
@@ -173,6 +178,10 @@ class RemoteChat:
                          daemon=True, name="remote-chat").start()
         threading.Thread(target=self._drain, args=(job, q),
                          daemon=True, name="remote-chat-io").start()
+        try:
+            self.note(texts.REM_NOTE_CHAT)
+        except Exception:
+            pass
         return True, ""
 
     def _produce(self, job, q, stop):

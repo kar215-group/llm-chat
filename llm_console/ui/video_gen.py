@@ -99,6 +99,9 @@ class VideoGenMixin:
         self._vid_out = out
         self._vid_t0 = time.time()
         self._vid_saw_decode = False
+        self._vid_saw_load = False
+        self._vid_saw_encode = False
+        self._vid_last_line_ts = self._vid_t0
         self._vid_tail = []
         self._vid_phase = "load"
         self._stop_flag = threading.Event()
@@ -137,6 +140,9 @@ class VideoGenMixin:
                          args=(self._vid_proc, mygen, self._vid_log, self._vid_t0,
                                [out]),
                          daemon=True).start()
+        # 编码阶段看门狗（16 §1.5）：取样前那 ~80s 文本编码引擎一个字都不打，进度行会
+        # 长时间停在「加载模型权重… 7/7」，看着像死。只排一次，到点自己判在不在编码段。
+        self.after(8000, lambda: self._vid_encode_watch(mygen))
 
     # ---- 云端生视频（三期：异步任务 提交 → 轮询 → 下载）----
     def _confirm_cloud_video_spend(self):
@@ -164,7 +170,7 @@ class VideoGenMixin:
                                      providers.media_price_note(provider, providers.KIND_VIDEO,
                                                                 dur, model)))
 
-    def _start_cloud_video(self, prompt, doc=None):
+    def _start_cloud_video(self, prompt, doc=None, first_frame=""):
         provider = providers.current_provider(self.cfg)
         sp = providers.split_cloud_id(self.cfg.get("model", ""))
         model = sp[1] if sp else ""
@@ -172,6 +178,18 @@ class VideoGenMixin:
         if err:
             self._append(texts.VID_CLOUD_ERR % err, "error")
             return
+        # 首帧：发送方已在 chat.send_message 预检过；这里再判一次（最后一道），
+        # 并编成 data URL。只在万相 i2v 这条路上会非空（C2-4）。
+        err = cloud_media.first_frame_error(provider, model, first_frame)
+        if err:
+            self._append(texts.VID_CLOUD_ERR % err, "error")
+            return
+        frame_url = ""
+        if first_frame:
+            frame_url, err = cloud_media.first_frame_data_url(first_frame)
+            if err:
+                self._append(texts.VID_CLOUD_ERR % err, "error")
+                return
         outdir = config.cloud_media_dir(self.cfg, "video")
         try:
             os.makedirs(outdir, exist_ok=True)
@@ -185,7 +203,17 @@ class VideoGenMixin:
         self.clear_attachment()
         self._opt_star_refresh()      # 同 _start_chat_video（R-89）
         self._append(texts.MEDIA_USER_PREFIX + prompt + "\n", "user")
+        if first_frame:
+            self._append(texts.VID_CLOUD_FRAME % os.path.basename(first_frame), "meta")
         prompt = self._doc_merge(prompt, doc)
+        # 方舟只收小写档位：老配置里存着 720P 这种写法时，提交前把换算如实说一次
+        # （C2-1/C2-2：白名单仍可手填，但不让"我填了 720P、到底发了什么"成谜）。
+        _pf = providers.profile_for(provider, model)
+        _res = str(self.cfg.get("cloud_video_resolution", "") or "").strip()
+        _wl = tuple(_pf.get("vid_res") or ())
+        if _res and _wl and _res.lower() in [v.lower() for v in _wl] \
+                and _res not in _wl:
+            self._append(texts.VID_CLOUD_RES_CONVERT % (_res, _res.lower()), "meta")
         gen, q, stop = self._cloud_begin("video")
         self._cloud_pid = str(provider["id"])
         self._vid_out = out
@@ -195,10 +223,10 @@ class VideoGenMixin:
                                           provider.get("name") or ""))
         threading.Thread(target=self._cloud_video_worker,
                          args=(provider, model, prompt, out, gen, q, stop),
-                         daemon=True).start()
+                         kwargs={"first_frame": frame_url}, daemon=True).start()
 
     def _cloud_video_worker(self, provider, model, prompt, dest, gen, q, stop_flag,
-                            tid=""):
+                            tid="", first_frame=""):
         """子线程：提交 / 轮询 / 下载，事件只往队列里投（坑 11/54 的铁律）。
 
         `tid` 非空 = 从台账取回旧任务，**不再提交一次**——重复提交就是重复扣钱。
@@ -228,7 +256,8 @@ class VideoGenMixin:
                     ratio=str(self.cfg.get("cloud_video_ratio", "") or ""),
                     negative=str(self.cfg.get("cloud_video_negative", "") or ""),
                     seed=_int("vid_seed", -1), log_path=log_path,
-                    title=texts.VID_CLOUD_SUBMIT_TITLE % model)
+                    title=texts.VID_CLOUD_SUBMIT_TITLE % model,
+                    first_frame=str(first_frame or ""))
                 if not r["ok"]:
                     emit(("line", texts.VID_SUBMIT_FAIL % r["error"]))
                     q.put(("exit", 1, gen))
@@ -321,6 +350,29 @@ class VideoGenMixin:
                 pass
         self._vid_q.put(("exit", rc, gen))
 
+    def _vid_encode_watch(self, gen):
+        """加载阶段的静默看门狗：采样前那段文本编码**引擎一个字都不打**（实测约 80s）。
+
+        判据不是"过了几秒"，而是"权重加载行已经出过、之后静默了 8 秒" —— 慢盘上张量
+        加载本身会有间隙，只看时间会在"还在装权重"时就报编码，比不说更误导。
+        一次性文案：写过就不再重排（用户看到的应该是稳定的"正在编码"，不是每 3 秒跳一次）。
+        """
+        if gen != self._vid_gen or not getattr(self, "_vid_busy", False):
+            return                      # 过期 / 已收尾：看门狗自行消失
+        if getattr(self, "_closing", False):
+            return                      # 窗口已关：别再排 after（Tk 已拆，排了只会抛）
+        if getattr(self, "_vid_saw_encode", False) or self._vid_phase == "sample" \
+                or getattr(self, "_vid_saw_decode", False):
+            return                      # 已进采样 / 解码，这条文案没机会再出现
+        last = float(getattr(self, "_vid_last_line_ts", 0) or 0)
+        quiet = time.time() - last
+        if getattr(self, "_vid_saw_load", False) and quiet >= 8:
+            self._vid_saw_encode = True
+            self._update_vid_progress_line(
+                texts.VID_PROG_ENCODE % int(time.time() - self._vid_t0))
+            return
+        self.after(3000, lambda: self._vid_encode_watch(gen))
+
     def _update_vid_progress_line(self, text):
         mark = getattr(self, "_vid_mark", None)
         if not mark:
@@ -343,6 +395,8 @@ class VideoGenMixin:
         if self._stop_flag is not None and self._stop_flag.is_set():
             return
         elapsed = int(time.time() - self._vid_t0) if getattr(self, "_vid_t0", None) else 0
+        if line.strip():
+            self._vid_last_line_ts = time.time()   # 看门狗用它判"静默了多久"
         low = line.lower()
         m = re.search(r"(\d+)/(\d+) - ", line)
         try:
@@ -358,6 +412,7 @@ class VideoGenMixin:
             elif total != steps:
                 # 权重加载（如 551/551、8/8）与采样后的附加阶段（如 9/9）也打印 x/y，
                 # 都不是采样进度：只报阶段与耗时，**绝不把原始进度条 |####…| 倒进聊天区**
+                self._vid_saw_load = True
                 self._update_vid_progress_line(
                     texts.VID_PROG_OTHER
                     % (texts.VID_PHASE_POST if getattr(self, "_vid_phase", "load") == "sample"

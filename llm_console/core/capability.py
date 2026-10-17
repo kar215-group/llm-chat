@@ -104,10 +104,22 @@ def auto_detect(cfg):
                 if providers.ref_image_mode(p) == "subject":
                     return YES, "cloud", texts.CAP_L2
                 return YES, "cloud", texts.CAP_L2_2
+            if providers.ref_image_unverified(p):
+                # 官方页写了这个入参、只是我们还没实测语义（坑 101）：同样拦下，
+                # 但不能对人说"这一家只收文字" —— 那是假的
+                return NO, "cloud", texts.CAP_L2_3_2
             return NO, "cloud", (texts.CAP_L2_3)
         return YES, "engine", texts.CAP_L2_4
     if kind == "video":
         if cloud:
+            p = providers.current_provider(cfg) or {}
+            sp = providers.split_cloud_id(cfg.get("model", ""))
+            model = sp[1] if sp else ""
+            mode = providers.first_frame_mode(p, model)
+            if mode == "base64":
+                return YES, "cloud", texts.CAP_L2_13
+            if mode == "unverified":
+                return NO, "cloud", texts.CAP_L2_5_2
             return NO, "cloud", texts.CAP_L2_5
         if _VIDEO_IMG_IN.search(key):
             return YES, "variant", texts.CAP_L2_6
@@ -193,10 +205,11 @@ def resolve_modes(cfg, family=None):
     if providers.is_cloud(cfg):
         p = providers.current_provider(cfg) or {}
         modes = providers.ref_image_modes(p)
-        flag = texts.CAP_IF if modes else "none"
+        unverified = providers.ref_image_unverified(p)
+        flag = texts.CAP_IF if (modes or unverified) else "none"
         if not modes:
             return {m: {"ok": False, "flag": flag,
-                        "why": texts.CAP_DWHY}
+                        "why": texts.CAP_DWHY_2 if unverified else texts.CAP_DWHY}
                     for m in MODES}
         return {m: {"ok": m in modes, "flag": flag,
                     "why": "" if m in modes

@@ -528,16 +528,21 @@ def probe(provider, api_key=None, model=None):
     key = api_key if api_key is not None else secrets.get_api_key(provider["id"])
     if not key:
         return False, texts.CLD_L1_9
-    models = provider.get("models") or []
     if not model:
         # 只拿文本模型测：生图/生视频走的是另一套原生协议，用 chat 请求探它们必然 400，
-        # 而且个别平台（阿里云）会把它当成一次真实生成来计费
-        # 局部变量取名避开模块级文案模块（2026-10-16 起本文件引用 llm_console 文案常量）
-        text_models = [m for m in models
-                       if providers.model_kind_of(provider, m) == providers.KIND_TEXT]
-        if not text_models:
+        # 而且个别平台（阿里云）会把它当成一次真实生成来计费。
+        # 自动挑模型交给 providers.test_connection_model：实时 / 语音 / 向量 / 重排先排除，
+        # 优先常见聊天模型 —— 不能拿"菜单里第一个文本模型"去赌权限（2026-10-17 百炼实测）。
+        model = providers.test_connection_model(provider)
+        if not model:
+            # 只有媒体模型的菜单：别让用户以为 key 坏了 —— 测试连接只测文本，
+            # 媒体接口在发送前另有一套预检（C2-1 起）。
+            media = [m for m in (provider.get("models") or [])
+                     if providers.model_kind_of(provider, m)
+                     in (providers.KIND_IMAGE, providers.KIND_VIDEO)]
+            if media:
+                return False, (texts.CLD_CAT_23_2 % provider["name"])
             return False, (texts.CLD_CAT_23 % provider["name"])
-        model = text_models[0]
     elif providers.model_kind_of(provider, model) != providers.KIND_TEXT:
         return False, texts.CLD_CAT_24 % model
     if not model:

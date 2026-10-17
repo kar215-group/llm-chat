@@ -46,6 +46,10 @@ BUILTIN_PROVIDERS = {
         "name": "阿里云百炼（按量）",
         "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
         "editable_base_url": True,
+        # 放开地址的那几条各自带一句"改成什么"的说明：**按条目挂**，不是一句通用话 ——
+        # 原来这一句写死在界面上，只有百炼一家能改地址所以没露馅，加第二家就把
+        # 阿里云的 WorkspaceId 域名例子摆到了火山引擎头上（走查截图抓到的）
+        "base_note": texts.SET_PROV_N_2,
     },
     # ---- v40 新增的五家（W 2026-10-01 直接给的地址）----
     # 全部是 OpenAI 兼容的 chat 端；生图/生视频各家走的是**自己那套原生协议**，
@@ -74,6 +78,16 @@ BUILTIN_PROVIDERS = {
         "base_url": "https://api.modelarts-maas.com/openai/v1",
         "media_base_url": "https://api.modelarts-maas.com",
     },
+    # 字节火山引擎的火山方舟（Ark）：聊天走 OpenAI 兼容的 /api/v3，生图与生视频走**同前缀下**
+    # 的原生端点（所以不用预置 media_base_url，形状与智谱同一类）。数据面域名按地域拼
+    # （`ark.<地域>.volces.com`，官方页给的是北京），别的地域的用户改了才连得上（坑 55）
+    # → 与按量百炼同一处理：base_url 放开、名称仍固定。
+    "volcengine": {
+        "name": "字节火山引擎",
+        "base_url": "https://ark.cn-beijing.volces.com/api/v3",
+        "editable_base_url": True,
+        "base_note": texts.SET_PROV_N_2_2,
+    },
 }
 
 
@@ -82,8 +96,17 @@ def is_builtin(pid):
 
 
 def builtin_base_editable(pid):
-    """内置服务商里，base_url 允许用户改的那一类（只有按量百炼：工作空间域名因账号而异）。"""
+    """内置服务商里，base_url 允许用户改的那一类（域名因账号 / 地域而异的那几条：
+    按量百炼的工作空间域名、方舟的数据面地域域名）。"""
     return bool(BUILTIN_PROVIDERS.get(str(pid or ""), {}).get("editable_base_url"))
+
+
+def builtin_base_note(pid):
+    """放开地址时那一行"改成什么"的说明；**按条目挂**，没有就不显示。
+
+    界面上不许再写死某一家域名当例子 —— 那等于把 A 家的做法说成 B 家的。
+    """
+    return str(BUILTIN_PROVIDERS.get(str(pid or ""), {}).get("base_note") or "")
 
 
 def builtin(pid):
@@ -141,6 +164,38 @@ def model_kind_of(provider, model):
     return k if k in KINDS else KIND_TEXT
 
 
+# 「测试连接」自动挑模型：各家 /models 会把实时、语音、向量、重排混进文本清单，
+# 第一个文本模型不一定是能聊的（百炼这次就撞上没权限的 cmaas-*）。优先挑常见聊天模型，
+# 再退到无厂商前缀的第一个文本模型；调用方传了"当前选中的云文本模型"就用它。
+_TEST_CHAT_SKIP = ("audio", "tts", "asr", "realtime", "embedding", "rerank",
+                    "ocr", "mt-", "translate")
+_TEST_CHAT_PREF = ("qwen3.8-flash", "qwen-flash", "qwen-plus", "qwen-max",
+                   "qwen-turbo", "deepseek-v4-flash", "deepseek-chat",
+                   "deepseek-reasoner")
+
+
+def test_connection_model(provider, preferred=""):
+    """「测试连接」用哪个文本模型 → 模型名；没有文本模型返回 ""。"""
+    p = provider or {}
+    models = [m for m in (p.get("models") or [])
+              if model_kind_of(p, m) == KIND_TEXT]
+    if not models:
+        return ""
+    pref = str(preferred or "").strip()
+    if pref in models:
+        return pref
+    low = lambda m: str(m).lower()
+    chat = [m for m in models
+            if not any(k in low(m) for k in _TEST_CHAT_SKIP)]
+    for name in _TEST_CHAT_PREF:
+        if name in chat:
+            return name
+    for m in chat:
+        if "/" not in m:
+            return m
+    return (chat or models)[0]
+
+
 def models_by_kind(provider):
     """{kind: [模型名, ...]}，用于设置页的分类显示与模型菜单分组。"""
     out = {k: [] for k in KIND_ORDER}
@@ -188,13 +243,20 @@ _ALI_HOST_SUFFIXES = ("maas.aliyuncs.com", "dashscope.aliyuncs.com",
 _MINIMAX_HOSTS = ("minimaxi.com", "minimax.chat", "minimax.cn", "minimax.io")
 _ZHIPU_HOSTS = ("bigmodel.cn", "zhipuai.cn", "z.ai")
 _HUAWEI_HOSTS = ("modelarts-maas.com",)
+# 方舟数据面域名的形状是 `ark.<地域>.volces.com`（官方页只写了北京），所以认后缀而不是
+# 整条主机名 —— 换个地域的用户照样认得出来。管控面那个 volcengineapi.com 不吃 Bearer 那套，
+# 不在这里放行。
+_VOLC_HOSTS = ("volces.com",)
 MEDIA_ALIYUN = "aliyun"
 MEDIA_MINIMAX = "minimax"
 MEDIA_ZHIPU = "zhipu"
 MEDIA_HUAWEI = "huawei"
-MEDIA_APIS = ("auto", "none", MEDIA_ALIYUN, MEDIA_MINIMAX, MEDIA_ZHIPU, MEDIA_HUAWEI)
+MEDIA_VOLC = "volcengine"
+MEDIA_APIS = ("auto", "none", MEDIA_ALIYUN, MEDIA_MINIMAX, MEDIA_ZHIPU, MEDIA_HUAWEI,
+              MEDIA_VOLC)
 MEDIA_LABEL = {MEDIA_ALIYUN: "阿里云原生（DashScope）", MEDIA_MINIMAX: "MiniMax 原生",
-               MEDIA_ZHIPU: "智谱GLM 原生", MEDIA_HUAWEI: "华为云MaaS 原生"}
+               MEDIA_ZHIPU: "智谱GLM 原生", MEDIA_HUAWEI: "华为云MaaS 原生",
+               MEDIA_VOLC: "火山方舟 原生"}
 # 原生路径**自带版本段**（/v1/...）的协议：根地址只取到"协议+主机"，
 # 否则从 base_url 推根时会把 /openai 这种中间段留在根里，拼出 404
 _HOST_ONLY_MEDIA = (MEDIA_MINIMAX, MEDIA_HUAWEI)
@@ -231,6 +293,8 @@ def media_api(p):
             return MEDIA_ZHIPU
         if _ends_with(host, _HUAWEI_HOSTS):
             return MEDIA_HUAWEI
+        if _ends_with(host, _VOLC_HOSTS):
+            return MEDIA_VOLC
     return ""
 
 
@@ -407,10 +471,11 @@ def priced_models(p, kind=None):
     return sorted(out)
 
 
-def media_price_note(p, kind, seconds=0, model=""):
+def media_price_note(p, kind, seconds=0, model="", count=1):
     """费用预估一行；单价没填就明说不知道，别拍一个数字出来（坑 55 的延伸：不编数）。
 
     单价**按模型**查 —— 同一家不同模型不同价、不同单位，按服务商查是这次改掉的那个错。
+    `count` 只对按张计费的云端生图有意义（C2-3 ×n）：>1 时把张数与总价一起报出来。
     """
     per, unit = price_of(p, model, kind)
     if per <= 0:
@@ -420,6 +485,12 @@ def media_price_note(p, kind, seconds=0, model=""):
         n = int(seconds or 0)
         return texts.PRV_CAT_2 % (per, n, per * n)
     if unit == "张":
+        try:
+            n = max(1, int(count or 1))
+        except Exception:
+            n = 1
+        if n > 1:
+            return texts.PRV_CAT_3_2 % (per, n, per * n)
         return texts.PRV_CAT_3 % per
     return texts.PRV_CAT_4 % per
 
@@ -464,6 +535,11 @@ def supports_media(p, kind):
 # 智谱的 `/images/generations` 请求体里只有 prompt/model/size 一类字段，官方页没有参考图入口；
 # 华为那页没查过（开发机没密钥），所以两家都不放行 —— 放行错了就是白扣一次费。
 #
+# 火山方舟（`/api/v3/images/generations`）**官方页写明了参考图入参**（`image`，URL 或
+# `data:image/<fmt>;base64,`，按模型 10/14 张、单张 ≤30MB），但那是"单图生图 / 多图生图 +
+# 交互编辑"的说法，**没实测过它拿这张图到底干的是哪一档语义** —— 坑 101 正是被"接口页写了
+# 支持参考图 ≠ 它干同一件事"咬过的，所以这里仍不放行（W 2026-10-17 定：等实测）。
+#
 # 2026-10-01 真机各跑一张（图=红黄斜条纹，提示词"改成夜晚蓝紫色调、其余不变"）：
 #   阿里云（Token Plan 与百炼按量）出图**保住了条纹的几何结构**，Token Plan 的 usage 里
 #   还回显 input_image_count=1 / rewrite_status=success → 这条是真正的"底图重绘"。
@@ -477,22 +553,187 @@ def supports_media(p, kind):
 #   REF_MODES         这一家**支持**哪几档（用户可选的范围）
 # ⚠ 两档各自对应哪个请求字段、以及 MiniMax 那一档有没有与默认档不同的入参形状，
 #   **尚未真机确认** —— 已登记 `99-待确认规则清单`，确认前不把任何一档说成实测。
-REF_IMAGE_APIS = (MEDIA_ALIYUN, MEDIA_MINIMAX)
-REF_EDIT_APIS = (MEDIA_ALIYUN,)          # 默认档 = 底图重绘
-REF_SUBJECT_APIS = (MEDIA_MINIMAX,)      # 默认档 = 主体 / 角色一致性
 # 模式标识与 `capability.MODE_*` 同一套字面量（那边是权威，这里不反向 import 免得成环；
 # 一致性由 `_selftest/test_cloud_ref_image.py` 断言钉住）。
 REF_MODE_EDIT = "edit"
 REF_MODE_SUBJECT = "subject"
-REF_MODES = {
-    MEDIA_ALIYUN: (REF_MODE_EDIT, REF_MODE_SUBJECT),
-    # ⚠ **只有主体参考一档**（2026-10-06 真机实测，`D:\tmp\ref_verify\`）：官方页的
-    # `ImageGenerationReq` 只有 `subject_reference` 一个输入图字段，`type` 仅 `character`＝人像，
-    # 没有任何底图重绘入参。实测喂四格色块图 + "把色块改成蓝紫、位置不变"，出来的是
-    # **一张人像**（把"四个色块"理解成左右色调分区），布局没保住 → 改不了图。
-    # 所以别把 subject_reference 当成两档通用的入口 —— 选了 edit 会被 preflight 拦下。
-    MEDIA_MINIMAX: (REF_MODE_SUBJECT,),
+
+# ---------------------------------------------------------------------------
+# 原生协议能力档案（2026-10-17，计划 §4 C1）
+#
+# **一处判据，三处共用**：界面渲染（置灰 / 可编辑下拉 / 提示）、发送前校验、帮助文字。
+# 每个取值只收**已核实事实**：`11-云端接入.md` §3/§5 的官方页结论 + 真机记录；
+# 没核实的写 None / 空元组，并在行尾注明"未核实"，别拿它当已知能力。
+#
+# 形状约定：
+#   img_size_style   尺寸写法：W*H / WxH / ratio_or_wh / tier_or_wh
+#   img_negative     True=请求体已带该字段；False=官方页确认没有；None=未核实
+#   img_n            (最小, 最大) 张数；两家固定 1 的别写成 (1,9)
+#   vid_res          分辨率白名单（空 = 自由文本；界面上仍是**可编辑**下拉）
+#   vid_duration     (最小, 最大) 秒；空 = 未核实
+#   vid_ratio        比例白名单（空 = 自由文本 / 由素材决定）
+#   *_by_model       按模型覆盖（键是模型名里的子串；长的先匹配，如 h3-max 先于 h3）
+#   ref_verified     官方页写明且**真机验过语义**，放行参考图
+#   ref_unverified   官方页写了、语义没实测 → 仍拦下，但说法不同（坑 101）
+#   ref_modes        支持的档位；ref_default 默认档
+#   first_frame      首帧送法（C2-4 才接 UI；这里先记事实）
+#   suggest_models   官方页核实过的媒体模型名（C3 建议名单；不自动进菜单）
+# ---------------------------------------------------------------------------
+PROTOCOL_PROFILE = {
+    MEDIA_ALIYUN: {
+        "label": "阿里云",
+        "img_size_style": "W*H",          # 11 §3.3 parameters.size = 宽*高
+        "img_negative": True,             # parameters.negative_prompt
+        "img_n": (1, 1),                  # plus/max 系列固定 1（11 §3.3）
+        "vid_res_by_model": {
+            "wan2.7": ("720P", "1080P"),      # 11 §5③
+            "h3": ("768P", "2K"),             # 11 §5②（百炼托管 H3，不是万相那套）
+        },
+        "vid_duration": (2, 15),          # 万相 2~15；happyhorse/H3 按模型覆盖
+        "vid_duration_by_model": {"happyhorse": (3, 15), "h3": (4, 15)},
+        "vid_ratio": (),                  # t2v 有比例、i2v 没有；官方页未给全量枚举
+        "ref_verified": True,
+        "ref_modes": (REF_MODE_EDIT, REF_MODE_SUBJECT),
+        "ref_default": REF_MODE_EDIT,
+        # 万相 i2v 官方页明说收 data URL；2026-10-17 真机验过：1024×1024 PNG
+        # （29KB / base64 39KB）→ 3s/720P 建单成功、SUCCEEDED、0.7MB MP4；
+        # 更大照片的请求体上限仍未测（本次不是大图）。
+        "first_frame": "base64",
+        "suggest_models": ("qwen-image-3.0-pro", "wan2.7-image",
+                           "wan2.7-image-pro", "wan2.7-i2v-2026-04-25",
+                           "happyhorse-1.1-t2v", "happyhorse-1.0-t2v",
+                           "happyhorse-1.1-r2v", "MiniMax/MiniMax-H3"),
+    },
+    MEDIA_MINIMAX: {
+        "label": "MiniMax",
+        "img_size_style": "ratio_or_wh",  # 比例 8 档，或 width/height 两个整数
+        "img_negative": False,            # 官方 ImageGenerationReq 没有该字段
+        "img_n": (1, 9),                  # image-01 n=1~9（11 §5⑤）
+        "vid_res_by_model": {"h3-max": ("480P", "768P"),
+                             "h3": ("768P", "2K")},
+        "vid_duration_by_model": {"h3-max": (5, 15), "h3": (4, 15)},
+        "vid_ratio_by_model": {
+            "h3-max": ("adaptive", "21:9", "16:9", "4:3", "1:1", "3:4", "9:16"),
+            "h3": ("adaptive", "21:9", "16:9", "4:3", "1:1", "3:4", "9:16"),
+        },
+        "vid_ratio": (),                  # v1 没有 ratio 入参
+        "ref_verified": True,
+        # ⚠ **只有主体参考一档**（2026-10-06 真机实测，`D:\tmp\ref_verify\`）：官方页的
+        # `ImageGenerationReq` 只有 `subject_reference` 一个输入图字段，`type` 仅 `character`＝人像，
+        # 没有任何底图重绘入参。实测喂四格色块图 + "把色块改成蓝紫、位置不变"，出来的是
+        # **一张人像**（把"四个色块"理解成左右色调分区），布局没保住 → 改不了图。
+        # 所以别把 subject_reference 当成两档通用的入口 —— 选了 edit 会被 preflight 拦下。
+        "ref_modes": (REF_MODE_SUBJECT,),
+        "ref_default": REF_MODE_SUBJECT,
+        "first_frame": "url_or_base64",   # v2 官方页三种 url 形态（公网 / file_id / data URL）
+        "suggest_models": ("image-01", "image-01-live",
+                           "MiniMax-H3", "MiniMax-H3-Max"),
+    },
+    MEDIA_ZHIPU: {
+        "label": "智谱",
+        "img_size_style": "WxH",
+        "img_negative": None,             # 官方页未核实；当前请求体也不带
+        "img_n": (1, 1),
+        "vid_duration_by_model": {"cogvideox-3": (5, 10)},   # 官方页 5/10 秒
+        "vid_duration": (),
+        "vid_ratio": (),                  # 用 size 宽高
+        "ref_verified": False,
+        "ref_modes": (),
+        "ref_default": "",
+        "first_frame": "",
+        "suggest_models": ("cogvideox-3",),
+    },
+    MEDIA_HUAWEI: {
+        "label": "华为",
+        "img_size_style": "WxH",
+        "img_negative": None,             # 官方页未核实
+        "img_n": (1, 1),
+        "vid_duration": (),
+        "vid_ratio": (),                  # 用 size 宽高
+        "ref_verified": False,
+        "ref_modes": (),
+        "ref_default": "",
+        "first_frame": "",
+        "suggest_models": (),
+    },
+    MEDIA_VOLC: {
+        "label": "火山方舟",
+        "img_size_style": "tier_or_wh",   # 1K/1.5K/2K（大写 K）或 宽x高
+        "img_negative": False,            # 11 §3.9：官方页没有 negative_prompt
+        "img_n": (1, 1),
+        "vid_res": ("480p", "720p", "1080p", "4k"),      # 只收小写，11 §3.9
+        "vid_duration": (2, 30),          # 按模型 [4,30]/[4,15]/[2,12]，模型名未核实
+        "vid_ratio": ("16:9", "4:3", "1:1", "3:4", "9:16", "21:9", "adaptive"),
+        "ref_verified": False,
+        "ref_unverified": True,           # 官方页有 image 字段、语义没实测
+        "ref_modes": (),
+        "ref_default": "",
+        "first_frame": "unverified",
+        "suggest_models": (),
+    },
 }
+
+# 旧名保留为别名（全项目引用不改）：档案是唯一来源，别名只是按同一份数据生成的快照。
+REF_IMAGE_APIS = tuple(p for p, d in PROTOCOL_PROFILE.items() if d.get("ref_verified"))
+# 官方页**写了**参考图入参、但"这张图被拿去干什么"还没实测的家：照样不放行（放行就是
+# 拿真金白银赌语义），但拦下时不能对人说"这一家只收文字"——那是假的。
+REF_UNVERIFIED_APIS = tuple(p for p, d in PROTOCOL_PROFILE.items()
+                            if d.get("ref_unverified"))
+REF_EDIT_APIS = tuple(p for p, d in PROTOCOL_PROFILE.items()
+                      if d.get("ref_default") == REF_MODE_EDIT)
+REF_SUBJECT_APIS = tuple(p for p, d in PROTOCOL_PROFILE.items()
+                         if d.get("ref_default") == REF_MODE_SUBJECT)
+REF_MODES = {p: tuple(d.get("ref_modes") or ())
+             for p, d in PROTOCOL_PROFILE.items() if d.get("ref_modes")}
+
+
+def first_frame_mode(provider, model=""):
+    """云端生视频首帧能不能带、怎么带 → "base64" / "unverified" / ""。
+
+    只放行官方页**明说收 base64** 的那一条：万相 2.7 i2v（`input.media` 里
+    `{"type":"first_frame","url": data URL}`）。其余家按事实分三档，界面话术
+    必须分开（坑 101 / 256）：
+      · happyhorse / 其它未列模型：没有首帧入参 → ""
+      · 百炼托管 H3 / MiniMax H3 / 方舟：官方页写了首帧，但 base64 没实测 → "unverified"
+      · 智谱 / 华为：官方请求体没有首帧字段 → ""
+    """
+    proto = media_api(provider)
+    m = str(model or "").lower()
+    if proto == MEDIA_ALIYUN:
+        if "wan2.7" in m and "i2v" in m:
+            return "base64"
+        if "h3" in m:
+            return "unverified"
+        return ""
+    if proto == MEDIA_MINIMAX:
+        return "unverified" if "h3" in m else ""
+    if proto == MEDIA_VOLC:
+        return "unverified"          # 官方页有 image 字段、语义/base64 未实测
+    return ""
+
+
+def profile_for(provider_or_protocol, model=""):
+    """取某家（或某协议）的能力档案，并把 `*_by_model` 覆盖成活值。
+
+    `provider_or_protocol` 既可是 provider dict，也可是协议字面量（`cloud_media` 分派后
+    手里只有协议时用它）。认不出协议 → 空 dict（调用方按"没档案"处理，别猜）。
+    模型子串按**长度降序**匹配：`h3-max` 必须先于 `h3`，否则 Max 会被当成 H3。
+    """
+    proto = (provider_or_protocol if isinstance(provider_or_protocol, str)
+             else media_api(provider_or_protocol))
+    base = dict(PROTOCOL_PROFILE.get(str(proto or "")) or {})
+    if not base:
+        return {}
+    m = str(model or "").lower()
+    for key in ("vid_res", "vid_duration", "vid_ratio"):
+        table = base.pop(key + "_by_model", None)
+        if not isinstance(table, dict):
+            continue
+        for suffix in sorted(table, key=len, reverse=True):
+            if suffix.lower() in m:
+                base[key] = table[suffix]
+                break
+    return base
 
 
 def supports_ref_image(p):
@@ -501,6 +742,11 @@ def supports_ref_image(p):
     走 `media_api()` 而不是直接读字段：它同时处理"手动指定的协议"与"按域名自动认"两种来源。
     """
     return media_api(p) in REF_IMAGE_APIS
+
+
+def ref_image_unverified(p):
+    """官方页写了参考图、语义还没实测的那几家（拦下的动作一样，说法要分开）。"""
+    return media_api(p) in REF_UNVERIFIED_APIS
 
 
 def ref_image_modes(p):
@@ -996,8 +1242,7 @@ def validate_for_send(cfg):
     if not media_api(p):
         return (texts.PRV_CAT_14
                 % (sp[1], KIND_LABEL[k], p["name"],
-                   "、".join(MEDIA_LABEL[a] for a in (MEDIA_ALIYUN, MEDIA_MINIMAX,
-                                                   MEDIA_ZHIPU, MEDIA_HUAWEI)),
+                   "、".join(MEDIA_LABEL[a] for a in MEDIA_APIS if a in MEDIA_LABEL),
                    texts.PRV_L4))
     if not secrets.has_api_key(p["id"]):
         return (texts.PRV_CAT_13

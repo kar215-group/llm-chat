@@ -21,6 +21,7 @@ from ..core.models import (chat_start_block, has_local_chat, scan_models,
 from ..core.params import ctx_for, current_ngl
 from ..core.server import _query_serving_model, server_alive, server_process_alive
 from ..connection import cloud
+from ..connection import cloud_media
 from ..connection import remote as remote_mod
 from . import dialogs
 from . import theme
@@ -116,26 +117,17 @@ NAV_SPEC = [
     {"key": "g_cloud", "label": "云端模型", "children": [
         {"key": "c_prov", "label": "服务商与密钥", "page": "cloud_p", "section": "prov",
          "title": "服务商、密钥与模型清单",
-         "help": "内置服务商只内置名称与 base_url；添加服务商**不会**把它名下所有模型塞进"
-                 "主页面菜单。流程是：填信息 → 填密钥 → 测试连接 → 通过后在独立的「选择模型」"
-                 "窗口里勾选要用的模型。清单拉过一次就缓存，只有点「刷新清单」才重新请求。\n"
-                 "密钥单独存 secrets.json，只留在你这台机器上，不会跟配置一起被复制走。"},
+         "help": "填连接信息 → 填密钥 → 测试连接 → 在「选择模型」里勾选要用的模型。\n"
+                 "清单拉过一次就缓存；密钥只存本机 secrets.json。"},
         {"key": "c_text", "label": "文本模型", "page": "cloud_t", "section": "ctext",
          "title": "云端文本模型",
-         "help": "云端文本走通用 OpenAI 兼容协议。这里的设置只影响文本对话"
-                 "（生图 / 生视频在下一区块）。\n"
-                 "附件会留在对话历史里**每一轮都重发**，所以预算有上限，不是能塞多塞。"},
+         "help": "云端文本走 OpenAI 兼容协议；这里的设置只影响文本对话。\n"
+                 "附件每轮都重发，所以有预算上限。"},
         {"key": "c_media", "label": "生图 / 生视频", "page": "cloud_m", "section": "cmedia",
          "title": "云端生图 / 生视频",
-         "help": "云端生图与生视频走服务商的**原生接口**，不会启动本地 sd.cpp："
-                 "生图是同步请求（可以挂参考图），生视频是异步任务"
-                 "（提交 → 轮询 → 下载），首帧仍要用本地链路。\n"
-                 "左列是生图、右列是生视频，各自的存放目录在本列底部；"
-                 "本地与云端四条链路共用的「修改产物位置」与轮询间隔、等待上限一起，"
-                 "压在下面那条横栏里。\n"
-                 "云端产物地址只活 24 小时，所以拿到就立刻下载到本地，不在云上留原图；"
-                 "没来得及下载的会记进任务台账，重启后对话开头给「取回」按钮。\n"
-                 "费用单价按模型填，「成本估算」按钮生图 / 生视频两列各一个（各查各的表）。"},
+         "help": "云端生图（同步，可挂参考图）/ 生视频（异步任务），走服务商原生接口，"
+                 "不启动本地引擎。\n"
+                 "产物拿到就下载落地（云端地址会过期）；费用单价按模型填。"},
     ]},
     {"key": "api", "label": "本地模型 API", "page": "api", "section": "api",
      "title": "本地模型 API（给 agent 或其他软件调用）",
@@ -866,6 +858,50 @@ class SettingsMixin:
 
             e.bind("<FocusOut>", _leave)
             _leave()
+            return e, cell
+
+        def _active_media_cap(kind):
+            """主页面当前选中的云端媒体模型 → (provider, model, profile)。
+
+            不是该链路（本地模型 / 选的是文本模型 / 没选云端）→ (None, "", {})。
+            设置页按**打开本页时**的选择渲染；发送侧仍以实际模型为准。
+            """
+            if not providers.is_cloud(self.cfg):
+                return None, "", {}
+            p = providers.current_provider(self.cfg) or {}
+            sp = providers.split_cloud_id(self.cfg.get("model", ""))
+            if not p or not sp:
+                return None, "", {}
+            if providers.model_kind_of(p, sp[1]) != kind:
+                return None, "", {}
+            return p, sp[1], providers.profile_for(p, sp[1])
+
+        def _combo_entry(parent, rows, key, label, desc, values, width=10, hint="",
+                         lw=14, fold=None):
+            """可编辑下拉：白名单来自能力档案，**仍允许手填**（坑 73：官方枚举问不全）。"""
+            var = v.setdefault(key, tk.StringVar(value=str(self.cfg.get(key, ""))))
+            cb = theme.comb(parent, textvariable=var, state="normal", width=width,
+                            values=list(values))
+            cell = _row(parent, rows, label, cb, desc, hint, lw, fold)
+            return cb, cell
+
+        def _media_cap_line(parent, rows, kind, lw=8, colspan=3, wraplength=300):
+            """按当前云端模型回显"这家是什么"，并返回能力档案供调用方置灰 / 选下拉。"""
+            p, m, pf = _active_media_cap(kind)
+            if not pf:
+                txt = texts.SET_CMEDIA_N_8 % providers.KIND_LABEL[kind]
+            else:
+                proto = providers.media_api(p)
+                txt = texts.SET_CMEDIA_N_7 % (
+                    providers.short_of(m),
+                    providers.MEDIA_LABEL.get(proto, proto or ""))
+            lbl = ttk.Label(parent, text=txt, style="Hint.TLabel",
+                            wraplength=wraplength, justify="left",
+                            font=("Microsoft YaHei UI", 9))
+            lbl.grid(row=rows["i"], column=0, columnspan=colspan, sticky="w",
+                     pady=(0, 4))
+            rows["i"] += 1
+            return p, m, pf, lbl
 
         # ---- 区块 1：本地文本模型 / 生成参数 ----
         @section("local_text", "gen")
@@ -1526,6 +1562,11 @@ class SettingsMixin:
             vars_ = {}
             for k in ("name", "base_url", "timeout", "ctx", "media_base_url"):
                 vars_[k] = tk.StringVar()
+            # 连接配置二级窗（2026-10-17）：窗只此一个；conn_btn 是主页面那颗入口按钮，
+            # load() 按"内置 / 自定义"换它的文案（查看连接… / 连接配置…）。
+            conn_win = [None]
+            conn_btn = [None]
+            new_prev = [""]          # 选「＋ 新建服务商…」之前停在哪家（取消时退回去）
             # 「原生接口协议」下拉里摆的是中文标签，存进配置的是代码（auto/none/aliyun/…）：
             # 域名认不出来的自建代理只能靠这一项手动指过去
             _ma_opts = [("auto", texts.SET_PROV_L1),
@@ -1628,6 +1669,12 @@ class SettingsMixin:
                                 {"models": st["models"],
                                  "model_kinds": st["kinds"]})))
 
+            # 地址类变量的联动挂**一次**（二级窗反复开关不再重复 trace）：
+            # base_url 同时影响"请求地址"回显与原生接口推导，原生接口地址只影响推导。
+            vars_["base_url"].trace_add("write",
+                                        lambda *a: (refresh_url(), refresh_media()))
+            vars_["media_base_url"].trace_add("write", lambda *a: refresh_media())
+
             def load(pid):
                 st["pid"] = pid
                 st["builtin"] = providers.is_builtin(pid)
@@ -1642,41 +1689,13 @@ class SettingsMixin:
                 _ma = str((p or {}).get("media_api") or "auto")
                 vars_["media_api"].set(_ma_code.get(_ma, _ma_code["auto"]))
                 vars_["enabled"].set(bool((p or {}).get("enabled", True)) if p else True)
-                editable = providers.builtin_base_editable(pid)
-                # 内置服务商：名称一律不开放；地址只在"按量百炼"这类**因账号而异**的条目上
-                # 开放（grid_remove 记住原位，切回别的服务商时原样还回来）
-                if simple:
-                    # 普通用户模式（2026-10-07 W 定）：名称 / 地址 / 原生协议那些字段
-                    # 整段不出现，页面只留 选服务商 / 测试连接 / 填 API / 选择模型。
-                    # 控件照建、vars_ 照填 —— commit / do_test / 选模型窗口都要读它们。
-                    # **「＋ 新建服务商…」是例外**（W 2026-10-08）：新建这一条路必须
-                    # 能把连接配置填完整，所以选中"还没建起来"的空条目时把两个框放开；
-                    # 建好之后 load() 再走一遍，字段照样收起。
-                    built_note.grid_remove()
-                    if st["pid"]:
-                        fields.grid_remove()
-                        fields2.grid_remove()
-                    else:
-                        fields.grid()
-                        fields2.grid()
-                elif st["builtin"]:
-                    # 只在"这一条能改地址"这个特殊情况下留一行说明（W 2026-10-03）：
-                    # 字段本来已经收起，"名称与 base_url：内置"纯属重复
-                    if editable:
-                        built_note.configure(
-                            text=texts.SET_PROV_N_2)
-                        built_note.grid()
-                    else:
-                        built_note.grid_remove()
-                    fields.grid_remove()
-                    if editable:
-                        fields2.grid()
-                    else:
-                        fields2.grid_remove()
-                else:
-                    built_note.grid_remove()
-                    fields.grid()
-                    fields2.grid()
+                # 连接字段全部收进二级窗（2026-10-17）：主页面只剩一颗入口按钮。
+                # 内置服务商是"查看"（名称/地址只读，editable_base_url 那两条在窗内放开），
+                # 自定义与「＋ 新建服务商…」是"配置"。
+                if conn_btn[0] is not None:
+                    conn_btn[0].configure(
+                        text=(texts.SET_PROV_N_25 if st["builtin"]
+                              else texts.SET_PROV_N_24))
                 refresh_url()
                 refresh_media()
                 refresh_key()
@@ -1737,11 +1756,357 @@ class SettingsMixin:
                     messagebox.showwarning(texts.SET_PROV_A0_5, msg)
                 return ok
 
+            def open_task_probe(host):
+                """「只查不提交」的核对窗（16 §24.1 / R-04 后半，2026-10-17 落地）。
+
+                场景只有一个：提交请求超时 / 断连，"没拿到回包"不等于"没建单"。
+                重发一次就是第二条账单，所以先按模型名 + 时间窗查一遍对方的任务列表；
+                查到就把那条加进台账，之后走既有的「取回」（查状态 + 下载，不重新提交）。
+                只有阿里云系有这条批量端点，别家点进来会被告知"只能按 task_id 单查"。
+                """
+                p = provider_snapshot()
+                if not p:
+                    msg_lbl.set(texts.SET_PROV_A0_8)
+                    return
+                d = tk.Toplevel(host)
+                d.title(texts.SET_PROV_PROBE_TITLE)
+                theme.style_toplevel(d)
+                d.transient(host)
+                d.minsize(620, 0)
+                body = ttk.Frame(d)
+                body.pack(fill="both", expand=True, padx=14, pady=(12, 4))
+                ttk.Label(body, text=texts.SET_PROV_PROBE_HINT, style="Hint.TLabel",
+                          wraplength=580, justify="left",
+                          font=("Microsoft YaHei UI", 9)).grid(
+                    row=0, column=0, columnspan=4, sticky="w", pady=(0, 8))
+
+                mvar = tk.StringVar(value="")
+                wvar = tk.StringVar(value=texts.SET_PROV_PROBE_WINS[1])
+                ttk.Label(body, text=texts.SET_PROV_PROBE_MODEL).grid(
+                    row=1, column=0, sticky="e", padx=(0, 6), pady=3)
+                theme.entry(body, textvariable=mvar, width=28).grid(
+                    row=1, column=1, sticky="w", pady=3)
+                ttk.Label(body, text=texts.SET_PROV_PROBE_WIN).grid(
+                    row=1, column=2, sticky="e", padx=(12, 6), pady=3)
+                cb = ttk.Combobox(body, textvariable=wvar, state="readonly", width=12,
+                                  values=list(texts.SET_PROV_PROBE_WINS))
+                cb.grid(row=1, column=3, sticky="w", pady=3)
+
+                lst = tk.Listbox(body, height=8, activestyle="none",
+                                 background=theme.c("bg"), foreground=theme.c("body"),
+                                 selectbackground=theme.c("accent"),
+                                 selectforeground=theme.c("bg"),
+                                 highlightthickness=0, bd=0,
+                                 font=("Consolas", 9))
+                lst.grid(row=2, column=0, columnspan=4, sticky="we", pady=(8, 4))
+                sb = theme.scroll(body, orient="vertical", command=lst.yview)
+                sb.grid(row=2, column=4, sticky="ns", pady=(8, 4))
+                lst.configure(yscrollcommand=sb.set)
+                body.columnconfigure(1, weight=1)
+
+                stat = tk.StringVar(value="")
+                ttk.Label(body, textvariable=stat, style="Hint.TLabel",
+                          wraplength=580, justify="left").grid(
+                    row=3, column=0, columnspan=5, sticky="w")
+                got = {"items": []}
+
+                def _window_seconds():
+                    label = wvar.get()
+                    idx = list(texts.SET_PROV_PROBE_WINS).index(label) \
+                        if label in texts.SET_PROV_PROBE_WINS else 1
+                    return (1800, 7200, 86400)[idx]
+
+                def _fmt(t):
+                    return time.strftime("%Y%m%d%H%M%S",
+                                         time.localtime(time.time() - t))
+
+                def query():
+                    stat.set(texts.SET_PROV_PROBE_QUERYING)
+                    go_btn.configure(state="disabled")
+                    win = _window_seconds()
+                    model = mvar.get().strip()
+
+                    def work():
+                        ok, items, err, _raw = cloud_media.list_tasks(
+                            p, model=model, start=_fmt(win), end=_fmt(0),
+                            page=1, size=20)
+
+                        def show():
+                            go_btn.configure(state="normal")
+                            got["items"] = items if ok else []
+                            lst.delete(0, "end")
+                            for it in got["items"]:
+                                lst.insert("end", "%s ｜ %-8s ｜ %s ｜ %s" % (
+                                    it["task_id"][:20],
+                                    cloud_media._LABEL.get(it["status"], it["status"]),
+                                    (it.get("model") or "?")[:22],
+                                    it.get("submit_time") or ""))
+                            stat.set(err if not ok else
+                                     (texts.SET_PROV_PROBE_EMPTY if not got["items"]
+                                      else texts.SET_PROV_PROBE_N % len(got["items"])))
+                        self._ui_q.put(show)
+                    threading.Thread(target=work, daemon=True).start()
+
+                def take():
+                    sel = lst.curselection()
+                    if not sel or sel[0] >= len(got["items"]):
+                        stat.set(texts.SET_PROV_PROBE_PICK)
+                        return
+                    it = got["items"][sel[0]]
+                    urls = list(it.get("urls") or [])
+                    if not urls:
+                        stat.set(texts.SET_PROV_PROBE_NOT_READY)
+                        return
+                    kind = "video" if any(
+                        str(u).lower().split("?")[0].endswith((".mp4", ".webm", ".mov"))
+                        for u in urls) else "image"
+                    tid = it["task_id"]
+                    if not cloudjobs.get_job(tid):
+                        cloudjobs.add_job(tid, kind, p.get("id", ""),
+                                          p.get("name", ""), it.get("model") or "", "",
+                                          "", status=it.get("status") or "succeeded")
+                    cloudjobs.update_job(tid, urls=urls,
+                                         status=it.get("status") or "succeeded")
+                    job = cloudjobs.get_job(tid) or {"task_id": tid, "kind": kind,
+                                                     "urls": urls}
+                    stat.set(texts.SET_PROV_PROBE_TAKEN % tid[:16])
+                    try:
+                        d.destroy()
+                    except Exception:
+                        pass
+                    self._recover_job(job)
+
+                bf = ttk.Frame(d)
+                bf.pack(side="bottom", fill="x", padx=14, pady=(4, 12))
+                theme.button(bf, text=texts.SET_PROV_PROBE_ADD, width=18,
+                             command=take).pack(side="right")
+                theme.button(bf, text=texts.BTN_CANCEL, width=8,
+                             command=d.destroy).pack(side="right", padx=6)
+                go_btn = theme.button(bf, text=texts.SET_PROV_PROBE_GO, width=10,
+                                      bootstyle="primary-outline", command=query)
+                go_btn.pack(side="left")
+                d.bind("<Escape>", lambda _e: d.destroy())
+                widgets.center_on(d, host)
+                return d
+
+            def open_conn_dialog(new=False):
+                """「连接配置 / 查看连接」二级窗（2026-10-17，W 批准）。
+
+                低频的连接字段全在这里：名称 / base_url / 原生接口地址 / 原生接口协议
+                （高级模式再加超时、上下文窗口、启用与任务台账）。主页面只留
+                服务商下拉、这颗入口、删除、测试连接、密钥与模型清单。
+
+                · 内置服务商的名称与地址只读；`editable_base_url` 那两条
+                  （按量百炼 / 方舟）照旧放开 base_url，并挂各自条目的 base_note。
+                · **控件直接绑 vars_**：commit 仍走既有那一条路，窗内不另写保存逻辑。
+                · 「确定」成功才 destroy；「取消」/ 右上角 X = 丢弃（从已存配置重载）。
+                """
+                d = conn_win[0]
+                if d is not None and d.winfo_exists():
+                    d.lift()
+                    try:
+                        d.focus_set()
+                    except Exception:
+                        pass
+                    return d
+                pid = st["pid"]
+                is_builtin = providers.is_builtin(pid)
+                editable = providers.builtin_base_editable(pid)
+                pname = (providers.builtin(pid).get("name")
+                         or vars_["name"].get().strip()
+                         or pid or texts.SET_PROV_N_3)
+                d = tk.Toplevel(win)
+                conn_win[0] = d
+                d.withdraw()                      # 摆正了再显示（坑 186 同款）
+                d.title(texts.SET_CONN_TITLE % pname)
+                theme.style_toplevel(d)
+                d.transient(win)
+                d.minsize(560, 0)
+                body = ttk.Frame(d)
+                body.pack(side="top", fill="both", expand=True, padx=14, pady=(12, 4))
+                body.columnconfigure(1, weight=1)
+                rows = {"i": 0}
+                # 普通模式没有页级 "?"，新建用户进窗后看不到流程；这一行放在最上面。
+                ttk.Label(body, text=texts.SET_CONN_N_1, style="Hint.TLabel",
+                          wraplength=540, justify="left",
+                          font=("Microsoft YaHei UI", 9)).grid(
+                    row=rows["i"], column=0, columnspan=3, sticky="w",
+                    padx=(0, 8), pady=(0, 6))
+                rows["i"] += 1
+
+                def lrow(label, widget, desc="", hint=""):
+                    i = rows["i"]
+                    rows["i"] += 1
+                    if not simple and desc:
+                        lab = tk.Frame(body, background=widgets.default_bg())
+                        lab.grid(row=i, column=0, sticky="w", padx=(0, 8), pady=5)
+                        ttk.Label(lab, text=label, width=12,
+                                  anchor="w").pack(side="left")
+                        widgets.HelpDot(lab, desc).pack(side="left", padx=(2, 0))
+                    else:
+                        ttk.Label(body, text=label, width=12, anchor="w").grid(
+                            row=i, column=0, sticky="w", padx=(0, 8), pady=5)
+                    widget.grid(row=i, column=1, sticky="w", padx=(0, 8), pady=5)
+                    if hint:
+                        ttk.Label(body, text=hint, style="Dim.TLabel",
+                                  font=("Microsoft YaHei UI", 9)).grid(
+                            row=i, column=2, sticky="w", pady=5)
+
+                e_name = theme.entry(body, textvariable=vars_["name"], width=34)
+                if is_builtin:
+                    e_name.configure(state="disabled")
+                lrow(texts.SET_PROV_A3, e_name, texts.SET_PROV_A4)
+
+                e_base = theme.entry(body, textvariable=vars_["base_url"], width=46)
+                if is_builtin and not editable:
+                    e_base.configure(state="disabled")
+                lrow("base_url", e_base, texts.SET_PROV_A4_2)
+
+                # 可改地址的内置条目各自带一句"改成什么"（按条目挂，A 家例子不串到 B 家）
+                note = providers.builtin_base_note(pid) if (is_builtin and editable) else ""
+                note_lbl = None
+                if note:
+                    note_lbl = ttk.Label(body, text=note, style="Hint.TLabel",
+                                         wraplength=540, justify="left",
+                                         font=("Microsoft YaHei UI", 9))
+                    note_lbl.grid(
+                        row=rows["i"], column=0, columnspan=3, sticky="w",
+                        padx=(0, 8), pady=(0, 4))
+                    rows["i"] += 1
+
+                e_media = theme.entry(body, textvariable=vars_["media_base_url"], width=46)
+                if is_builtin:
+                    e_media.configure(state="disabled")
+                lrow(texts.SET_PROV_A3_2, e_media, texts.SET_PROV_A4_3)
+
+                cb_media = theme.comb(body, textvariable=vars_["media_api"],
+                                      state=("disabled" if is_builtin else "readonly"),
+                                      width=22, values=[t for _c, t in _ma_opts])
+                if not is_builtin:
+                    cb_media.bind("<<ComboboxSelected>>", lambda *a: refresh_media())
+                lrow(texts.SET_PROV_A2, cb_media, texts.SET_PROV_A4_4)
+
+                # 推导结果 / 缺什么（原来在主页面上；低频，跟着字段一起收进来）
+                ttk.Label(body, textvariable=media_lbl, style="Hint.TLabel",
+                          wraplength=540, justify="left",
+                          font=("Microsoft YaHei UI", 9)).grid(
+                    row=rows["i"], column=0, columnspan=3, sticky="w",
+                    padx=(0, 8), pady=(2, 6))
+                rows["i"] += 1
+
+                cb_en = None
+                jobs_btn = None
+                if not simple:
+                    e_to = theme.entry(body, textvariable=vars_["timeout"], width=10)
+                    lrow(texts.SET_PROV_A3_3, e_to, texts.SET_PROV_A4_5)
+                    e_ctx = theme.entry(body, textvariable=vars_["ctx"], width=14)
+                    lrow(texts.SET_PROV_A3_4, e_ctx,
+                         texts.SET_PROV_CAT_34 % textfile.CLOUD_TOKEN_CAP)
+                    cb_en = theme.check(body, text=texts.SET_PROV_N_21,
+                                        variable=vars_["enabled"])
+                    cb_en.grid(row=rows["i"], column=1, sticky="w", pady=4)
+                    rows["i"] += 1
+                    ttk.Separator(body, orient="horizontal").grid(
+                        row=rows["i"], column=0, columnspan=3, sticky="we",
+                        pady=(8, 4))
+                    rows["i"] += 1
+                    jr = ttk.Frame(body)
+                    jr.grid(row=rows["i"], column=0, columnspan=3, sticky="w")
+                    rows["i"] += 1
+                    ttk.Label(jr, textvariable=jobs_lbl, style="Hint.TLabel",
+                              wraplength=430, justify="left",
+                              font=("Microsoft YaHei UI", 9)).pack(side="left")
+                    jobs_btn = theme.button(jr, text=texts.SET_PROV_N_22, width=14,
+                                            command=refresh_jobs)
+                    jobs_btn.pack(side="left", padx=(8, 0))
+                    # 「只查不提交」的核对出口（16 §24.1）：提交超时但对方可能已建单时，
+                    # 先查一次再决定要不要重发 —— 重发就是第二条账单。
+                    probe_btn = theme.button(jr, text=texts.SET_PROV_N_28, width=14,
+                                             command=lambda: open_task_probe(win))
+                    probe_btn.pack(side="left", padx=(8, 0))
+
+                err_var = tk.StringVar(value="")
+                ttk.Label(body, textvariable=err_var, style="ErrLit.TLabel",
+                          wraplength=540, justify="left",
+                          font=("Microsoft YaHei UI", 9)).grid(
+                    row=rows["i"], column=0, columnspan=3, sticky="w")
+                rows["i"] += 1
+
+                def close():
+                    conn_win[0] = None
+                    try:
+                        d.destroy()
+                    except Exception:
+                        pass
+
+                def cancel():
+                    # 丢弃未保存的改动：从配置重载；新建时退回原来的服务商
+                    if new:
+                        load("")
+                        if new_prev[0]:
+                            refresh_combo(keep=new_prev[0])
+                    else:
+                        load(pid)
+                    close()
+
+                def ok():
+                    good, why = commit()
+                    if not good:
+                        err_var.set(why or texts.SET_PROV_A0_5)
+                        return
+                    close()
+                    refresh_combo(keep=st["pid"])
+                    if st["pid"]:
+                        msg_lbl.set(texts.SET_PROV_CAT_10
+                                    % (st["pid"], len(st["models"])))
+
+                bf = ttk.Frame(d)
+                bf.pack(side="bottom", fill="x", padx=14, pady=(4, 12))
+                ok_btn = theme.button(bf, text=texts.BTN_OK, width=10, command=ok)
+                ok_btn.pack(side="right")
+                cancel_btn = theme.button(bf, text=texts.BTN_CANCEL, width=8,
+                                          command=cancel)
+                cancel_btn.pack(side="right", padx=6)
+                # 稳定句柄：自检按"字段键 / 按钮角色"找控件，不按屏幕上的字找
+                # （W 2026-10-17：文案由他随时改，测试别钉措辞；同坑 78 的 _sec_id 手法）
+                d._conn_fields = {"name": e_name, "base_url": e_base,
+                                  "media_base_url": e_media, "media_api": cb_media}
+                if not simple:
+                    d._conn_fields.update({"timeout": e_to, "ctx": e_ctx,
+                                           "enabled": cb_en})
+                d._conn_buttons = {"ok": ok_btn, "cancel": cancel_btn}
+                d._conn_note = note_lbl
+                d._conn_jobs_btn = jobs_btn
+                d.protocol("WM_DELETE_WINDOW", cancel)
+                d.bind("<Escape>", lambda _e: cancel())
+
+                refresh_url()
+                refresh_media()
+                if not simple:
+                    refresh_jobs()
+                widgets.center_on(d, win)
+                try:
+                    if not is_builtin:
+                        e_name.focus_set()
+                    elif editable:
+                        e_base.focus_set()
+                    else:
+                        d.focus_set()
+                except Exception:
+                    pass
+                return d
+
             def do_delete():
                 pid = st["pid"]
                 if not pid:
                     msg_lbl.set(texts.SET_PROV_A0_6)
                     return
+                if conn_win[0] is not None and conn_win[0].winfo_exists():
+                    try:
+                        conn_win[0].destroy()
+                    except Exception:
+                        pass
+                    conn_win[0] = None
                 tip = (texts.SET_PROV_CAT_11
                        % providers.provider_label_for(self.cfg, pid)) if providers.is_builtin(pid) \
                     else texts.SET_PROV_CAT_12 % providers.provider_label_for(self.cfg, pid, vars_["name"].get())
@@ -1764,6 +2129,10 @@ class SettingsMixin:
 
             # ---------------- 密钥 ----------------
             def do_key_dialog():
+                if not st["pid"]:
+                    # 还没建服务商：先走连接配置窗（否则密钥会写到空 id 上）
+                    open_conn_dialog(new=True)
+                    return
                 d = tk.Toplevel(win)
                 theme.style_toplevel(d, "panel")   # 经典背景 + 标题栏两件套（坑 186）
                 d.withdraw()          # 先藏起来，摆正了再显示（否则左上角闪一下）
@@ -2304,6 +2673,7 @@ class SettingsMixin:
                           font=("Microsoft YaHei UI", 9)).pack(side="left", padx=(0, 4))
                 e_new = theme.entry(botf, width=16)
                 e_new.pack(side="left", fill="x", expand=True)
+                d._picker_e_new = e_new      # 稳定句柄：自检不按屏幕上的字找
                 # 回车 = 直接加入。以前这个框一个绑定都没有：敲完名字按回车什么也不会发生，
                 # 看起来就是"加不进去"（W 实测报的那条）。
                 e_new.bind("<Return>", lambda _e: manual_add())
@@ -2322,6 +2692,35 @@ class SettingsMixin:
                 theme.button(bf2, text=texts.BTN_CANCEL, width=8, command=d.destroy).pack(side="right")
                 theme.button(bf2, text=texts.BTN_OK, width=10,
                            command=lambda: ok_apply(d)).pack(side="right", padx=6)
+                # 媒体模型建议名单（C3）：各家 /models 不带媒体模型（坑 50），
+                # 这里把**官方页核实过**的名字摆出来，点「填入」进手填框；
+                # 仍不自动进菜单、不预置清单（11 §7.3 ① 不变）。
+                _pf = providers.profile_for(providers.get_provider(self.cfg, pid) or {})
+                _sug = list(_pf.get("suggest_models") or ())
+                if _sug:
+                    sugf = ttk.Frame(d)
+                    sugf.pack(side="bottom", fill="x", padx=12, pady=(0, 2),
+                              before=bf2)
+                    ttk.Label(sugf, text=texts.SET_PROV_N_26, style="Hint.TLabel",
+                              font=("Microsoft YaHei UI", 9)).pack(anchor="w")
+                    _sug_row = ttk.Frame(sugf)
+                    _sug_row.pack(fill="x", pady=(2, 0))
+                    _sug_cb = theme.comb(_sug_row, state="readonly", width=30,
+                                         values=_sug)
+                    _sug_cb.pack(side="left", fill="x", expand=True)
+
+                    def _fill_sug(_e=None):
+                        m = str(_sug_cb.get() or "").strip()
+                        if m:
+                            e_new.delete(0, "end")
+                            e_new.insert(0, m)
+                            e_new.focus_set()
+
+                    _sug_cb.bind("<<ComboboxSelected>>", _fill_sug)
+                    _sug_cb.set(_sug[0])
+                    d._picker_suggest = _sug_cb
+                    theme.button(_sug_row, text=texts.SET_PROV_N_27, width=6,
+                                 command=_fill_sug).pack(side="left", padx=(6, 0))
 
                 def ok_apply(dlg):
                     picked, kinds = [], {}
@@ -2430,14 +2829,30 @@ class SettingsMixin:
                 if not key:
                     msg_lbl.set(texts.SET_PROV_A0_17)
                     return
+                if not st["models"]:
+                    # 还没勾任何模型：没有文本模型可测，但拉清单同样能验 key。
+                    # 直接把「选择模型」窗打开并拉一次，用户勾完就能用。
+                    # 主页面状态行留空：进度与结果由选择窗的状态行说，别关窗后挂着一句旧话。
+                    msg_lbl.set("")
+                    open_picker(fetch=True)
+                    return
                 msg_lbl.set(texts.SET_PROV_A0_18)
                 t4b.update_idletasks()
 
                 p = providers.get_provider(self.cfg, st["pid"]) or provider_snapshot()
+                # 主页面当前选中的就是这家的云文本模型时，优先测它（用户实际在用的那个）；
+                # 否则交给 providers.test_connection_model 自动挑常见聊天模型。
+                _pref = ""
+                if providers.is_cloud(self.cfg)                         and str(self.cfg.get("model_provider")) == st["pid"]:
+                    _sp = providers.split_cloud_id(self.cfg.get("model", ""))
+                    if _sp and providers.model_kind_of(
+                            {"model_kinds": st["kinds"]}, _sp[1]) == providers.KIND_TEXT:
+                        _pref = _sp[1]
 
                 def work():
                     ok, text = cloud.probe({**p, "models": st["models"],
-                                            "model_kinds": st["kinds"]}, api_key=key)
+                                            "model_kinds": st["kinds"]}, api_key=key,
+                                           model=_pref or None)
                     def after():
                         if not win.winfo_exists():
                             return          # 设置窗口已关：别弹孤立的对话框
@@ -2466,7 +2881,21 @@ class SettingsMixin:
             def on_pick(_e=None):
                 sel = combo.get()
                 pid = {lb: p for lb, p in providers.provider_labels(self.cfg)}.get(sel, "")
-                load(pid)          # 选中"＋ 新建服务商…"时 pid 为空 → 空白新条目
+                # 切换服务商 = 放弃上一个窗里没保存的改动（与「取消」同一语义）
+                if conn_win[0] is not None and conn_win[0].winfo_exists():
+                    try:
+                        conn_win[0].destroy()
+                    except Exception:
+                        pass
+                    conn_win[0] = None
+                if not pid:
+                    # 「＋ 新建服务商…」：主页面已经没有可填的连接字段，直接弹窗
+                    # （W 2026-10-17 批准；普通/高级同一口径）
+                    new_prev[0] = st["pid"] or ""
+                    load("")
+                    open_conn_dialog(new=True)
+                    return
+                load(pid)
 
             bar = ttk.Frame(t4b)
             bar.grid(row=r4b["i"], column=0, columnspan=3, sticky="w", pady=(0, 8))
@@ -2475,70 +2904,47 @@ class SettingsMixin:
             combo = theme.comb(bar, width=24, state="readonly")
             combo.pack(side="left", padx=(0, 6))
             combo.bind("<<ComboboxSelected>>", on_pick)
+            t4b._prov_combo = combo
+            conn_btn[0] = theme.button(
+                bar, text=texts.SET_PROV_N_24, width=12,
+                command=lambda: open_conn_dialog(new=not st["pid"]))
+            conn_btn[0].pack(side="left", padx=3)
+            t4b._conn_btn = conn_btn[0]      # 稳定句柄：自检不按按钮文字找（坑 78 手法）
+            delete_btn = None
             if not simple:
                 # 「删除」是管理动作，普通用户模式不出现（测试连接按 W 的口径保留）
-                theme.button(bar, text=texts.SET_PROV_N_15, width=6,
-                           command=do_delete).pack(side="left", padx=3)
-            theme.button(bar, text=texts.SET_PROV_N_16, width=10, command=do_test).pack(side="left", padx=3)
+                delete_btn = theme.button(bar, text=texts.SET_PROV_N_15, width=6,
+                                          command=do_delete)
+                delete_btn.pack(side="left", padx=3)
+            t4b._delete_btn = delete_btn
+            test_btn = theme.button(bar, text=texts.SET_PROV_N_16, width=10,
+                                    command=do_test)
+            test_btn.pack(side="left", padx=3)
+            t4b._test_btn = test_btn
 
             kr = ttk.Frame(t4b)
             kr.grid(row=r4b["i"], column=0, columnspan=3, sticky="w", pady=(0, 8))
             r4b["i"] += 1
-            theme.button(kr, text=texts.SET_PROV_N_17, width=20,
-                       command=do_key_dialog).pack(side="left")
+            key_btn = theme.button(kr, text=texts.SET_PROV_N_17, width=20,
+                                   command=do_key_dialog)
+            key_btn.pack(side="left")
+            t4b._key_btn = key_btn
             # 原先这里还有一个「配置本地 API 地址」按钮跳去API 页（W 2026-10-03 要求移除）：
             # 云端这一页只管密钥与模型，混一个"去改本地端口"的入口只会让人以为两者相关。
             # 本地端口在左栏「本地模型 API」那一页。
             # 密钥状态单独一行：它跟着按钮排在同一行时，掩码文本会把这行撑得比
             # 可视区宽（横向不可滚 = 后面的内容看不见）
-            ttk.Label(t4b, textvariable=key_lbl, style="Hint.TLabel", wraplength=560,
-                      justify="left", font=("Microsoft YaHei UI", 9)).grid(
-                row=r4b["i"], column=0, columnspan=3, sticky="w", pady=(0, 6))
-            r4b["i"] += 1
-
-            # 初始文本只占位：open_picker/load() 一进来就会按"能不能改地址"重写它，
-            # 收起来时整行 grid_remove（2026-10-03 W：不再常驻一句"名称与 base_url：内置"）
-            built_note = ttk.Label(t4b, text="",
-                                   style="Hint.TLabel", wraplength=640, justify="left",
+            key_widget = ttk.Label(t4b, textvariable=key_lbl, style="Hint.TLabel",
+                                   wraplength=560, justify="left",
                                    font=("Microsoft YaHei UI", 9))
-            built_note.grid(row=r4b["i"], column=0, columnspan=3, sticky="w", pady=(0, 6))
+            key_widget.grid(row=r4b["i"], column=0, columnspan=3, sticky="w",
+                            pady=(0, 6))
+            t4b._key_lbl = key_widget
             r4b["i"] += 1
 
-            fields = ttk.Frame(t4b)      # 名称：只有自定义服务商可填
-            fields.grid(row=r4b["i"], column=0, columnspan=3, sticky="w")
-            sub = {"i": 0}
-            ent(fields, sub, None, texts.SET_PROV_A3, texts.SET_PROV_A4,
-                width=30, var=vars_["name"])
-            r4b["i"] += 1
-
-            # 地址类控件单独一个框：内置服务商里"按量百炼"的工作空间域名**因账号而异**，
-            # 必须让用户自己填，所以不能跟着"内置一律不可改"一起收起
-            fields2 = ttk.Frame(t4b)
-            fields2.grid(row=r4b["i"], column=0, columnspan=3, sticky="w")
-            sub2 = {"i": 0}
-            ent(fields2, sub2, None, "base_url",
-                texts.SET_PROV_A4_2,
-                width=36, var=vars_["base_url"], trace=lambda *a: (refresh_url(),
-                                                                   refresh_media()))
-            ent(fields2, sub2, None, texts.SET_PROV_A3_2,
-                texts.SET_PROV_A4_3,
-                width=36, var=vars_["media_base_url"], trace=refresh_media)
-            # width=18：最长的候选串是「不接（这个服务商只用文本）」这类 12 个中日韩字，
-            # 18 个"平均字宽"够摆下（24 会把这一行撑到 775px，比视口 768 还宽 → 整行被压扁）
-            _ma_cb = theme.comb(fields2, textvariable=vars_["media_api"], state="readonly",
-                                  width=18, values=[t for _c, t in _ma_opts])
-            _ma_cb.bind("<<ComboboxSelected>>", lambda *a: refresh_media())
-            _row(fields2, sub2, texts.SET_PROV_A2, _ma_cb,
-                 texts.SET_PROV_A4_4,
-                 hint=texts.SET_PROV_N_18)
-            r4b["i"] += 1
-
-            if not simple:
-                # 灰色小字提示只在高级模式出现（普通模式只留「已存密钥」那一条，W 定）
-                ttk.Label(t4b, textvariable=media_lbl, style="Hint.TLabel", wraplength=680,
-                          justify="left", font=("Microsoft YaHei UI", 9)).grid(
-                    row=r4b["i"], column=0, columnspan=3, sticky="w", pady=(2, 6))
-            r4b["i"] += 1
+            # 连接字段（名称 / base_url / 原生接口地址 / 原生接口协议）已收进
+            # 「连接配置…」二级窗（2026-10-17，专题 A）。主页面不再有内联输入行，
+            # 也不再随选中项临时展开 —— 那种"页面形态跟着下拉跳"的观感一并消失。
 
             mf = ttk.Frame(t4b)
             mf.grid(row=r4b["i"], column=1 if not simple else 0,
@@ -2558,14 +2964,21 @@ class SettingsMixin:
             # 都操作它，对没映射的 Listbox 做 delete/insert 完全合法
             btns = ttk.Frame(mf)
             btns.pack(side="left", padx=(6, 0) if not simple else (0, 0), fill="y")
-            theme.button(btns, text=texts.SET_PROV_N_19, width=12,
-                       command=do_pick_models).pack(anchor="w", pady=1)
+            pick_btn = theme.button(btns, text=texts.SET_PROV_N_19, width=12,
+                                    command=do_pick_models)
+            pick_btn.pack(anchor="w", pady=1)
+            t4b._pick_btn = pick_btn
+            remove_btn = refresh_btn = None
             if not simple:
-                theme.button(btns, text=texts.SET_PROV_N_20, width=12,
-                           command=do_remove_selected).pack(anchor="w", pady=1)
-                theme.button(btns, text=texts.SET_PROV_N_11, width=12,
-                           command=lambda: (commit(silent=True),
-                                            open_picker(fetch=True))).pack(anchor="w", pady=1)
+                remove_btn = theme.button(btns, text=texts.SET_PROV_N_20, width=12,
+                                          command=do_remove_selected)
+                remove_btn.pack(anchor="w", pady=1)
+                refresh_btn = theme.button(
+                    btns, text=texts.SET_PROV_N_11, width=12,
+                    command=lambda: (commit(silent=True), open_picker(fetch=True)))
+                refresh_btn.pack(anchor="w", pady=1)
+            t4b._remove_btn = remove_btn
+            t4b._refresh_btn = refresh_btn
 
             if not simple:
                 ttk.Label(t4b, textvariable=menu_lbl, style="Hint.TLabel", wraplength=430,
@@ -2578,34 +2991,10 @@ class SettingsMixin:
                     row=r4b["i"], column=1, columnspan=2, sticky="w", pady=(0, 6))
             r4b["i"] += 1
 
-            if not simple:
-                ent(t4b, r4b, None, texts.SET_PROV_A3_3, texts.SET_PROV_A4_5,
-                    var=vars_["timeout"])
-                ent(t4b, r4b, None, texts.SET_PROV_A3_4,
-                    texts.SET_PROV_CAT_34
-                    % (textfile.CLOUD_TOKEN_BUDGET, textfile.CLOUD_TOKEN_CAP),
-                    var=vars_["ctx"])
-
-                i = r4b["i"]
-                r4b["i"] += 1
-                theme.check(t4b, text=texts.SET_PROV_N_21,
-                                variable=vars_["enabled"]).grid(
-                    row=i, column=1, sticky="w", pady=4)
-
             # 「每轮显示用量」与「让云端模型自选读取区间」属于云端**文本**对话，
             # 移到本区块之后（左栏「云端模型 → 文本模型」），别混在服务商清单里。
-
-            # ---- 云端生图 / 生视频的档位单独一页（见 _t4c）----
-            # 这一页本来就到 1143px 的申请高度，已经超过屏幕可用高度；再叠 9 行
-            # 就永远看不见底部了（坑 32：懒加载页要逐页量内容边界 vs 可用面积）。
-            if not simple:
-                i = r4b["i"]
-                r4b["i"] += 1
-                ttk.Label(t4b, textvariable=jobs_lbl, style="Hint.TLabel", wraplength=680,
-                          justify="left", font=("Microsoft YaHei UI", 9)).grid(
-                    row=i, column=0, columnspan=3, sticky="w", pady=(6, 2))
-                theme.button(t4b, text=texts.SET_PROV_N_22, width=14,
-                           command=refresh_jobs).grid(row=i, column=2, sticky="e", pady=(6, 2))
+            # 超时 / 上下文窗口 / 启用 / 任务台账也随连接字段一起进了二级窗
+            # （高级模式才有；普通模式照旧不出现）。
 
             def save_page():
                 """「保存本页」= 通用档位 + 本页 provider 字段，和底部「保存」同一条路。
@@ -2624,7 +3013,10 @@ class SettingsMixin:
                 sf = ttk.Frame(t4b)
                 sf.grid(row=r4b["i"], column=0, columnspan=3, sticky="w", pady=(4, 4))
                 r4b["i"] += 1
-                theme.button(sf, text=texts.SET_PROV_N_23, width=12, command=save_page).pack(side="left")
+                save_page_btn = theme.button(sf, text=texts.SET_PROV_N_23, width=12,
+                                             command=save_page)
+                save_page_btn.pack(side="left")
+                t4b._save_page_btn = save_page_btn
                 ttk.Label(sf, textvariable=url_lbl, style="Hint.TLabel", wraplength=430,
                           justify="left", font=("Microsoft YaHei UI", 9)).pack(side="left", padx=10)
             # 蓝色状态行两种模式都留：测试连接 / 选模型的结果要有地方说话
@@ -2633,7 +3025,13 @@ class SettingsMixin:
                 row=r4b["i"], column=0, columnspan=3, sticky="w", pady=(2, 0))
             r4b["i"] += 1
 
-            save_hooks[t4b] = lambda: commit(silent=True)
+            def _t4b_save():
+                # 连接配置窗还开着：以窗内的「确定 / 取消」为准 —— 从背后点底部
+                # 「保存」时不能把窗里尚未确认的改动偷偷提交（「取消」= 丢弃）。
+                if conn_win[0] is not None and conn_win[0].winfo_exists():
+                    return True, ""
+                return commit(silent=True)
+            save_hooks[t4b] = _t4b_save
             refresh_combo()
             refresh_jobs()
         # ---- 区块 6b：云端 / 文本模型（对话行为与附件预算，跟具体服务商无关）----
@@ -2712,13 +3110,34 @@ class SettingsMixin:
                 ttk.Label(f, text=name, font=("Microsoft YaHei UI", 10, "bold")).grid(
                     row=0, column=0, columnspan=3, sticky="w", pady=(0, 4))
             rl, rr = {"i": 1}, {"i": 1}
+            # 按主页面当前选中的云端模型回显"这家是什么"；没选就按服务商默认
+            _, _, _pf_img, _cap_img = _media_cap_line(
+                col_l, rl, providers.KIND_IMAGE, lw=8)
+            _, _, _pf_vid, _cap_vid = _media_cap_line(
+                col_r, rr, providers.KIND_VIDEO, lw=8)
+            t4c._cap_img_lbl = _cap_img
+            t4c._cap_vid_lbl = _cap_vid
 
             _size_entry(col_l, rl, "cloud_img_size", texts.SET_CMEDIA_A3,
                 texts.SET_CMEDIA_A4,
                 width=11, hint=texts.SET_LMIMG_N, lw=8, warn_text=SIZE_WARN_RES,
                 allow=lambda t: ":" in str(t).replace("：", ":"))
-            ent(col_l, rl, "cloud_img_negative", texts.SET_CMEDIA_A3_2,
-                texts.SET_CMEDIA_A4_2, lw=8)
+            _neg_e, _neg_cell = ent(col_l, rl, "cloud_img_negative",
+                texts.SET_CMEDIA_A3_2, texts.SET_CMEDIA_A4_2, lw=8,
+                hint=texts.SET_LMIMG_N_8)
+            t4c._neg_entry = _neg_e
+            t4c._neg_hint = _neg_cell
+            if _pf_img:
+                if _pf_img.get("img_negative") is False:
+                    # 这家没有该字段：旧值不留在配置里（否则置灰框里挂着一句
+                    # 永远不会发出去的话），提交侧另有"已忽略"的回显兜老配置。
+                    v["cloud_img_negative"].set("")
+                    _neg_e.configure(state="disabled")
+                    if _neg_cell is not None:
+                        _neg_cell.configure(text=texts.SET_CMEDIA_N_9)
+                elif _pf_img.get("img_negative") is None:
+                    if _neg_cell is not None:
+                        _neg_cell.configure(text=texts.SET_CMEDIA_N_10)
             ent(col_l, rl, "cloud_img_dir", texts.SET_CMEDIA_A3_3,
                 texts.SET_CMEDIA_A4_3, lw=8)
             fl = ttk.Frame(col_l)
@@ -2738,14 +3157,42 @@ class SettingsMixin:
             row(col_l, rl, texts.SET_CTEXT_A2_2, flc,
                 texts.SET_CMEDIA_A4_5, lw=8)
 
-            _size_entry(col_r, rr, "cloud_video_resolution", texts.SET_CMEDIA_A3_4,
-                texts.SET_CMEDIA_A4_6,
-                hint=texts.SET_LMIMG_N_7, lw=8, width=8, warn_text=SIZE_WARN_RES,
-                allow=_vidres_allow)
-            ent(col_r, rr, "cloud_video_duration", texts.SET_CMEDIA_A3_5,
-                texts.SET_CMEDIA_A4_7, hint=texts.SET_CMEDIA_N_2, lw=8)
-            ent(col_r, rr, "cloud_video_ratio", texts.SET_CMEDIA_A3_6,
-                texts.SET_CMEDIA_A4_8, lw=8)
+            _res_vals = tuple((_pf_vid or {}).get("vid_res") or ())
+            if _res_vals:
+                _res_w, _ = _combo_entry(col_r, rr, "cloud_video_resolution",
+                    texts.SET_CMEDIA_A3_4, texts.SET_CMEDIA_A4_6,
+                    _res_vals, width=10, hint=texts.SET_LMIMG_N_7, lw=8)
+            else:
+                _res_w, _ = _size_entry(col_r, rr, "cloud_video_resolution",
+                    texts.SET_CMEDIA_A3_4, texts.SET_CMEDIA_A4_6,
+                    hint=texts.SET_LMIMG_N_7, lw=8, width=8, warn_text=SIZE_WARN_RES,
+                    allow=_vidres_allow)
+            t4c._video_res_widget = _res_w
+            _dur = (_pf_vid or {}).get("vid_duration")
+            _dur_hint = (texts.SET_CMEDIA_N_12 % (int(_dur[0]), int(_dur[1]))
+                         if _dur else texts.SET_CMEDIA_N_2)
+            if _dur:
+                _dur_w, _dur_c = _combo_entry(
+                    col_r, rr, "cloud_video_duration", texts.SET_CMEDIA_A3_5,
+                    texts.SET_CMEDIA_A4_7,
+                    [str(i) for i in range(int(_dur[0]), int(_dur[1]) + 1)],
+                    width=10, hint=_dur_hint, lw=8)
+            else:
+                _dur_w, _dur_c = ent(col_r, rr, "cloud_video_duration",
+                    texts.SET_CMEDIA_A3_5, texts.SET_CMEDIA_A4_7,
+                    hint=_dur_hint, lw=8)
+            t4c._video_duration_widget = _dur_w
+            t4c._video_duration_hint = _dur_c
+            _ratio_vals = tuple((_pf_vid or {}).get("vid_ratio") or ())
+            if _ratio_vals:
+                _ratio_w, _ = _combo_entry(col_r, rr, "cloud_video_ratio",
+                    texts.SET_CMEDIA_A3_6, texts.SET_CMEDIA_A4_8,
+                    _ratio_vals, width=10, hint=texts.SET_LMIMG_N_8, lw=8)
+            else:
+                _ratio_w, _ = ent(col_r, rr, "cloud_video_ratio",
+                    texts.SET_CMEDIA_A3_6, texts.SET_CMEDIA_A4_8,
+                    hint=texts.SET_LMIMG_N_8, lw=8)
+            t4c._video_ratio_widget = _ratio_w
             ent(col_r, rr, "cloud_vid_dir", texts.SET_CMEDIA_A3_7,
                 texts.SET_CMEDIA_A4_9, lw=8)
             fr = ttk.Frame(col_r)
@@ -2791,6 +3238,7 @@ class SettingsMixin:
         # SIMPLE_NAV_SPEC 里（tools/check_structure.py 的 [2] 段按两份规格一起判死区块）。
         @section("cloud_m", "cimg")
         def _t4e(t4e, r4e):
+            _media_cap_line(t4e, r4e, providers.KIND_IMAGE, colspan=3, wraplength=560)
             _size_entry(t4e, r4e, "cloud_img_size", texts.SET_LMIMG_A3,
                 texts.SET_CIMG_A4,
                 width=11, hint=texts.SET_LMIMG_N,
@@ -2815,14 +3263,39 @@ class SettingsMixin:
 
         @section("cloud_m", "cvid")
         def _t4f(t4f, r4f):
-            _size_entry(t4f, r4f, "cloud_video_resolution", texts.SET_LMIMG_A3,
-                texts.SET_CVID_A4,
-                hint=texts.SET_LMIMG_N_7, width=8, warn_text=SIZE_WARN_RES, allow=_vidres_allow)
-            ent(t4f, r4f, "cloud_video_duration", texts.SET_CVID_A3,
-                texts.SET_CVID_A4_2,
-                hint=texts.SET_CMEDIA_N_2)
-            ent(t4f, r4f, "cloud_video_ratio", texts.SET_CVID_A3_2,
-                texts.SET_CMEDIA_A4_8)
+            _, _, _pf_vid, _cap_vid = _media_cap_line(
+                t4f, r4f, providers.KIND_VIDEO, colspan=3, wraplength=560)
+            t4f._cap_vid_lbl = _cap_vid
+            _res_vals = tuple((_pf_vid or {}).get("vid_res") or ())
+            if _res_vals:
+                _combo_entry(t4f, r4f, "cloud_video_resolution", texts.SET_LMIMG_A3,
+                    texts.SET_CVID_A4, _res_vals, width=10,
+                    hint=texts.SET_LMIMG_N_7)
+            else:
+                _size_entry(t4f, r4f, "cloud_video_resolution", texts.SET_LMIMG_A3,
+                    texts.SET_CVID_A4,
+                    hint=texts.SET_LMIMG_N_7, width=8, warn_text=SIZE_WARN_RES,
+                    allow=_vidres_allow)
+            _dur = (_pf_vid or {}).get("vid_duration")
+            _dur_hint = (texts.SET_CMEDIA_N_12 % (int(_dur[0]), int(_dur[1]))
+                         if _dur else texts.SET_CMEDIA_N_2)
+            if _dur:
+                _combo_entry(
+                    t4f, r4f, "cloud_video_duration", texts.SET_CVID_A3,
+                    texts.SET_CVID_A4_2,
+                    [str(i) for i in range(int(_dur[0]), int(_dur[1]) + 1)],
+                    width=10, hint=_dur_hint)
+            else:
+                ent(t4f, r4f, "cloud_video_duration", texts.SET_CVID_A3,
+                    texts.SET_CVID_A4_2, hint=_dur_hint)
+            _ratio_vals = tuple((_pf_vid or {}).get("vid_ratio") or ())
+            if _ratio_vals:
+                _combo_entry(t4f, r4f, "cloud_video_ratio", texts.SET_CVID_A3_2,
+                    texts.SET_CMEDIA_A4_8, _ratio_vals, width=10,
+                    hint=texts.SET_LMIMG_N_8)
+            else:
+                ent(t4f, r4f, "cloud_video_ratio", texts.SET_CVID_A3_2,
+                    texts.SET_CMEDIA_A4_8, hint=texts.SET_LMIMG_N_8)
             ent(t4f, r4f, "cloud_vid_dir", texts.SET_OPEN_OUTDIR_A0,
                 texts.SET_CVID_A4_3,
                 width=30, hint=texts.SET_LMIMG_N_2)
@@ -2921,6 +3394,18 @@ class SettingsMixin:
                     kw_ac.grid_remove()
             kw_cb.configure(command=_kw_sync)
             _kw_sync()
+
+            # ---- 历史对话（2026-10-17：把 chat_logs 里的记录读回来接着聊）----
+            # 只是颗按钮不是参数：没有可保存的值，所以不进 `_save_general`。
+            # 入口放这一页是因为顶栏那排按钮已经挤到"再加一个就压掉清空对话"的地步
+            # （见 `_build_topbar` 里 width 那段教训），而"读回历史"本来就是低频动作。
+            # 普通模式也留着：它不属于高级能力，用户丢了一次对话就该能找回来。
+            hb = ttk.Frame(tgen)
+            theme.button(hb, text=texts.SET_GEN_N_6, width=14,
+                         command=self.open_history_dialog).pack(side="left")
+            # 不带 hint：这一格是"摘要"列，按像素吃饭，一句长话就把整页顶出右边界
+            # （普通模式逐页右界那条断言当场抓到）——"记录在哪儿"放进 "?" 里说
+            row(tgen, rgen, texts.SET_GEN_N_5, hb, texts.SET_GEN_A2, lw=8)
 
             def _save_general():
                 # 读控件当前文本而不是 gvar：ttk.Combobox.set() 不保证回写
@@ -4064,16 +4549,45 @@ class SettingsMixin:
                 else:
                     msg_lab.set(texts.SET_DEV_CAT_4 % why)
 
+            def untrust_sign():
+                """撤销**当前用户**的信任（16 §19.3）：与 trust_sign 对称的那一半。
+
+                只动 CurrentUser（免管理员）；机器级那份是管理员写进系统的，
+                这里不假装能撤 —— 那句话在文案里说清，别让用户白点。
+                """
+                info, rwhy = codesign.read_cert_detail()
+                if info is None:
+                    msg_lab.set(texts.SET_DEV_CAT_4 % (rwhy or texts.SET_DEV_N_4))
+                    return
+                if not info.get("trusted"):
+                    msg_lab.set(texts.SET_DEV_N_11)
+                    return
+                if not dialogs.ask_confirm(
+                        t_dev, texts.SET_DEV_N_10,
+                        texts.SET_DEV_CAT_7
+                        % (info.get("subject") or texts.SET_DEV_N_5,
+                           info.get("thumbprint") or ""),
+                        danger=True, ok_text=texts.SET_DEV_N_10):
+                    return
+                ok, why = codesign.untrust()
+                if ok:
+                    self._codesign_info = dict(info, trusted=False)
+                    msg_lab.set(texts.SET_DEV_A0_14)
+                else:
+                    msg_lab.set(texts.SET_DEV_CAT_8 % why)
+
             btn_trust_user = None       # 用户级那个按钮（已信任时不建；点了成功就收起来）
 
             def _trusted_here():
-                """当前用户是不是已经把这张签名列入信任名单了。
+                """这张签名是不是已经在这台机器上被信任了（用户级**或**机器级）。
 
                 读启动那次检测的结果（`App._codesign_info`）：拿不到就按"还没信任"处理 ——
                 宁可能点（点进去也会被告知已信任），别把按钮藏得用户找不到。
+                机器级也要算（16 §19.4②）：走过「所有用户」那条的人，用户级那一格
+                永远是空的，只判 user 会让他看见一个点过又点一次的按钮。
                 """
                 info = getattr(self, "_codesign_info", None)
-                return bool(info and info.get("trusted"))
+                return bool(info and (info.get("trusted") or info.get("trusted_machine")))
 
             # 控件放在回调之后建：`command=名字` 是建控件那一刻就要绑定的（坑 115）
             i = r_dev["i"]
@@ -4099,6 +4613,12 @@ class SettingsMixin:
                 btn_trust_user = theme.button(brf, text=texts.SET_DEV_A0_8,
                                             command=trust_sign)
                 btn_trust_user.pack(side="top", anchor="w", pady=(0, 4))
+            else:
+                # 只有"当前用户级"真信过才给撤销（16 §19.3）：机器级那份是管理员
+                # 写进系统的，这里撤不掉，摆一个按不动的按钮只会误导。
+                if (getattr(self, "_codesign_info", None) or {}).get("trusted"):
+                    theme.button(brf, text=texts.SET_DEV_N_10,
+                               command=untrust_sign).pack(side="top", anchor="w", pady=(0, 4))
             theme.button(brf, text=texts.SET_DEV_N_9,
                        command=trust_sign_machine).pack(side="top", anchor="w", pady=(0, 4))
             theme.button(brf, text=texts.SET_DEV_A0_5,
@@ -4815,7 +5335,7 @@ class SettingsMixin:
                 # 模型来源 三件 + 引擎管理那一屏（eng 区块本身不变）。
                 # 「补全缺失项」与「整理模型文件夹」在高级模式；进页自动补全照旧在后台跑。
                 for _txt, _cmd in ((texts.SET_FILES_L0, self.open_local_models),
-                                   (texts.MDL_RECALC_TITLE, lambda: self._manual_scan(True)),
+                                   (texts.MDL_RECALC_BTN, self._open_recalc_dialog),
                                    (texts.MDL_POINT_BTN, self._open_model_sources)):
                     theme.button(t5, text=_txt, width=18, command=_cmd).grid(
                         row=r5["i"], column=0, columnspan=3, sticky="w", pady=4)
@@ -4853,8 +5373,8 @@ class SettingsMixin:
             fr = ttk.Frame(t5)
             theme.button(fr, text=texts.MDL_RECALC_MISSING, width=18,
                        command=lambda: self._manual_scan(False)).pack(side="left", padx=(0, 6))
-            theme.button(fr, text=texts.MDL_RECALC_TITLE, width=18,
-                       command=lambda: self._manual_scan(True)).pack(side="left")
+            theme.button(fr, text=texts.MDL_RECALC_BTN, width=18,
+                       command=self._open_recalc_dialog).pack(side="left")
             row(t5, r5, texts.SET_FILES_A2_2, fr,
                 texts.SET_FILES_A4_2)
 

@@ -19,9 +19,10 @@ import os
 import sys
 import time
 
+from .. import texts
+
 from . import config, engine_install, hardware, models, params, secrets, selfupdate
 from .config import write_error          # 只读：本模块不写状态文件（判据见 run_checks 里那条注释）
-from .. import texts
 
 
 GROUP_ENV = texts.DIAG_GROUP_ENV
@@ -295,7 +296,10 @@ def _apply_paths(out, cloud_ok):
                      % (texts.DIAG_IF if local_ok else texts.DIAG_ELSE_5,
                         texts.DIAG_IF if cloud_ok else texts.DIAG_ELSE_5),
                      "" if (local_ok or cloud_ok) else
-                     texts.DIAG_ELSE_6, ("settings", texts.DIAG_L1_2)))
+                     "想走本地：在 设置 → 本地模型 → 模型文件与引擎 点「检查更新 → 更新引擎」"
+                     "装引擎（那一屏进页也会自动找一遍本机已有的），模型放进模型目录；"
+                     "想走云端：在 设置 → 云端模型 → 服务商与密钥 填密钥，再到「选择模型」里勾上要用那几个。"
+                     "两条只要挑通一条。", ("settings", texts.DIAG_L1_2)))
     return out
 
 
@@ -318,7 +322,9 @@ def run_checks(cfg, proxy_running=False, server_running=False, probe_gpu=True):
     out.append(_c("app_dir", GROUP_ENV, OK if ok else FAIL,
                   texts.DIAG_CAT_3 % mode,
                   "%s%s" % (app_dir, "" if ok else " → " + err),
-                  "" if ok else texts.DIAG_ELSE_8,
+                  "" if ok else "这个目录不允许写入，设置保存不下来。"
+                                "把本程序整个文件夹移到一个可写的普通文件夹"
+                                "（不要放在系统程序目录里）再启动。",
                   ("open_dir", app_dir)))
 
     if write_error()[0]:
@@ -332,7 +338,8 @@ def run_checks(cfg, proxy_running=False, server_running=False, probe_gpu=True):
     if dt == 4 or oned:
         out.append(_c("location", GROUP_ENV, WARN, texts.DIAG_LOCATION_TITLE,
                       (texts.DIAG_IF_4 if dt == 4 else "") + (texts.DIAG_IF_5 if oned else ""),
-                      texts.DIAG_LOCATION_FIX))
+                      "这类目录会后台同步、偶尔锁文件，首次加载明显变慢还可能写不进配置。"
+                      "建议移到本地磁盘的普通文件夹。"))
     if dt in (2, 5, 6):
         out.append(_c("media_type", GROUP_ENV, WARN, texts.DIAG_MEDIA_TYPE_TITLE,
                       {2: texts.DIAG_D2, 5: texts.DIAG_D5, 6: texts.DIAG_D6}.get(dt, ""),
@@ -342,7 +349,8 @@ def run_checks(cfg, proxy_running=False, server_running=False, probe_gpu=True):
     if _zone_marked(exe_path):
         out.append(_c("zone", GROUP_ENV, WARN, texts.DIAG_ZONE_TITLE,
                       os.path.basename(exe_path),
-                      texts.DIAG_ZONE_FIX))
+                      "Windows 可能因此拦一次（SmartScreen /「已保护你的电脑」）。"
+                      "右键本程序 → 属性 → 勾选「解除锁定」，或在 SmartScreen 点「更多信息 → 仍要运行」。"))
 
     try:
         wv = sys.getwindowsversion()
@@ -358,7 +366,8 @@ def run_checks(cfg, proxy_running=False, server_running=False, probe_gpu=True):
     free = _free_gb(app_dir)
     out.append(_c("disk", GROUP_ENV, OK if free >= 20 else WARN, texts.DIAG_DISK_TITLE,
                   "%.1f GB" % free,
-                  "" if free >= 20 else texts.DIAG_ELSE_9))
+                  "" if free >= 20 else "模型文件动辄 10GB 以上，剩余空间偏少；"
+                                        "下载大模型前先腾出空间。"))
     # 模型目录可能挂在另一块盘上（R-106）：只量程序所在盘会把"下模型的那块盘满了"
     # 整条漏掉；同盘就不重复报了
     try:
@@ -389,14 +398,18 @@ def run_checks(cfg, proxy_running=False, server_running=False, probe_gpu=True):
         if os.path.isfile(old_bak):
             out.append(_c("upd_backup", GROUP_ENV, WARN, texts.DIAG_UPD_BACKUP_TITLE,
                           os.path.basename(old_bak),
-                          texts.DIAG_UPD_BACKUP_FIX))
+                          "这是上次自动更新留下的回滚备份，程序正常时不用管它。"
+                          "万一哪天更新后程序打不开：把旁边那个名字带 .updating 的文件"
+                          "改回原来的名字（去掉 .updating 后缀），就能回到旧版。"))
 
     tier = _dpi_aware()
     out.append(_c("dpi", GROUP_ENV, OK if tier else WARN,
                   texts.DIAG_DPI_TITLE,
                   (texts.DIAG_CAT_4 % dpi_label(tier)) if tier else
-                  texts.DIAG_ELSE_11,
-                  "" if tier else texts.DIAG_ELSE_12,
+                  "没开 —— Windows 会把整个窗口按系统缩放位图拉伸，"
+                  "界面大一圈同时有点糊",
+                  "" if tier else "在 设置 → 关于与诊断 勾上「高分屏清晰度」，"
+                                  "然后重开程序（这项是冷切换，当前窗口不会变）。",
                   ("settings", texts.DIAG_L1_3)))
 
     if not frozen:
@@ -423,14 +436,16 @@ def run_checks(cfg, proxy_running=False, server_running=False, probe_gpu=True):
     if not exe:
         out.append(_c("server_exe", GROUP_ENGINE, FAIL, texts.DIAG_SERVER_EXE_TITLE,
                       texts.DIAG_SERVER_EXE_FACT,
-                      texts.DIAG_CAT_5
+                      "去 设置 → 本地模型 → 服务参数 里指向 %s。"
                       % engine_install.exe_name("llama"),
-                      ("settings", texts.DIAG_L1_4)))
+                      ("settings", "本地模型 → 服务参数")))
     elif not os.path.isfile(exe):
         out.append(_c("server_exe", GROUP_ENGINE, FAIL,
                       texts.DIAG_CAT_6 % engine_install.exe_name("llama"),
                       exe,
-                      texts.DIAG_SERVER_EXE_FIX,
+                      "引擎不随本程序分发（许可与体积原因）。在 设置 → 本地模型 → 模型文件与引擎 "
+                      "点「检查更新」→「更新引擎」装 llama.cpp（CUDA 档会连运行库一起下），"
+                      "或用「手动定向」指到已经放在本机的那一份（那一屏进页会先自动找一遍）。",
                       ("open_dir", app_dir)))
     else:
         out.append(_c("server_exe", GROUP_ENGINE, OK, texts.DIAG_SERVER_EXE_TITLE_2, exe))
@@ -442,7 +457,9 @@ def run_checks(cfg, proxy_running=False, server_running=False, probe_gpu=True):
         if _insp.get("missing") == "cudart":
             out.append(_c("cudart", GROUP_ENGINE, WARN, texts.DIAG_CUDART_TITLE,
                           texts.DIAG_CUDART_FACT,
-                          texts.DIAG_CUDART_FIX))
+                          "服务会启动即退出。官方 CUDA 发行包是两个压缩包，把 cudart "
+                          "那个也解压进同一目录；或在 设置 → 引擎管理 点「补全缺失文件」"
+                          "一键补齐。"))
 
     name = str(cfg.get("gpu_name", "") or "")
     vram = float(cfg.get("vram_gb", 0) or 0)
@@ -459,11 +476,13 @@ def run_checks(cfg, proxy_running=False, server_running=False, probe_gpu=True):
     if name:
         out.append(_c("gpu", GROUP_ENGINE, OK if vram >= 6 else WARN, texts.DIAG_GPU_TITLE,
                       "%s · %.1f GB" % (name, vram),
-                      "" if vram >= 6 else texts.DIAG_ELSE_16))
+                      "" if vram >= 6 else "显存偏小：大模型会主要落在内存上，速度明显变慢。"
+                                           "建议选 8GB 以内的量化模型。"))
     else:
         out.append(_c("gpu", GROUP_ENGINE, WARN, texts.DIAG_GPU_TITLE_2,
                       texts.DIAG_GPU_FACT,
-                      texts.DIAG_GPU_FIX))
+                      "没有 N 卡也能跑（全在 CPU/内存上，很慢）。有 N 卡却读不到，通常是驱动没装好"
+                      "或装的是精简驱动 —— 更新一次驱动再重启本程序。"))
     out.append(_c("ram", GROUP_ENGINE, OK, texts.DIAG_RAM_TITLE,
                   "%.1f GB" % (cfg.get("ram_gb") or hardware.detect_ram_gb())))
 
@@ -471,7 +490,8 @@ def run_checks(cfg, proxy_running=False, server_running=False, probe_gpu=True):
     mdir = str(cfg.get("models_dir", "") or "")
     if not mdir or not os.path.isdir(mdir):
         out.append(_c("models_dir", GROUP_MODEL, FAIL, texts.DIAG_MODELS_DIR_TITLE, mdir or texts.DIAG_N,
-                      texts.DIAG_MODELS_DIR_FIX, ("settings", texts.DIAG_DACTION)))
+                      "把你下载的 .gguf 模型放进这个文件夹，或在 设置 → 本地模型 → 模型文件与引擎 里指到"
+                      "它们实际所在的位置。", ("settings", texts.DIAG_DACTION)))
         _dir, chat, img = "", [], []
     else:
         _dir, chat, img = models.scan_models(cfg)
@@ -493,7 +513,8 @@ def run_checks(cfg, proxy_running=False, server_running=False, probe_gpu=True):
             _fact = texts.DIAG__FACT
         out.append(_c("chat_models", GROUP_MODEL, FAIL, texts.DIAG_CHAT_MODELS_TITLE_2,
                       _fact,
-                      texts.DIAG_CHAT_MODELS_FIX,
+                      "需要 GGUF 格式、且带模型元数据的语言模型（llama.cpp 的下载页会标 "
+                      "\"universal / chat\"）。生图模型与视频组件不算，它们不会出现在聊天菜单里。",
                       ("open_dir", mdir)))
 
     cur = str(cfg.get("model", "") or "")
@@ -529,7 +550,8 @@ def run_checks(cfg, proxy_running=False, server_running=False, probe_gpu=True):
         out.append(_c("budget", GROUP_MODEL, lv, texts.DIAG_CAT_9 % (vram or 0),
                       texts.DIAG_CAT_10 % (in_gpu, len(chat),
                         (texts.DIAG_CAT_11 + "、".join(cpu_only[:3])) if cpu_only else ""),
-                      "" if in_gpu else texts.DIAG_ELSE_17))
+                      "" if in_gpu else "这些模型在这块显卡上一层都放不进去，会全部走 CPU / 内存，"
+                                        "速度通常是个位数每秒。换更小的量化（文件更小）会快很多。"))
         out.append(_c("vision", GROUP_MODEL, OK if with_vision else NA, texts.DIAG_VISION_TITLE,
                       texts.DIAG_CAT_12 % with_vision
                       if with_vision else texts.DIAG_ELSE_18,
@@ -553,7 +575,9 @@ def run_checks(cfg, proxy_running=False, server_running=False, probe_gpu=True):
                       texts.DIAG_SD_CLI_TITLE,
                       texts.DIAG_IF_7 if media_any else
                       texts.DIAG_ELSE_19,
-                      texts.DIAG_SD_CLI_FIX,
+                      "要用的话在 设置 → 本地模型 → 模型文件与引擎 用「检查更新 → 更新引擎」"
+                      "装 sd.cpp（那一屏进页也会自动找一遍本机已有的），"
+                      "装完到 设置 → 本地模型 → 生图 里指路。",
                       ("settings", texts.DIAG_DACTION)))
     else:
         out.append(_c("sd_cli", GROUP_MEDIA, OK, texts.DIAG_SD_CLI_TITLE, sd_exe))
@@ -580,7 +604,7 @@ def run_checks(cfg, proxy_running=False, server_running=False, probe_gpu=True):
         out.append(_c("port_server", GROUP_PORT, WARN, texts.DIAG_CAT_15 % p1,
                       texts.DIAG_PORT_SERVER_FACT_3,
                       texts.DIAG_PORT_SERVER_FIX,
-                      ("settings", texts.DIAG_L1_4)))
+                      ("settings", "本地模型 → 服务参数")))
 
     try:
         p2 = int(cfg.get("proxy_port", 8081) or 8081)
@@ -603,7 +627,9 @@ def run_checks(cfg, proxy_running=False, server_running=False, probe_gpu=True):
     out.append(_c("config", GROUP_STATE, {"ok": OK, "none": OK, "broken": FAIL}[st],
                   texts.DIAG_GROUP_STATE + (texts.DIAG_IF_8 if st == "broken" else texts.DIAG_ELSE_22),
                   detail,
-                  "" if st != "broken" else texts.DIAG_ELSE_23))
+                  "" if st != "broken" else "这份文件解析不了，程序现在用的是默认值，"
+                                            "所以你会看到设置「全没了」。同目录若留有 .1 或备份可找回；"
+                                            "否则删掉它让程序重建一份。"))
     try:
         sec = (secrets.load_secrets() or {}).get("api_keys") or {}
         n = len([k for k, v in sec.items() if v])

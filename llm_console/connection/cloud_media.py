@@ -16,6 +16,21 @@ connection 层，UI 只消费归一化后的事件与结构。
     生视频 `POST {base}/videos/generations` → 轮询 `GET {base}/async-result/{id}`。
   · **华为云 MaaS**：生图 `POST /v1/images/generations`（同步，**只给 b64**）；
     生视频 `POST /v1/video/generations`（`input` + `parameters` 两段嵌套）→ 同路径轮询。
+  · **火山方舟（字节火山引擎 Ark）**：生图 `POST /api/v3/images/generations`（同步，
+    `data[].url`，`response_format` 也可要 b64_json）；生视频 `POST /api/v3/contents/
+    generations/tasks` → 顶层 `id`（`cgt-…`）→ `GET …/tasks/{id}`（状态**小写**
+    `queued/running/succeeded/failed/cancelled/expired`，产物 `content.video_url`）；
+    取消 `DELETE …/tasks/{id}`。请求体与 MiniMax v2 同形（`content[]` + 顶层档位），
+    但**档位字段名与取值是另一套**：`resolution` 只收小写 `480p/720p/1080p/4k`、
+    `ratio` ∈ `16:9/4:3/1:1/3:4/9:16/21:9/adaptive`、`duration` 按模型 [4,30]/[4,15]/[2,12]。
+    出处（2026-10-17 逐页核过）：docs.volcengine.com/docs/ark 的
+    image-generation-api / create-video-generation-task-api /
+    get-video-generation-task-api / cancel-or-delete-video-generation-tasks-api。
+    ⚠ **取消这条要特别小心**：官方页写了 DELETE 按当前状态分两种动作 —— `queued` 才是
+    取消，而 `succeeded/failed/expired` 上是**删除任务记录、之后再也查不到**；
+    running 不支持。所以 `cancel()` 先查一次状态、只在排着队的时候发 DELETE。
+    参考图官方页写了（`image`，URL 或 base64），但语义没实测 → 仍不放行（见
+    `providers.REF_IMAGE_APIS` 上方那段，坑 101）。
   · 官方**没有**生图/生视频接口的（Kimi；腾讯云混元的生图生视频在 TokenHub/TC3 签名那套
     上、不是这个 API Key 直连的端点）→ 不猜、不接，`providers.validate_for_send` 会拦下并说明。
 
@@ -27,7 +42,7 @@ connection 层，UI 只消费归一化后的事件与结构。
 2026-10-01 三家真机各跑一张：阿里云（Token Plan / 百炼按量）保住了底图的构图，
 是真正的图生图；MiniMax 的 `subject_reference` 实测是**主体/角色参考**（喂条纹图
 它生成人像），所以界面措辞按 `providers.ref_image_mode` 分开，别一律叫"图生图"。
-**云端生视频仍然只做文生**：首帧/尾帧请切回本地 sd-cli 那条链路。
+**云端生视频首帧**：只放行官方页明说收 base64 的万相 i2v；happyhorse、百炼托管 H3、MiniMax H3、方舟等按 `providers.first_frame_mode` 分档（没有首帧 / 官方页写了未实测）拦下，话术分开（C2-4）。
 
 三条来自文档 §12.1 的硬约束（阿里云这条链路，开发机实测过），都在代码里落实：
   · 异步任务端点**必须**带 X-DashScope-Async: enable，缺了直接报"不支持同步调用"；
@@ -43,15 +58,20 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
+from .. import texts
 from ..core import capability, config, media, providers
 from . import cloud
-from .. import texts
 
 PROTOCOL_ALIYUN = "aliyun"
 PROTOCOL_MINIMAX = "minimax"
 PROTOCOL_ZHIPU = "zhipu"
 PROTOCOL_HUAWEI = "huawei"
-PROTOCOLS = (PROTOCOL_ALIYUN, PROTOCOL_MINIMAX, PROTOCOL_ZHIPU, PROTOCOL_HUAWEI)
+PROTOCOL_VOLC = "volcengine"
+PROTOCOLS = (PROTOCOL_ALIYUN, PROTOCOL_MINIMAX, PROTOCOL_ZHIPU, PROTOCOL_HUAWEI,
+             PROTOCOL_VOLC)
+# 任务号放**顶层 `id`** 的那两家（其余家的顶层 id 是请求号，误当任务号写台账 = 造出
+# 永远取不回的假任务，坑 202③）
+_TOP_ID_PROTOCOLS = (PROTOCOL_ZHIPU, PROTOCOL_VOLC)
 
 # 各家状态字面量不统一（百炼/Token Plan 大写、MiniMax v1 是 PascalCase、v2 小写），
 # 一律归一化成这六个，界面只认归一化结果。
@@ -63,13 +83,17 @@ _STATUS = {
     "COMPLETED": "succeeded", "DONE": "succeeded", "FINISHED": "succeeded",
     "FAILED": "failed", "ERROR": "failed", "INVALID": "failed", "UNKNOWN_ERROR": "failed",
     "FAIL": "failed",
+    # 方舟那一套还有 `expired`（超过 execution_expires_after 没跑成）：既不会出片也回不去，
+    # 按失败处理；认不出的字面量一律走 normalize_status 的 "unknown"，绝不落"其余即成功"（坑 192）
+    "EXPIRED": "failed",
     "CANCELED": "canceled", "CANCELLED": "canceled",
     "UNKNOWN": "unknown",
 }
 
 # 会计费的提交类 POST 超时/断连时的追加提示（排查报告 R-04）：请求可能已到达服务端，
 # "没拿到回包"不等于"没建单没扣钱"（与坑 53"提交 200 不等于没扣钱"是同一条纪律的两面）。
-_BILL_NOTE = (texts.CME__BILL_NOTE)
+_BILL_NOTE = ("注意：请求可能已到达服务端——这一单可能已经创建并计费。"
+              "重发之前，请先在服务商控制台核对账单/任务列表。")
 
 _IMG_KEYS = ("image", "image_url", "url", "image_urls", "download_url", "file_url",
              "result_url", "video_url")
@@ -122,6 +146,8 @@ def image_endpoint(provider):
         return _at(provider, "/images/generations")
     if proto == PROTOCOL_HUAWEI:
         return _at(provider, "/v1/images/generations")
+    if proto == PROTOCOL_VOLC:
+        return _at(provider, "/images/generations")
     return _u(provider, "services/aigc/multimodal-generation/generation")
 
 
@@ -134,6 +160,8 @@ def video_endpoint(provider, model=""):
         return _at(provider, "/videos/generations")
     if proto == PROTOCOL_HUAWEI:
         return _at(provider, "/v1/video/generations")
+    if proto == PROTOCOL_VOLC:
+        return _at(provider, "/contents/generations/tasks")
     return _u(provider, "services/aigc/video-generation/video-synthesis")
 
 
@@ -152,6 +180,10 @@ def task_endpoint(provider, task_id=None, model=""):
         return _at(provider, "/async-result/%s" % qid)
     if proto == PROTOCOL_HUAWEI:
         return _at(provider, "/v1/video/generations/%s" % qid)
+    if proto == PROTOCOL_VOLC:
+        # 带 id 是单查，不带就是官方那条列表端点（分页参数我们不拼，没人批量查）
+        return _at(provider, "/contents/generations/tasks%s"
+                   % (("/%s" % qid) if task_id else ""))
     if not task_id:
         return _u(provider, "tasks")
     return _u(provider, "tasks/%s" % urllib.parse.quote(str(task_id), safe="-_."))
@@ -228,7 +260,7 @@ def _request(provider, method, url, body=None, extra=None, timeout=60, signed=Fa
     if not signed:
         key = providers.api_key_of(provider)
         if not key:
-            return -2, (texts.CME_CAT_2
+            return -2, (texts.CLD_CAT_18
                         % (provider or {}).get("name", ""))
     data = json.dumps(body, ensure_ascii=False).encode("utf-8") if body is not None else None
     req = urllib.request.Request(url, data=data,
@@ -277,7 +309,8 @@ _HINTS = (
     ("size", texts.CME_L1_9),
     ("throttling", texts.CME_L1_10),
     # v40 新增那几家的说法（MiniMax 的 base_resp 码写在错误消息里，这里按关键词兜底）
-    ("sensitive", texts.CME_L1_11),
+    ("sensitive", "内容审核没通过（MiniMax 分「输入敏感 1026」和「输出敏感 1027」两种）："
+                  "提示词换个说法再试。"),
     ("balance", texts.CME_L1_12),
     ("insufficient", texts.CME_L1_13),
     ("rate limit", texts.CME_L1_10),
@@ -387,16 +420,17 @@ def _extract_urls(payload, kind):
 
 def _task_id_of(payload, protocol=PROTOCOL_ALIYUN):
     """任务号各家放的位置不同：阿里云 `output.task_id`、MiniMax/华为顶层 `task_id`、
-    智谱顶层 `id`。只认**字符串**，且不去碰 request_id（那是排查用的请求号，不能当
-    任务号轮询）。顶层 `id` **只对智谱**当任务号（它的 async-result 契约就是这么放的）：
-    MiniMax/华为回包里的顶层 id 是请求号，写进台账会造出永远取不回的假任务（R-40）。"""
+    智谱顶层 `id`、火山方舟也是顶层 `id`（`cgt-…`，官方创建端点的响应参数只有这一个）。
+    只认**字符串**，且不去碰 request_id（那是排查用的请求号，不能当任务号轮询）。顶层 `id`
+    **只对智谱与方舟**当任务号（R-40 / 坑 202③）：MiniMax/华为回包里的顶层 id 是请求号，
+    写进台账会造出永远取不回的假任务。"""
     try:
         if not isinstance(payload, dict):
             return ""
         if protocol == PROTOCOL_ALIYUN:
             out = payload.get("output") or {}
             return str(out.get("task_id") or "")
-        keys = ("task_id", "id") if protocol == PROTOCOL_ZHIPU else ("task_id",)
+        keys = ("task_id", "id") if protocol in _TOP_ID_PROTOCOLS else ("task_id",)
         for k in keys:
             v = payload.get(k)
             if isinstance(v, str) and v.strip():
@@ -408,9 +442,20 @@ def _task_id_of(payload, protocol=PROTOCOL_ALIYUN):
 
 
 def _proto_error(payload, protocol):
-    """**HTTP 200 也可能带错误**：MiniMax 把结果包在 `base_resp` 里，status_code≠0 就是失败。
-    不掀这一层，用户只会看到"回包里没有图片地址"这种猜不出所以然的说法。"""
-    if protocol != PROTOCOL_MINIMAX or not isinstance(payload, dict):
+    """**HTTP 200 也可能带错误**：MiniMax 把结果包在 `base_resp` 里，status_code≠0 就是失败；
+    方舟的生图回包另有顶层 `error`（`{code, message}`，成功时是 null）。不掀这一层，用户
+    只会看到"回包里没有图片地址"这种猜不出所以然的说法。"""
+    if not isinstance(payload, dict):
+        return ""
+    if protocol == PROTOCOL_VOLC:
+        err = payload.get("error")
+        if isinstance(err, dict) and (err.get("code") or err.get("message")):
+            return texts.CME_CAT_5 % (err.get("code") or "-",
+                                          err.get("message") or texts.CME_N_2)
+        if isinstance(err, str) and err.strip():
+            return "服务端错误：%s" % err.strip()
+        return ""
+    if protocol != PROTOCOL_MINIMAX:
         return ""
     br = payload.get("base_resp")
     if not isinstance(br, dict):
@@ -472,7 +517,7 @@ def write_b64(items, dest, log=None):
             if log is not None:
                 log.w(texts.CME_CAT_7 % (p, len(data)))
         except Exception as e:
-            errs.append(texts.CME_CAT_8 % e)
+            errs.append(texts.CHL_CAT % e)
     return paths, errs
 
 
@@ -594,7 +639,8 @@ def _dest_paths(dest, urls):
 def _size_for(protocol, size):
     """尺寸写法各家不同，界面统一填 "宽x高"（或留空），这里翻成各家要的形态：
       阿里云 1024*1024 · MiniMax 收 aspect_ratio（16:9）或 width/height 两个整数 ·
-      智谱/华为 1024x1024。返回要塞进 body 的 (键, 值) 列表，可能是 0 项或 2 项。
+      智谱/华为 1024x1024 · 方舟 1024x1024 或官方档位（1K / 1.5K / 2K）。
+    返回要塞进 body 的 (键, 值) 列表，可能是 0 项或 2 项。
     分隔符写法与本地链路同一份判据（media.parse_size，坑 183：* ，× 全角都认，
     先归一成 x 再按家换算），比例写法（16:9，含全角冒号）原样交各家判定。"""
     raw = str(size or "").strip()
@@ -609,6 +655,10 @@ def _size_for(protocol, size):
         return [("size", s.replace("x", "*"))]
     if protocol in (PROTOCOL_ZHIPU, PROTOCOL_HUAWEI):
         return [("size", s)]
+    if protocol == PROTOCOL_VOLC:
+        # 认得出宽高就送归一后的 宽x高；认不出就送**原样**（官方档位是 "2K" 这种大写 K，
+        # 上面那行 lower() 是给比例写法准备的，套到档位上就变成服务端不认的 "2k"）
+        return [("size", s if parsed else raw)]
     if protocol == PROTOCOL_MINIMAX:
         if ":" in s:                       # 界面里直接写比例
             return [("aspect_ratio", s)]
@@ -630,6 +680,10 @@ def _size_for(protocol, size):
 #           这一种，图要 JPG/PNG、<10MB）
 # 智谱的 /images/generations 请求体里没有参考图入口（官方页只有 prompt/model/size 一类字段），
 # 华为那页没查过 —— 两家都不放行，判据在 providers.REF_IMAGE_APIS，别在这儿再列一遍。
+# 方舟官方页**写了**参考图（`image`：URL 或 data:image/<fmt>;base64,，按模型 10/14 张、
+# 单张 ≤30MB，格式含 heic/heif/gif），但"单图生图/多图生图"到底是底图重绘还是主体参考
+# 没实测过 → 这里**故意不登记**（坑 101：接口页写了支持参考图 ≠ 它拿这张图干同一件事；
+# 登记错了就是一次白花的计费 + 一句说错的回显）。
 REF_MAX_BYTES = 10 * 1024 * 1024
 REF_LIMITS = {
     PROTOCOL_ALIYUN: {"max": 3,
@@ -645,6 +699,12 @@ REF_LIMITS = {
 
 def ref_limits(protocol):
     return REF_LIMITS.get(protocol)
+
+
+# 官方页**写了**参考图入参、但我们还没实测过它拿这张图干的是哪一档语义的家（坑 101）。
+# 拦下的动作和 REF_LIMITS 缺席一样，但说法不能一样 —— 对这几家说"只收文字提示词"是假的。
+# 判据只有一份，在 providers.REF_UNVERIFIED_APIS。
+REF_UNVERIFIED = providers.REF_UNVERIFIED_APIS
 
 
 def ref_data_url(path, protocol):
@@ -694,7 +754,11 @@ def ref_images_error(provider, paths, mode=""):
     proto = protocol_of(provider)
     lim = ref_limits(proto)
     if not lim:
-        return (texts.CME_RET)
+        if proto in REF_UNVERIFIED:
+            return ("这一家的参考图官方页写了，但我们还没实测它拿这张图是改图还是另画一张，"
+                    "所以先不发（图片已保留，不会丢）；要改图请先用本地的〔生图〕模型")
+        return ("这一家的生图接口只收文字提示词，参考图请改用本地的〔生图〕模型"
+                "（图片已保留，不会丢）")
     want = str(mode or "").strip()
     if want and not providers.supports_ref_mode(provider, want):
         return (texts.CME_CAT_18
@@ -708,6 +772,54 @@ def ref_images_error(provider, paths, mode=""):
         if err:
             return err
     return ""
+
+
+# ---------------------------------------------------------------- 视频首帧（C2-4）
+# 只放行官方页**明说收 base64 data URL** 的万相 i2v；其余家由 providers.first_frame_mode
+# 分三档（没有 / 未实测 / base64）。格式与体积官方页没列全，按参考图同一套 10MB 保守判，
+# 真机首验后再校准。请求体上限也要在真机那一轮量（plan C2-4）。
+FIRST_FRAME_MAX_BYTES = 10 * 1024 * 1024
+_FRAME_EXTS = {".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+               ".png": "image/png", ".webp": "image/webp"}
+
+
+def first_frame_data_url(path):
+    """本地首帧 → data URL，返回 `(data_url, 错误说明)`；错误一律带下一步动作。"""
+    p = str(path or "")
+    if not os.path.isfile(p):
+        return "", texts.CME_FRAME_MISSING % (p or texts.CME_N_3)
+    ext = os.path.splitext(p)[1].lower()
+    mime = _FRAME_EXTS.get(ext)
+    if not mime:
+        return "", texts.CME_FRAME_EXT % (ext or texts.CME_N_4)
+    try:
+        size = os.path.getsize(p)
+    except Exception:
+        size = 0
+    if size > FIRST_FRAME_MAX_BYTES:
+        return "", texts.CME_FRAME_BIG % (size / 1048576.0)
+    try:
+        with open(p, "rb") as f:
+            raw = f.read()
+    except Exception as e:
+        return "", texts.CME_FRAME_READ % e
+    if not raw:
+        return "", texts.CME_FRAME_EMPTY
+    return "data:%s;base64,%s" % (mime, base64.b64encode(raw).decode("ascii")), ""
+
+
+def first_frame_error(provider, model, path):
+    """发送前预检：这家能不能带首帧、这张图能不能编码。空串 = 可以发。"""
+    p = str(path or "").strip()
+    if not p:
+        return ""
+    mode = providers.first_frame_mode(provider, model)
+    if mode == "unverified":
+        return texts.CME_FRAME_UNVERIFIED
+    if mode != "base64":
+        return texts.CME_FRAME_NONE
+    _u, err = first_frame_data_url(p)
+    return err
 
 
 def _shrink_for_log(body):
@@ -734,8 +846,11 @@ def _shrink_for_log(body):
 
 
 def image_body(model, prompt, size="", negative="", seed=-1, extra=None,
-               protocol=PROTOCOL_ALIYUN, ref_images=None, ref_mode=""):
+               protocol=PROTOCOL_ALIYUN, ref_images=None, ref_mode="", n=1):
     r"""拼一次云端生图的请求体。`ref_images` 是**已经编成 data URL 的参考图**列表。
+
+    `n` = 一次要出几张；只有能力档案 `img_n` 上限 > 1 的家（当前是 MiniMax 1~9）
+    才把 `n` 写进请求体，其余家**不发明字段**（阿里 plus/max 固定 1，传别的会报错）。
 
     编码放在 `generate_image` 里做（那里能出"这张图不合格"的人话），这里只负责各家**字段
     形状不同**这一件事：阿里云把图塞进 `content[]`，MiniMax 塞进 `subject_reference[]`。
@@ -755,6 +870,14 @@ def image_body(model, prompt, size="", negative="", seed=-1, extra=None,
             prompt = ("%s%s" % (_hint, prompt)) if str(prompt).strip() else _hint
     if protocol == PROTOCOL_MINIMAX:
         body = {"model": model, "prompt": prompt, "response_format": "url"}
+        try:
+            _n = int(n or 1)
+        except Exception:
+            _n = 1
+        _lo, _hi = providers.profile_for(protocol, model).get("img_n") or (1, 1)
+        _n = max(int(_lo), min(int(_hi), _n))
+        if _n > 1:
+            body["n"] = _n          # 官方 image-01 支持 1~9；1 张时不传（默认就是 1）
         for k, v in _size_for(protocol, size):
             body[k] = v
         try:
@@ -787,6 +910,22 @@ def image_body(model, prompt, size="", negative="", seed=-1, extra=None,
             pass
         body.update(extra or {})
         return body
+    if protocol == PROTOCOL_VOLC:
+        body = {"model": model, "prompt": prompt, "response_format": "url"}
+        for k, v in _size_for(protocol, size):
+            body[k] = v
+        try:
+            if int(seed) >= 0:
+                body["seed"] = int(seed)
+        except Exception:
+            pass
+        # 官方默认 true = 右下角印一枚"AI 生成"水印；产物是用户自己存下来的图片，默认关掉
+        body["watermark"] = False
+        # 参考图官方页有字段（`image`）但语义没实测 → 这家不进 REF_IMAGE_APIS/REF_LIMITS，
+        # 上面 generate_image 的预检就把它拦下了，走到这里时 refs 必为空（坑 101/102）
+        # negative_prompt 这一家没有 → 不发明字段，交给 extra 显式带（同 MiniMax 那条）
+        body.update(extra or {})
+        return body
     content = [{"image": u} for u in refs[:REF_LIMITS[PROTOCOL_ALIYUN]["max"]]]
     content.append({"text": prompt})
     body = {"model": model, "input": {"messages": [{"role": "user", "content": content}]}}
@@ -810,7 +949,7 @@ def image_body(model, prompt, size="", negative="", seed=-1, extra=None,
 
 def generate_image(cfg, provider, model, prompt, dest, emit=None, stop_flag=None,
                    negative="", size="", seed=-1, log=None, log_path="", ref_images=None,
-                   on_task_id=None, persist=None, ref_mode=""):
+                   on_task_id=None, persist=None, ref_mode="", n=1):
     """云端生图：同步端点出 URL；万一服务端给了 task_id，就地转成轮询。
 
     `ref_images` 是本地参考图路径列表，`ref_mode` 是要用哪一档（空 = 这一家的默认档）。
@@ -842,9 +981,16 @@ def generate_image(cfg, provider, model, prompt, dest, emit=None, stop_flag=None
         if err:
             return _img_fail(err, t0, log)
         urls_in.append(data_url)
+    _pf = providers.profile_for(provider, model)
+    try:
+        _n = int(n or 1)
+    except Exception:
+        _n = 1
+    _lo, _hi = _pf.get("img_n") or (1, 1)
+    _n = max(int(_lo), min(int(_hi), _n))
     body = image_body(model, prompt, size=size, negative=negative, seed=seed,
                       extra=providers.media_extra_params(provider, model),
-                      protocol=proto, ref_images=urls_in, ref_mode=ref_mode)
+                      protocol=proto, ref_images=urls_in, ref_mode=ref_mode, n=_n)
     log.json("请求 POST %s" % image_endpoint(provider), _shrink_for_log(body))
     emit(("line", texts.CME_CAT_21 % (providers.short_of(model),
                                       texts.CME_CAT_22 % (capability.MODE_LABEL.get(ref_mode,
@@ -940,10 +1086,11 @@ def _img_fail(msg, t0, log):
 # ---------------------------------------------------------------- 生视频（三期）
 
 def video_body(model, prompt, resolution="", duration=0, ratio="", seed=-1,
-               negative="", extra=None, protocol=PROTOCOL_ALIYUN):
+               negative="", extra=None, protocol=PROTOCOL_ALIYUN, first_frame=""):
     """各家的档位字段名不一样，这里只送**这一家有的**：
     阿里云 parameters.{resolution,ratio,duration}、MiniMax v1 只有 resolution/duration、
-    MiniMax v2 是 content[] + resolution/duration/ratio、智谱用 size、华为嵌套 parameters.size。
+    MiniMax v2 是 content[] + resolution/duration/ratio、智谱用 size、华为嵌套 parameters.size、
+    方舟是 content[] + 顶层 resolution/ratio/duration。
     界面填的"分辨率"可能是 720P 也可能是 1280x720 —— 认不出来的形式就**不送**，
     让服务端用它自己的默认档，别把猜的值发上去（发了也只换来一个看不懂的 400）。
     宽高写法与本地链路同一份判据（media.parse_size，坑 183）：智谱 / 华为送 size 前
@@ -999,7 +1146,30 @@ def video_body(model, prompt, resolution="", duration=0, ratio="", seed=-1,
         if p:
             body["parameters"] = p
         return body
-    body = {"model": model, "input": {"prompt": prompt}}
+    if protocol == PROTOCOL_VOLC:
+        # 请求体形状与 MiniMax v2 同族（content[] + 顶层档位），**取值是另一套**：
+        # resolution 官方只收小写 480p/720p/1080p/4k，宽高比走 ratio，duration 按模型 [2,30]；
+        # 界面里写成宽x高的那一档这家没有对应字段 → 不送，交服务端的默认档
+        body = {"model": model, "content": [{"type": "text", "text": prompt}]}
+        if res and not sized:
+            body["resolution"] = res_out.lower()
+        if ratio:
+            body["ratio"] = ratio
+        if dur:
+            body["duration"] = dur
+        try:
+            if int(seed) >= 0:
+                body["seed"] = int(seed)
+        except Exception:
+            pass
+        body.update(extra or {})
+        return body
+    inp = {"prompt": prompt}
+    if first_frame:
+        # 万相 i2v：input.media[] 里放 {"type":"first_frame","url": data URL}
+        # （11 §5③；只在这条阿里分支里出现，其余家由 first_frame_error 拦住）
+        inp["media"] = [{"type": "first_frame", "url": first_frame}]
+    body = {"model": model, "input": inp}
     neg = str(negative or "").strip()
     if neg:
         body["input"]["negative_prompt"] = neg
@@ -1023,7 +1193,7 @@ def video_body(model, prompt, resolution="", duration=0, ratio="", seed=-1,
 
 
 def submit_video(cfg, provider, model, prompt, resolution="", duration=0, ratio="",
-                 negative="", seed=-1, log_path="", title=""):
+                 negative="", seed=-1, log_path="", title="", first_frame=""):
     """创建异步视频任务。缺 X-DashScope-Async 头会被服务端直接拒（文档 §12.1）。
 
     返回 dict(ok, task_id, error, raw, log_path)。日志落在 log_path（一般是产物同名
@@ -1035,9 +1205,11 @@ def submit_video(cfg, provider, model, prompt, resolution="", duration=0, ratio=
     body = video_body(model, prompt, resolution=resolution, duration=duration,
                       ratio=ratio, negative=negative, seed=seed,
                       extra=providers.media_extra_params(provider, model),
-                      protocol=proto)
+                      protocol=proto, first_frame=first_frame)
     url = video_endpoint(provider, model)
-    log.json("请求 POST %s" % url, body)
+    # 首帧是 data URL 时 body 里会有几十 KB~几 MB 的 base64 —— 与生图日志同一条纪律：
+    # 超长字符串折成"长度 + 头一段 + 已折行"，否则逐任务日志变成查不动的砖头（坑 102）。
+    log.json("请求 POST %s" % url, _shrink_for_log(body))
     # X-DashScope-Async 是阿里云要求的异步开关；各家不认的请求头不该乱发（有的网关
     # 会把未知头当可疑请求拦下来）
     extra = {"X-DashScope-Async": "enable"} if proto == PROTOCOL_ALIYUN else None
@@ -1122,7 +1294,8 @@ def query_task(provider, task_id, model=""):
         # UNKNOWN 一类）绝不能含糊带过：如实报"状态不认识"，由 wait_task 计入查询
         # 失败并重试 —— 原来它会落到"其余即成功"分支，任务还在跑就被判死，真正的
         # 服务端 code/message 被吞（排查报告 R-03）。
-        err = (texts.CME_CAT_32
+        err = ("服务端返回了不认识的状态（%s）：不能判定成功或失败，"
+               "已按查询失败处理（原文已存日志）。"
                % str(cont.get("task_status") or cont.get("status") or texts.CME_N_6))
     if proto == PROTOCOL_MINIMAX and not _mm_v2(model) and status == "succeeded" \
             and not urls and not iurls and payload.get("file_id"):
@@ -1156,6 +1329,92 @@ def query_task(provider, task_id, model=""):
 
 _LABEL = {"pending": texts.CME_DPENDING, "running": texts.CME_DRUNNING, "succeeded": texts.CME_DSUCCEEDED,
           "failed": texts.CME_DFAILED, "canceled": texts.CME_DCANCELED, "unknown": texts.CME_DUNKNOWN}
+
+
+def list_tasks(provider, model="", start="", end="", status="", page=1, size=20):
+    """按模型名 + 时间窗查"我刚提交的任务" → `(ok, items, error, raw)`。
+
+    干什么用（16 §24.1 / 排查报告 R-04 的后半）：提交请求超时 / 断连时，**"没拿到回包"
+    不等于"没建单"**（`_BILL_NOTE` 那句话的另一半）。重发就会重复扣钱，所以给一条
+    "只查不提交"的核对出口：查到就把它当台账任务取回，一个字节都不用再提交。
+
+    只有**阿里云系**有这条批量端点（`GET /api/v1/tasks?model_name=&start_time=&end_time=`，
+    时间格式 `YYYYMMDDhhmmss`，见 `11` §3.5）。别家要么没给（MiniMax 只能按 id 查）、
+    要么没实测（方舟的 list 有、语义没验），一律如实回"这一家没有"。
+
+    items 里每条只留界面要用的字段：`task_id / status / model / submit_time /
+    end_time / urls / error`，原始回包整份放 `raw` 供"另存日志"。
+    """
+    proto = protocol_of(provider)
+    if proto != PROTOCOL_ALIYUN:
+        return False, [], ("这一家没有可用的「批量查任务」端点（或未实测）："
+                           "只能按 task_id 单个查，任务号得从台账或控制台拿。"), None
+    q = {"page_no": str(max(1, int(page or 1))),
+         "page_size": str(max(1, min(100, int(size or 20))))}
+    if model:
+        q["model_name"] = str(model)
+    if start:
+        q["start_time"] = str(start)
+    if end:
+        q["end_time"] = str(end)
+    if status:
+        q["status"] = str(status)
+    url = task_endpoint(provider) + "?" + urllib.parse.urlencode(q)
+    st, text = _request(provider, "GET", url, timeout=45)
+    payload = _safe_json(text)
+    if st != 200:
+        return False, [], explain(st, text, provider, url), payload
+    if not isinstance(payload, dict):
+        return False, [], (texts.CME_CAT_31 % str(text or "")[:120]), None
+    err = _proto_error(payload, proto)
+    # 列表可能藏在 output.tasks / tasks / data / output.items 任一处：官方页只写了
+    # "批量列表"，没给回包示例（`11` §3.5），几种形状都认，认不出就是空表 + 原话。
+    cont = payload.get("output") if isinstance(payload.get("output"), dict) else {}
+    rows = (cont.get("tasks") or cont.get("items") or payload.get("tasks")
+            or payload.get("data") or [])
+    if isinstance(rows, dict):
+        rows = rows.get("tasks") or rows.get("items") or []
+    items = []
+    for r in rows if isinstance(rows, list) else []:
+        if not isinstance(r, dict):
+            continue
+        tid = str(r.get("task_id") or r.get("id") or "")
+        if not tid:
+            continue
+        urls = _extract_urls(r, "video") + _extract_urls(r, "image")
+        items.append({"task_id": tid,
+                      "status": normalize_status(r.get("task_status") or r.get("status")),
+                      "model": str(r.get("model") or r.get("model_name") or ""),
+                      "submit_time": str(r.get("submit_time") or ""),
+                      "end_time": str(r.get("end_time") or ""),
+                      "urls": urls,
+                      "error": _says(json.dumps(r, ensure_ascii=False)) if
+                      normalize_status(r.get("task_status") or r.get("status")) == "failed" else ""})
+    return (not err), items, err, payload
+
+
+def download_urls(urls, dest, emit=None, stop_flag=None, timeout=None):
+    """按台账里存的产物 URL 直接重下，**不查服务端**（16 §24.2 / R-40 后半）。
+
+    什么时候用：同步生图是"服务端当场回 URL"，下载那一步失败时，URL 就是唯一还活着
+    的线索（24 小时内有效）。原来它只活在 `.log` 里，重启后没有任何入口能拿回来。
+    多个 URL（×n）时主图用 `dest`，其余 `dest` 换后缀 `-2`、`-3`…
+
+    返回 dict(ok, paths, error, urls)——与 generate_image 的收尾形状对齐，
+    上层两条链路（取回按钮 / worker）可以用同一套事件。
+    """
+    urls = [str(u) for u in (urls or []) if str(u or "").strip()]
+    if not urls:
+        return {"ok": False, "paths": [], "error": "台账里没有可重下的产物地址。", "urls": []}
+    paths, errs = [], []
+    stem, ext = os.path.splitext(dest)
+    for i, u in enumerate(urls):
+        p = dest if i == 0 else "%s-%d%s" % (stem, i + 1, ext)
+        ok, why = download(u, p, emit=emit, timeout=timeout, stop_flag=stop_flag)
+        (paths if ok else errs).append(p if ok else why)
+    return {"ok": bool(paths), "paths": paths,
+            "error": "" if paths else (errs[0] if errs else texts.CME_ELSE_4),
+            "urls": urls}
 
 
 def wait_task(cfg, provider, task_id, dest, kind="video", emit=None, stop_flag=None,
@@ -1244,7 +1503,8 @@ def wait_task(cfg, provider, task_id, dest, kind="video", emit=None, stop_flag=N
                      int(time.time() - t0))))
             if time.time() > deadline:
                 res["status"] = "timeout"
-                res["error"] = (texts.CME_CAT_42
+                res["error"] = ("等满了 %d 分钟还没出结果。任务记录已存进 cloud_jobs.json，"
+                                "之后可以在对话里点「取回」接着拿。"
                                 % int(cfg.get("cloud_wait_minutes", 20) or 20))
                 res["seconds"] = round(time.time() - t0, 1)
                 log.w(res["error"])
@@ -1306,14 +1566,94 @@ def wait_task(cfg, provider, task_id, dest, kind="video", emit=None, stop_flag=N
         return res
 
 
+def _cancel_volc(provider, task_id, model=""):
+    """方舟的取消要先查状态再决定发不发。
+
+    官方页写了同一个 `DELETE …/contents/generations/tasks/{id}` **按当前状态干两件不同的事**：
+    `queued` = 取消排队（变更为 cancelled）；`succeeded` / `failed` / `expired` = **删除任务
+    记录，之后不支持再查询**；`running` 不支持。闭着眼睛发就会把刚跑完的片子连同一个
+    「取回」入口一起删掉 —— 那正是坑 202② 那条纪律的反面（台账还在、对象已经没了）。
+    查询不产生费用、官方也写明"查询频率不影响任务执行进度"，所以这一次预检是白给的。
+    """
+    url = task_endpoint(provider, task_id, model)
+    st, text = _request(provider, "GET", url, timeout=30)
+    payload = _safe_json(text)
+    tail = ("任务记录已存进 cloud_jobs.json，之后可以点「取回」拿结果。")
+    if st != 200 or not isinstance(payload, dict):
+        return False, ("取消之前先查了一次任务状态，没查到（HTTP %s）。"
+                       "这一家乱发取消会把已经完成的记录一起删掉，所以这次不发。"
+                       "%s" % (st, tail))
+    state = normalize_status(payload.get("status"))
+    if state != "pending":
+        if state == "running":
+            return False, ("任务已经在跑了，这一家只在排队中取消得了（官方页写明 running 不支持）"
+                           "——这边只能不再等它，照常计费。%s" % tail)
+        return False, ("任务已经是「%s」状态，取消不了；这一家的取消接口在终态上是删除任务记录"
+                       "（删了就再也取不回来），所以没有发它。%s"
+                       % (payload.get("status") or state, tail))
+    st2, text2 = _request(provider, "DELETE", url, timeout=30)
+    p2 = _safe_json(text2)
+    if st2 == 200 and not (isinstance(p2, dict) and p2.get("error")):
+        return True, texts.CME_L1_18
+    why = _says(text2) or explain(st2, text2, provider, url)
+    return False, ("取消没成功：%s\n  云端任务一旦开始运行就取消不了，只能不再等它——%s"
+                   % (why, tail))
+
+
+def _cancel_minimax(provider, task_id, model=""):
+    """MiniMax v2（H3 系）的取消：`DELETE /v2/video_generation/{id}`。
+
+    同坑 294 的纪律（先问"这个动词在终态上干的还是同一件事吗"）：官方把这个端点写成
+    「取消 / 删除」两个意思，终态上调它到底是取消还是**删记录**，官方页没写死。
+    所以照方舟那条办 —— 先 GET 一次状态（`/v2/query/video_generation/{id}`，不花钱），
+    只在 `queued` 时才发 DELETE；`running` 与终态都不发，如实说清楚。
+    v2 的状态是**小写**（queued/running/succeeded/failed/cancelled），normalize_status 统一收。
+    """
+    url = task_endpoint(provider, task_id, model)
+    st, text = _request(provider, "GET", url, timeout=30)
+    payload = _safe_json(text)
+    tail = "任务记录已存进 cloud_jobs.json，之后可以点「取回」拿结果。"
+    if st != 200 or not isinstance(payload, dict):
+        return False, ("取消之前先查了一次任务状态，没查到（HTTP %s）。"
+                       "这一家的取消端点兼作删除，状态不明就不发。%s" % (st, tail))
+    # v2 把状态放在 task.status；v1 在 task_status。两处都认，认不出就走 unknown 分支
+    task = payload.get("task") if isinstance(payload.get("task"), dict) else {}
+    state = normalize_status(task.get("status") or payload.get("task_status"))
+    if state != "pending":
+        if state == "running":
+            return False, ("任务已经在跑了，这一家只在排队中取消得掉"
+                           "——这边只能不再等它，照常计费。%s" % tail)
+        return False, ("任务已经是「%s」状态，取消不了；这一家的取消端点兼作删除任务记录，"
+                       "所以没有发它。%s"
+                       % (task.get("status") or payload.get("task_status") or state, tail))
+    del_url = _at(provider, "/v2/video_generation/%s"
+                  % urllib.parse.quote(str(task_id or ""), safe="-_."))
+    st2, text2 = _request(provider, "DELETE", del_url, timeout=30)
+    p2 = _safe_json(text2)
+    if st2 == 200 and not (isinstance(p2, dict) and p2.get("error")):
+        return True, texts.CME_L1_18
+    why = _says(text2) or explain(st2, text2, provider, del_url)
+    return False, ("取消没成功：%s\n  云端任务一旦开始运行就取消不了，只能不再等它——%s"
+                   % (why, tail))
+
+
 def cancel(provider, task_id, model=""):
     """取消任务。**阿里云只有 PENDING 能取消**；RUNNING 会被 400 + UnsupportedOperation 拒
-    （文档 §12.3 ④）。其它家有的压根没给取消端点 → 如实说"取消不了"，不假装成功。
+    （文档 §12.3 ④）。方舟那条见 `_cancel_volc`（同一个 DELETE 在终态上是删记录），
+    MiniMax v2 那条见 `_cancel_minimax`（同一层意思，官方页没写死）。
+    其它家有的压根没给取消端点 → 如实说"取消不了"，不假装成功。
     返回 (ok, 给用户看的说明)。
     """
     proto = protocol_of(provider)
+    if proto == PROTOCOL_VOLC:
+        return _cancel_volc(provider, task_id, model)
+    if proto == PROTOCOL_MINIMAX and _mm_v2(model):
+        # 只有 H3 系走 v2；v1（Hailuo 老一代）官方没给取消端点，落到下面那句如实说
+        return _cancel_minimax(provider, task_id, model)
     if proto != PROTOCOL_ALIYUN:
-        return False, (texts.CME_CAT_47
+        return False, ("「%s」这一家没有可用的取消任务接口（官方文档里没给，或在另一套鉴权上）。"
+                       "任务已经在云端排队/运行，这边只能停止等待——"
+                       "任务记录已存进 cloud_jobs.json，之后可以点「取回」拿结果。"
                        % (provider or {}).get("name", ""))
     st, text = _request(provider, "POST", task_endpoint(provider, task_id, model) + "/cancel",
                         timeout=30)
@@ -1322,7 +1662,8 @@ def cancel(provider, task_id, model=""):
     if ok:
         return True, texts.CME_L1_18
     why = _says(text) or explain(st, text, provider, task_endpoint(provider, task_id, model) + "/cancel")
-    return False, (texts.CME_CAT_48 % why)
+    return False, ("取消没成功：%s\n  云端任务一旦开始运行就取消不了，只能不再等它——"
+                   "任务记录已存进 cloud_jobs.json，之后可以点「取回」拿结果。" % why)
 
 
 
@@ -1349,12 +1690,16 @@ def check(cfg, provider, model, kind):
     if provider is None:
         return texts.CME_RET_2
     if not providers.media_api(provider):
-        return (texts.CME_CAT_49
+        return ("provider「%s」没接上云端生图/生视频：认不出它的原生接口协议。"
+                "\n  解决：在 设置 → 云端模型 → 服务商与密钥 里选「原生接口协议」"
+                "（阿里云系 / MiniMax / 智谱 / 华为系 / 火山方舟），或填「原生接口地址」。"
+                "\n  官方没有这类接口的（例如 Kimi），请在本地那一组里选模型。"
                 % provider.get("name", ""))
     if not providers.media_api_root(provider):
-        return (texts.CME_CAT_50 % provider.get("name", ""))
+        return ("provider「%s」推不出原生接口地址：在 设置 → 云端模型 → 服务商与密钥 里"
+                "填「原生接口地址」。" % provider.get("name", ""))
     if not providers.api_key_of(provider):
-        return texts.CME_CAT_2 % provider.get("name", "")
+        return texts.CLD_CAT_18 % provider.get("name", "")
     if kind == "video" and int(cfg.get("cloud_wait_minutes", 20) or 20) <= 0:
         return texts.CME_RET_3
     return ""

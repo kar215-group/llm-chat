@@ -15,7 +15,7 @@ from .. import texts
 from ..core.config import (load_config, DEFAULT_CONFIG, APP_DIR, APP_VERSION,
                            CONFIG_PATH)
 from ..core import (capability, cloudjobs, codesign, config, crashlog, diagnose,
-                    engine_install, keepawake, media, providers, secrets,
+                    engine_install, history, keepawake, media, providers, secrets,
                     selfupdate, throttle, updater)
 from ..core.models import (auto_locate_models_dir, chat_start_block, dir_has_any_gguf,
                           display_name, extra_sources, first_usable, has_local_chat,
@@ -76,6 +76,10 @@ class App(ChatMixin, ImageGenMixin, VideoGenMixin, ServiceMixin, ModelsMixin, Se
         # history 本身不动：它还是下一轮请求的上下文，用户重发时那条提问仍在。
         self._log_turn_start = 0
         self._log_drop = set()
+        # 上下文压缩（core/history.compress）：上一次摘要覆盖到第几条 / 正文 / 时刻。
+        # 只影响"这一轮请求带哪些消息"——`history` 与对话记录永远是全量（口径②）；
+        # 清空对话与载入记录时整份换回初值（见 chat.clear_chat / load_session）。
+        self._ctx = history.empty_state()
         self._busy = False           # 正在生成回复
         self._svc_busy = False       # 服务启动/停止操作进行中（防重入）
         self._closing = False
@@ -177,6 +181,9 @@ class App(ChatMixin, ImageGenMixin, VideoGenMixin, ServiceMixin, ModelsMixin, Se
         self._vid_out = None         # 本次视频输出路径
         self._vid_t0 = None          # 本次生视频开始时间戳
         self._vid_saw_decode = False # 是否已进入解码阶段（进度行文案切换）
+        self._vid_saw_load = False   # 是否已出过权重加载行（编码看门狗的前置条件）
+        self._vid_saw_encode = False # 是否已报过「编码提示词中」（一次性文案，不重排）
+        self._vid_last_line_ts = 0   # 引擎最后一行的时间戳（看门狗用它判静默多久）
         self._vid_tail = []          # 引擎输出的滚动末尾（失败时回显原因，否则只剩一个退出码）
         self._vid_phase = "load"     # load / sample：区分权重加载与采样后的进度条，避免文案乱报
         self._vid_log = ""           # 本次任务的引擎日志路径（产物同名 + .log）
@@ -194,7 +201,8 @@ class App(ChatMixin, ImageGenMixin, VideoGenMixin, ServiceMixin, ModelsMixin, Se
         # 输入框右下角的小控件（控件在 _build_inputbar → _build_count_box 建，
         # 这里先把字段出生点留好 —— 铁律 3：漏初始化是响亮的 AttributeError）
         self._img_count_var = None   # tk.StringVar（控件建好才非 None）
-        self._img_count = 1          # 本次生效张数（1..media.BATCH_MAX）
+        self._img_count = 1          # 本次生效张数（1.._img_count_max）
+        self._img_count_max = media.BATCH_MAX   # 本地引擎 1..8；云端按能力档案（MiniMax 到 9）
         self._img_count_visible = False   # 控件显隐去重（place / place_forget）
         self._img_expected = []      # 本次任务预计落地的产物（批量 _1.._n；云端 = []）
         self._img_batch_i = 0        # 批量进度：引擎正在出的第几张（0 = 还没报）
@@ -249,9 +257,10 @@ class App(ChatMixin, ImageGenMixin, VideoGenMixin, ServiceMixin, ModelsMixin, Se
         # 远程文本聊天（99 K7）：同一个双向互斥口径 —— 手机聊天在跑时本机发送被拦，
         # 反过来手机提交聊天时也要问 `_any_busy`（生图 / 生视频 / 服务操作都在里面）。
         # **不调 ensure_model**：远程聊天只打当前已加载的文本模型，绝不换载。
-        # 聊天不接 note_fn：它没有要往输出栏说的话（远程那头的动静只在按钮状态上，
-        # 见 `_remote_busy_kind`），不再多挂一个没人调的回调（上一轮已记下同类死参数）
-        self.remote.chat = remote_mod.RemoteChat(cfg, local_busy=self._any_busy)
+        # 聊天也接 note_fn（16 §4.3 收口）：手机开始一轮对话时桌面输出栏说一声。
+        self.remote.chat = remote_mod.RemoteChat(
+            cfg, local_busy=self._any_busy,
+            note_fn=lambda m: self._sq.put(("note", m)))
         self._remote_starting = False     # 远程监听面的后台启动在飞（防重复拨开关）
         if bool(cfg.get("remote_enabled", False)):
             # 启动失败（证书坏 / 端口被占）**绝不拦住程序起来**（坑 129 家族：
@@ -344,8 +353,11 @@ class App(ChatMixin, ImageGenMixin, VideoGenMixin, ServiceMixin, ModelsMixin, Se
                 # 只留一行说明，不弹窗：环境受限的机器多半也弹不出什么结果。
                 self._append(texts.APP_CODESIGN_UNKNOWN % why, "meta")
             return                       # 没签名（why 为空）/ 读不出来：不问也不记账
-        if info.get("trusted"):
-            return                       # 已经信任：什么都不用做，也不记账
+        if info.get("trusted") or info.get("trusted_machine"):
+            # 已经信任：什么都不用做，也不记账。**机器级也算**（16 §19.4②）——
+            # 走过"所有用户"那条的人，用户级那一格永远是空的，只认 user 会天天重弹、
+            # 还让他再点一次已经点过的按钮。
+            return
         if self.cfg.get("codesign_prompt"):
             return                       # 问过了（确认或取消都算）
         if self._closing:
@@ -813,9 +825,9 @@ class App(ChatMixin, ImageGenMixin, VideoGenMixin, ServiceMixin, ModelsMixin, Se
         """「×n」控件：输入框的孩子 + place 悬挂（同右上角 ★ 的形态，坑 177 先例），
         钉右下角。W 2026-10-13 定：很小、**不加提示信息**（无悬停气泡、无说明行）。
 
-        只给**本地生图模型**显示（云端 n 次 = n 次真实计费，"省一次加载"也不成立；
-        生视频引擎不支持一次多片 —— W 同日裁定不对生视频做改动）。显隐刷新跟着
-        模型切换走（models_ui._update_model_label → _refresh_count_zone）。
+        只给**支持多张的生图模型**显示（本地生图 1..8、云端 MiniMax 1..9；云端
+        固定 1 张的家与生视频不显示 —— 后者引擎一次多片做不了，W 2026-10-13 裁定）。
+        显隐刷新跟着模型切换走（models_ui._update_model_label → _refresh_count_zone）。
         按次生效、**不落配置文件**（与 _img_ref_mode / _img_strength_tier 同口径）。
         """
         self._img_count_var = tk.StringVar(value="1")
@@ -840,12 +852,30 @@ class App(ChatMixin, ImageGenMixin, VideoGenMixin, ServiceMixin, ModelsMixin, Se
         self._refresh_count_zone()
 
     def _refresh_count_zone(self):
-        """×n 控件的显隐：只给本地生图模型（判据与附件条右侧「带图方式」同一条）。"""
+        """×n 控件的显隐与上限：本地生图 = 1..8；云端生图按能力档案（MiniMax 1..9）。
+
+        W 2026-10-13 定"只给本地生图"；2026-10-17 C2-3 起放开给**支持 n>1 的云端
+        生图家**（MiniMax image-01 的 n=1..9）。固定 1 张的家（阿里/智谱/华为/方舟）
+        不显示 —— 与本地「只对支持的家显示」同一口径。
+        """
         entry = getattr(self, "_img_count_entry", None)
         if entry is None:
             return                      # 顶栏先于输入区构建（_update_model_label 那时还没有它）
-        show = (str(self.cfg.get("model_kind") or "") == "image"
-                and not providers.is_cloud(self.cfg))
+        cloud = providers.is_cloud(self.cfg)
+        max_n = media.BATCH_MAX
+        if cloud:
+            p = providers.current_provider(self.cfg) or {}
+            sp = providers.split_cloud_id(self.cfg.get("model", ""))
+            is_img = bool(p and sp and providers.model_kind_of(p, sp[1]) == "image")
+            pf = providers.profile_for(p, sp[1]) if (p and sp) else {}
+            max_n = int((pf.get("img_n") or (1, 1))[1]) if is_img else 1
+            show = bool(is_img and max_n > 1)
+        else:
+            show = str(self.cfg.get("model_kind") or "") == "image"
+            max_n = media.BATCH_MAX
+        if max_n != getattr(self, "_img_count_max", media.BATCH_MAX):
+            self._img_count_max = max_n
+            self._normalize_count()   # 换家后把旧张数夹回新上限并回写
         if show == self._img_count_visible:
             return                      # 没变就别动布局（坑 172 纪律）
         self._img_count_visible = show
@@ -862,7 +892,7 @@ class App(ChatMixin, ImageGenMixin, VideoGenMixin, ServiceMixin, ModelsMixin, Se
             entry.place_forget()
 
     def _normalize_count(self):
-        """把框里写的归一成生效值（空 / 非数字 / 0 / 越界都夹到 1..BATCH_MAX）并回写。
+        """把框里写的归一成生效值（空 / 非数字 / 0 / 越界都夹到 1.._img_count_max）并回写。
 
         回写的是**生效值**：用户看到 8 就知道按 8 张跑（不改写的话按了发送、
         回显却是别的张数 —— "回显一个值、发另一个值"同族）。
@@ -870,7 +900,8 @@ class App(ChatMixin, ImageGenMixin, VideoGenMixin, ServiceMixin, ModelsMixin, Se
         var = getattr(self, "_img_count_var", None)
         if var is None:
             return self._img_count
-        self._img_count = media.batch_count_of(var.get())
+        self._img_count = media.count_in_range(
+            var.get(), 1, getattr(self, "_img_count_max", media.BATCH_MAX))
         try:
             var.set(str(self._img_count))
         except Exception:
@@ -1029,6 +1060,7 @@ class App(ChatMixin, ImageGenMixin, VideoGenMixin, ServiceMixin, ModelsMixin, Se
             self._vid_mark = mark
             self._vid_busy, self._cloud_vid = True, True
             self._vid_tail, self._vid_saw_decode = [], False
+            self._vid_saw_load, self._vid_saw_encode = False, False
             self._vid_phase = "sample"
             self._vid_t0 = time.time()
         # 新任务一律从"还没有 task_id"开始：上一轮云端任务被取消时 _cloud_reset 不会
@@ -1166,6 +1198,11 @@ class App(ChatMixin, ImageGenMixin, VideoGenMixin, ServiceMixin, ModelsMixin, Se
         if cloudjobs.expired(job):
             self._append(texts.APP_RECOVER_EXPIRED, "error")
             return
+        if cloudjobs.is_url_job(job):
+            # 同步生图留下的"只有产物地址"那条：**不查服务端、不重新提交**，
+            # 直接按台账里的 URL 重下（24 小时内有效，16 §24.2）。
+            self._recover_url_job(job, kind)
+            return
         provider = providers.get_provider(self.cfg, job.get("provider_id"))
         if not provider:
             self._append(texts.APP_RECOVER_NO_PROVIDER
@@ -1197,6 +1234,25 @@ class App(ChatMixin, ImageGenMixin, VideoGenMixin, ServiceMixin, ModelsMixin, Se
                          args=(provider, str(job.get("model") or ""),
                                str(job.get("prompt") or ""), dest, gen, q, stop, tid),
                          daemon=True).start()
+
+    def _recover_url_job(self, job, kind="image"):
+        """「只有产物地址」那条台账的取回：直接按 URL 重下（不查服务端）。"""
+        tid = str(job.get("task_id") or "")
+        dest = str(job.get("dest") or "")
+        if not dest:
+            dest = os.path.join(config.cloud_media_dir(self.cfg, kind),
+                                time.strftime("img_%Y%m%d_%H%M%S") + ".png")
+        try:
+            os.makedirs(os.path.dirname(dest), exist_ok=True)
+        except Exception as e:
+            self._append(texts.APP_RECOVER_DIR_FAIL % e, "error")
+            return
+        gen, q, stop = self._cloud_begin(kind)
+        self._cloud_pid = str(job.get("provider_id") or "")
+        self._img_out = dest           # 主线程按它判"落地了没"（worker 成功时会覆盖成真实扩展名）
+        self._append(texts.APP_RECOVER_URL % (tid[:10], dest), "meta")
+        threading.Thread(target=self._cloud_url_worker,
+                         args=(job, dest, gen, q, stop), daemon=True).start()
 
     def _cloud_cancel_task(self, tid, kind):
         """对云端任务发起取消。**只有排队中(PENDING)取消得掉**，运行中会被服务端拒。
@@ -1357,6 +1413,14 @@ class App(ChatMixin, ImageGenMixin, VideoGenMixin, ServiceMixin, ModelsMixin, Se
                     pending.append(("meta", texts.APP_CLOUD_RETRY % text))
                 elif kind == "fileplan":
                     pending.append(("meta", texts.APP_FILEPLAN % text))
+                elif kind == "cnote":
+                    # 上下文压缩的结果（工作线程发出）：note 给用户看，info 存起来
+                    # 供下一轮做增量摘要 + 落进对话记录的外层字段
+                    note, info = text if isinstance(text, tuple) else (text, None)
+                    if note:
+                        pending.append(("meta", "\n" + str(note) + "\n"))
+                    if isinstance(info, dict):
+                        self._ctx = info
                 elif kind in ("done", "stopped", "error"):
                     self._flush_stream(pending)      # 先落已收到的正文，再处理收尾
                     pending = []

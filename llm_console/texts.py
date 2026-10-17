@@ -55,6 +55,8 @@
 # ============================================================
 BTN_OK = "确定"
 BTN_CANCEL = "取消"
+BTN_SELECT_ALL = "全选"
+BTN_SELECT_NONE = "全不选"
 
 # ============================================================
 # ui/dialogs.py — 独立对话框：退出确认 / 配对确认 / 通用确认 / 单行输入（DLG_）
@@ -86,6 +88,19 @@ DLG_PAIR_REVOKE_HINT = ("只允许你自己发起的设备接入。选错了随�
                         "「设置 → 远程访问 → 已配对设备」里吊销。")
 DLG_PAIR_BTN_ALLOW = "允许"
 DLG_PAIR_BTN_DENY = "拒绝"
+
+# 历史对话窗（2026-10-17：把 chat_logs 里的记录读回来接着聊）
+DLG_HIST_TITLE = "历史对话"
+DLG_HIST_HINT = ("选一份记录载回来接着聊。载入会替换当前对话区——当前这份会先存盘，"
+                 "不会丢。")
+DLG_HIST_EMPTY = "还没有对话记录。"
+DLG_HIST_EMPTY_TAIL = "每轮对话结束会自动存一份，目录：\n%s"
+DLG_HIST_ROW = "%s · %d 轮 · %s"
+DLG_HIST_ROW_NO_SUBJECT = "(没有内容摘要)"
+DLG_HIST_FOLDER = "记录目录：%s"
+DLG_HIST_OPEN_DIR = "打开记录目录"
+DLG_HIST_LOAD = "载入"
+DLG_HIST_COUNT = "共 %d 份，按时间倒序（最近的在最上面）。"
 
 # ============================================================
 # ui/widgets.py — 通用控件：遮罩引导按钮条 / 设置窗左栏标题（WDG_）
@@ -259,7 +274,10 @@ IMG_ETC = "等"                         # 多张参考图只显示第一张名�
 IMG_CLOUD_MODEL_LINE = "[云端生图] 模型 %s · %s\n"
 IMG_UNSELECTED = "（未选）"
 IMG_CLOUD_RUNNING = "☁ 云端生图中… %s（%s）"
+IMG_CLOUD_IGNORE_NEG = "[云端生图] 这一家的生图没有负向词参数，已忽略负向词。\n"
 IMG_CLOUD_FAILED = "云端生图失败"
+IMG_CLOUD_URL_KEPT = ("[云端生图] 产物没下载下来，但地址已记进台账（%s…）："
+                      "24 小时内可在对话开头的「取回」里按地址重下。\n")
 
 # 进度行
 IMG_PROG_BATCH = "🎨 生成中… 第 %d/%d 张 · %ds"
@@ -308,12 +326,15 @@ VID_CONFIRM_NO_MODEL = "（未选模型）"
 VID_CLOUD_TAG = "云端生视频"
 VID_CLOUD_ERR = "\n[云端生视频] %s\n"
 VID_CLOUD_SUBMITTING = "☁ 提交云端任务… %s（%s）"
+VID_CLOUD_RES_CONVERT = "[云端生视频] 已按这一家的口径把分辨率 %s 转成 %s 提交。\n"
+VID_CLOUD_FRAME = "[云端生视频] 首帧：%s\n"
 VID_CLOUD_SUBMIT_TITLE = "云端生视频提交 %s"
 VID_SUBMIT_FAIL = "[ERROR] 提交失败：%s"
 VID_CLOUD_FAILED = "云端生视频失败"
 
 # 进度行
 VID_PROG_STEPS = "🎬 生成中… %d/%d 步 · %ds"
+VID_PROG_ENCODE = "🎬 编码提示词中… %ds"
 VID_PROG_OTHER = "🎬 %s… %d/%d · %ds"   # %s=阶段名（后处理/加载模型权重）
 VID_PHASE_POST = "后处理"
 VID_PHASE_LOAD = "加载模型权重"
@@ -484,15 +505,17 @@ CHAT_USAGE_NONE = "本次未返回用量"
 CHAT_IMG_FILTER = "图片"              # 「选择附件」框里图片过滤器的名字
 CHAT_PICK_ATTACH = "选择附件（图片或文本文件）"
 CHAT_PICK_REF = "选择参考图或文本附件"
-CHAT_PICK_VIDEO = "选择首帧图片或文本附件"
+CHAT_PICK_VIDEO = "选择首帧图片或文本附件（图片作为图生视频的第一帧）"
 
 # 看图能力拦截
-CHAT_NOIMG_UNKNOWN = ("这个模型的看图能力还没确认：云端模型不带能力字段，无法自动确认。\n\n"
-                      "改变位置：设置 → 云端模型 → 服务商与密钥 →「选择模型…」→ 把「图片输入」改成"
-                      "「支持」，或点「验证图片输入」发一次最小请求获得答复。")
+CHAT_NOIMG_UNKNOWN = ("这个模型的看图能力还没确认：云端的 /models 不带能力字段，"
+                      "光看名字不算数。\n\n"
+                      "要放开：设置 → 云端模型 → 服务商与密钥 →「选择模型…」→ 把「图片输入」改成"
+                      "「支持」，或点「验证图片输入」发一次最小请求让服务端自己回答。")
 CHAT_NOIMG_UNSUPPORTED = ("当前模型不支持图片输入（%s）。\n"
-                          "换成本地带视觉投影器的模型，"
-                          "或在 设置 → 云端模型 → 服务商与密钥 →「选择模型…」里把「图片输入」改为「支持」。")
+                          "换成本地配了视觉投影器的模型（如 Qwen3VL-8B），"
+                          "或在 设置 → 云端模型 → 服务商与密钥 →「选择模型…」里"
+                          "把「图片输入」改为「支持」。")
 CHAT_CLOUD_MEDIA_TITLE = "云端生图 / 生视频"
 CHAT_CLOUD_MEDIA_TAIL = ("\n\n要带参考图或首帧，请在模型菜单里切回本地的"
                          "〔生图〕〔生视频〕模型（走 sd.cpp 那条链路）。")
@@ -505,7 +528,7 @@ CHAT_MARKED_IMG = "\n[模型] 已把「%s」标记为支持图片输入。\n"
 # 高危文件名确认
 CHAT_SENSITIVE_TITLE = "这个文件可能含密钥"
 CHAT_SENSITIVE_BODY = ("「%s」看起来可能包含密钥 / 凭据。\n"
-                       "继续发送会把文件内容交给模型处理（云端模型会上传服务商）。\n\n"
+                       "继续发送会把文件内容交给模型处理（云端模型还会上传到服务商）。\n\n"
                        "确定继续吗？")
 
 # 文档附件回显
@@ -526,7 +549,7 @@ CHAT_IMG_NO_PREVIEW = "（这张图在对话里不显示预览：%s）\n"
 
 # 重绘强度悬停
 CHAT_STRENGTH_TIP = ("底图重绘时把原图改多少：越高越不像原图，自动＝按提示词判改动幅度"
-                     "（小改 %s / 普通改 %s / 大幅 %s，在 高级模式设置 → 本地模型 → 生图 改）")
+                     "（小改 %s / 普通改 %s / 大幅 %s，在 设置 → 本地模型 → 生图（sd.cpp） 改）")
 
 # 附件条状态行
 CHAT_NOTE_BUDGET = ("超出本次上下文预算（约 %d token），先只带前 %d 行；"
@@ -546,16 +569,13 @@ CHAT_BUSY_SVC = "\n[提示] 服务正在启停或加载模型，等它完成再�
 CHAT_BUSY_TAIL = "\n[提示] 上一轮还在收尾，稍等一下再发。\n"
 CHAT_NEED_PROMPT = "\n[提示] 生图/生视频需要提示词：先写一句描述再发送。\n"
 CHAT_NOTHING = ("\n[提示] 还没有发送任何内容：先写点什么，或用 📎 挂一张图/"
-                "一个文本文件。\n")
+                "一个文本文件（只发附件也可以）。\n")
 
 # 云端发送拦截
 CHAT_CLOUD_ERR_KEEP = "\n[云端] %s%s\n"
-CHAT_CLOUD_KEEP = "\n  图片已保留。"
+CHAT_CLOUD_KEEP = "\n  图片已保留，不会丢。"
 CHAT_CLOUD_ERR = "\n[云端] %s\n"
 CHAT_CLOUD_NOIMG = "\n[云端] %s\n图片已保留，处理完再发一次就行。\n"
-CHAT_CLOUD_VIDEO_NOFRAME = ("\n[云端] 云端生视频目前只支持文生视频，"
-                            "首帧图片不会被发送（图片已保留）。\n"
-                            "  要带首帧，请在模型菜单里切回本地的〔生视频〕模型。\n")
 
 # 本地服务未就绪 / 自动换载
 CHAT_SVC_NOT_READY = "\n[提示] 服务未就绪：请先点「启动服务」，等状态变为 ● 运行中 再发送。\n"
@@ -583,6 +603,16 @@ CHAT_CLEAR_Q = "确定清空当前对话记录？"
 CHAT_CLEARED = "对话已清空。%s\n"
 CHAT_CLEARED_KEPT = "原记录已存：%s"
 CHAT_COPIED = "已复制：%s"
+
+# 读回历史（2026-10-17：chat_logs → 内存与聊天区）
+CHAT_HIST_BUSY = "\n[提示] 正在生成或服务启停中：等这一轮结束再载入历史对话。\n"
+CHAT_HIST_EMPTY = "\n[记录] 这份记录里没有内容（可能只有提问、没有回答），当前对话没有改动。\n"
+CHAT_HIST_ERR = "\n[记录] %s\n"
+CHAT_HIST_HEAD = "[记录] 已载入 %s（%d 轮）。接着发消息就在这份上下文上继续。"
+CHAT_HIST_MODEL = "[记录] 原记录出自「%s」，当前模型是「%s」——要换成原来那个，点顶栏模型名。"
+CHAT_HIST_IMG = "（这条当时带了 %d 张图：图不随记录保存，这里不重画）"
+CHAT_HIST_NO_MODEL = "（未记录）"
+CHAT_HIST_NO_ANSWER = "（空回答）"
 
 # ============================================================
 # ui/models_ui.py — 模型菜单 / 切换 / 本地模型管理 / 扫描补全 / 手动定向 / 整理（MDL_）
@@ -688,7 +718,19 @@ MDL_RECALC_TITLE = "全部重新计算"
 MDL_RECALC_Q = ("将清空所有模型的 层数/context/mmproj 自动记录并重新计算，\n"
                 "手动调整过的值也会被覆盖。确定继续？")
 MDL_RECALC_ALL = "全部重新计算模型参数"
+MDL_RECALC_SOME = "重新计算选中的模型参数"
 MDL_RECALC_MISSING = "补全缺失项"
+# 选择性重算（W 2026-10-17：按钮改成开一扇勾选窗，只清勾中模型的记录）
+MDL_RECALC_BTN = "重新计算…"
+MDL_RECALC_PICK = "重新计算模型参数"
+MDL_RECALC_PICK_HINT = ("勾选要重新计算的模型：只清掉勾中这几个的层数 / context / mmproj "
+                        "记录再算一遍，没勾的模型一个字段都不动。")
+MDL_RECALC_PICK_NOTE = "勾中的模型，手动调过的值也会被覆盖。"
+MDL_RECALC_PICK_EMPTY = "模型目录里还没有能聊天的模型，没什么可重算的。"
+MDL_RECALC_PICK_NONE = "一个模型都没勾，什么也没做。"
+MDL_RECALC_PICK_SUM = "共 %d 个可重算的模型"
+MDL_RECALC_PICK_HAS = "层数 %s · 主 ctx %s · agent %s"
+MDL_RECALC_PICK_NO = "还没有记录（会按当前硬件算一份）"
 MDL_MM_BEGIN = "\n[模型管理] 开始%s…\n"
 MDL_POINT_TITLE = "模型来源"                 # 窗名（消息框标题共用）
 MDL_POINT_BTN = "模型来源…"                  # 文件页入口按钮
@@ -765,11 +807,11 @@ APP_CODESIGN_WHY_UNKNOWN = "原因未知"
 APP_CODESIGN_SAVE_FAIL = ("[签名] 配置写不进去（%s），这条询问记不住，下次启动还会再问。"
                           "可在 设置 → 关于与诊断 →「诊断」里查原因。\n")
 APP_CODESIGN_TITLE = "把本软件签名列入本机可信名单"
-APP_CODESIGN_BODY = ("当前本软件签名未进入本机可信名单，自动更新功能可能无法使用，"
-                     "请确认将签名写入本机可信名单\n\n"
-                     "请确保该软件是从 GitHub 上直接下载的，\n"
-                     "否则将签名列入可信名单是一件很危险的事\n\n"
-                     "如取消，后续仍可点击 5 下版本号进入开发者模式进行授权")
+APP_CODESIGN_BODY = ("本软件带有它的作者的签名，但这份签名还没进入你的本机可信名单。\n\n"
+                     "列入之后，这台机器会信任这张证书签发的所有程序——\n"
+                     "请先确认这份程序是从 GitHub 上直接下载的，否则不要列入。\n\n"
+                     "如取消，后续仍可点击 5 下版本号进入开发者模式进行授权；"
+                     "已列入的也可以在那里撤销")
 APP_CODESIGN_OK = "[签名] 已把本软件的签名列入本机可信名单（当前用户）。\n"
 APP_CODESIGN_FAIL = "[签名] 列入可信名单失败：%s\n"
 
@@ -832,6 +874,7 @@ APP_RECOVER_EXPIRED = "\n[云端] 该任务已超 24 小时，产物地址已失
 APP_RECOVER_NO_PROVIDER = "\n[云端] 取不回 %s：provider「%s」已经不在了。\n"
 APP_RECOVER_DIR_FAIL = "\n[云端] 存放目录建不出来：%s\n"
 APP_RECOVER_FETCH = "\n[云端] 取回 task_id=%s…（查状态）\n"
+APP_RECOVER_URL = "\n[云端] 取回 %s…（按台账里存的产物地址重下，不查服务端）\n"
 APP_CANCEL_NOSTOP_WAIT = ("%s [已停止等待] 提交请求还在路上，任务号还没回来——任务号一到会"
                           "自动发起取消；若云端已建单，这一单可能仍会继续跑并计费"
                           "（取消结果稍后提醒）。\n")
@@ -1133,6 +1176,7 @@ SET_PROV_CAT_4 = '云端任务台账：%d 个结果还没落地 ｜ %s'  # setti
 SET_PROV_CAT_5 = '加入主页面的模型：%d 个（模型菜单里就出现这些）'  # settings.py L1675（CAT）
 SET_PROV_CAT_6 = '该服务商已知模型：%d 个（勾选界面里可选，缓存着不重复请求）'  # settings.py L1677（CAT）
 SET_PROV_N_2 = '这一条能改成你自己账号的专属域名：把 base_url 换成 https://你的WorkspaceId.cn-beijing.maas.aliyuncs.com/compatible-mode/v1（密钥与域名配套，不能混用）。'  # settings.py L1718（N）
+SET_PROV_N_2_2 = '这一条能改成你所在地域的数据面域名：把 base_url 换成 https://ark.<地域>.volces.com/api/v3（官方默认给的是 cn-beijing；地址与密钥要同一个地域）。'  # settings.py 服务商说明（火山方舟）
 SET_PROV_CAT_7 = '保存失败：%s'  # settings.py L1760（CAT）
 SET_PROV_CAT_8 = '已新建服务商「%s」。'  # settings.py L1766（CAT）
 SET_PROV_CAT_9 = '保存失败：provider「%s」不存在。'  # settings.py L1777（CAT）
@@ -1156,8 +1200,8 @@ SET_PROV_N_7 = '保存密钥'  # settings.py L1874（N）
 SET_PROV_A0_9 = '选择模型'  # settings.py L1882（A0）
 SET_PROV_A1 = '先保存这个服务商，再选模型。'  # settings.py L1882（A1）
 SET_PROV_CAT_17 = '选择模型 · %s'  # settings.py L1892（CAT）
-SET_PROV_N_8 = '勾中并点「确定」才进主页面菜单。'  # settings.py L1916（N）
-SET_PROV_CAT_18 = '表里是已知的 %d 个模型；点「刷新清单」可向接口重新索取。'  # settings.py L1921（CAT）
+SET_PROV_N_8 = '勾中并确定才进主菜单；清单拉过一次就缓存，点「刷新清单」才重新请求。'  # settings.py L1916（N）
+SET_PROV_CAT_18 = '已知 %d 个模型。'  # settings.py L1921（CAT）
 SET_PROV_L2 = '模型类型'  # settings.py L1965（L2）
 SET_PROV_CAT_19 = '（已勾 %d）'  # settings.py L2170（CAT）
 SET_PROV_A0_10 = '正在向接口取模型清单…'  # settings.py L2263（A0）
@@ -1199,17 +1243,41 @@ SET_PROV_A4_2 = 'OpenAI 兼容根地址，带不带 /v1 都行（会自动补）
 SET_PROV_A3_2 = '原生接口地址'  # settings.py L2579（A3）
 SET_PROV_A4_3 = '云端生图/生视频用的地址，留空 = 从上面那段自动推（把 /compatible-mode/v1 换成 /api/v1）。只有跨方案时才需要填，key 与域名不可混用。'  # settings.py L2580（A4）
 SET_PROV_A2 = '原生接口协议'  # settings.py L2588（A2）
-SET_PROV_A4_4 = '生图与生视频走哪套原生协议。按域名自动认（阿里云系 / MiniMax / 智谱 / 华为系）；自建网关、代理或专有域名认不出来时在这里手动指一次。选「不接」= 这个服务商只用文本对话，生图生视频会在发送前拦下。'  # settings.py L2589（A4）
+SET_PROV_A4_4 = '认不出域名时手动指一次；选「不接」= 只用文本对话。'  # settings.py L2589（A4）
 SET_PROV_N_18 = '自动/手动'  # settings.py L2592（N）
 SET_PROV_N_19 = '选择模型…'  # settings.py L2620（N）
 SET_PROV_N_20 = '移出选中项'  # settings.py L2623（N）
 SET_PROV_A3_3 = '超时（秒）'  # settings.py L2641（A3）
 SET_PROV_A4_5 = '单次请求超时；思考型模型建议 300 以上。'  # settings.py L2641（A4）
 SET_PROV_A3_4 = '上下文窗口'  # settings.py L2643（A3）
-SET_PROV_CAT_34 = '该服务商模型的上下文长度（token），0 = 不声明。留 0 时文本附件按默认 %d token 折行；填上真实窗口（例如 1000000）就多带一些。注意上限还夹在 %d token：附件会留在历史里，之后每一轮都重发一遍，塞太满等于把后续每轮都变成大账单。'  # settings.py L2644（CAT）
+SET_PROV_CAT_34 = '该服务商声明的上下文（token），0 = 不声明。附件每轮都重发，预算另夹在 %d token 以内：填太大后续每轮都更贵。'  # settings.py L2644（CAT）
 SET_PROV_N_21 = '启用该服务商'  # settings.py L2653（N）
 SET_PROV_N_22 = '刷新任务台账'  # settings.py L2669（N）
+SET_PROV_N_28 = '核对云端任务…'  # settings.py 连接窗 / 「只查不提交」入口（N，2026-10-17 新增）
+SET_PROV_PROBE_TITLE = '核对云端任务'  # settings.py open_task_probe（窗名）
+SET_PROV_PROBE_HINT = ('只查询、不提交：给「提交请求超时，但那边可能已经建单」的情况用。'
+                       '查到的那条加进台账后，在对话开头点「取回」拿结果，不会再扣一次钱。')
+SET_PROV_PROBE_MODEL = '模型名（留空 = 全部）'
+SET_PROV_PROBE_WIN = '时间范围'
+SET_PROV_PROBE_WINS = ('最近 30 分钟', '最近 2 小时', '最近 24 小时')
+SET_PROV_PROBE_GO = '查询'
+SET_PROV_PROBE_QUERYING = '正在查…'
+SET_PROV_PROBE_EMPTY = '这段时间里没有查到任务。'
+SET_PROV_PROBE_N = '查到 %d 条；选中一条可加进台账并取回。'
+SET_PROV_PROBE_PICK = '先在列表里选一条。'
+SET_PROV_PROBE_NOT_READY = '这一条还没有产物地址（任务还在排队 / 运行），现在取不回。'
+SET_PROV_PROBE_TAKEN = '已加进台账：%s，接着按台账取回。'
+SET_PROV_PROBE_ADD = '加进台账并取回'
 SET_PROV_N_23 = '保存本页'  # settings.py L2689（N）
+# 低频连接字段收进二级窗（2026-10-17）：自定义/新建用「连接配置…」，内置只读用「查看连接…」；
+# 窗标题带服务商名，新建时沿用既有的「新的服务商」。
+SET_PROV_N_24 = '连接配置…'
+SET_PROV_N_25 = '查看连接…'
+SET_CONN_TITLE = '连接配置 · %s'
+SET_CONN_N_1 = '填好连接信息后回主页面：填 API Key → 测试连接 → 选择模型。'
+# 媒体模型建议名单（C3）：只列能力档案里官方页核实过的名字，点「填入」进手填框
+SET_PROV_N_26 = '官方页列出的媒体模型（以官方页为准，随时会变）'
+SET_PROV_N_27 = '填入'
 
 # —— 云端文本 ——
 SET_CTEXT_N = '展示思考过程（云端模型；与本地模型的开关互不影响）'  # settings.py L2714（N）
@@ -1218,7 +1286,7 @@ SET_CTEXT_N_3 = '文本附件超预算时，让云端模型自己决定读哪一
 SET_CTEXT_A1 = '打开后：附件太长时会先发一次「只要 JSON 行号」的规划请求；模型给的范围仍会被预算与行数上限夹住，规划失败就按原预算发送，不影响正常对话。只规划一轮，不加多轮循环（每轮都是真金白银）。默认关。'  # settings.py L2739（A1）
 SET_CTEXT_A2 = '文本预算'  # settings.py L2745（A2）
 SET_CTEXT_N_4 = '按服务商各自声明的上下文窗口算'  # settings.py L2746（N）
-SET_CTEXT_A4 = '云端文本的附件预算 = min(该服务商声明的上下文窗口 − max_tokens − 预留, 200000)。上限 200000 是成本护栏，不是拍脑袋：附件会留在历史里**每一轮都重发**，声明 1M 也不代表该一次塞 1M。窗口在上一区块「服务商与密钥」里按服务商填。'  # settings.py L2747（A4）
+SET_CTEXT_A4 = '附件每轮都重发，预算有上限；默认按服务商声明的窗口算。'  # settings.py L2747（A4）
 SET_CTEXT_N_5 = '上限 20 万'  # settings.py L2750（N）
 SET_CTEXT_N_6 = '成本估算'  # settings.py L2755（N）
 SET_CTEXT_A2_2 = '费用单价'  # settings.py L2758（A2）
@@ -1226,7 +1294,7 @@ SET_CTEXT_A4_2 = '云端文本按 token 计费：单价按**模型**填（元/�
 
 # —— 云端媒体 ——
 SET_CMEDIA_A3 = '出图尺寸'  # settings.py L2784（A3）
-SET_CMEDIA_A4 = '填「宽x高」（832*480、832，480 这类分隔符也认，会自动归一成 x），发出去前会按这一家的写法换算：阿里云 1024*1024、智谱与华为 1024x1024、MiniMax 换成比例（16:9）或宽高两个整数。超出这一家允许的区间时，服务端会点名报错。阿里云：qwen-image-3.0-pro 面积 512×512…2560×2560、qwen-image-max 到 1664×1664、wan2.7-image 像素 589824…16777216。'  # settings.py L2785（A4）
+SET_CMEDIA_A4 = '宽x高，如 1024x1024；留空 = 服务商默认。发出去前按所选服务商换算写法；超出该家区间时服务端会点名。'  # settings.py L2785（A4）
 SET_CMEDIA_A3_2 = '生图负向词'  # settings.py L2793（A3）
 SET_CMEDIA_A4_2 = '选填。留空 = 不传该参数。'  # settings.py L2794（A4）
 SET_CMEDIA_A3_3 = '图片存放'  # settings.py L2795（A3）
@@ -1237,9 +1305,9 @@ SET_CMEDIA_A2 = '云端模型 → 生图 / 生视频 → 图片存放'  # settin
 SET_CMEDIA_A4_4 = '产物一落地就在这里。云端地址只活 24 小时，本地这份是唯一的留存；目录还没生成时点一下会先建出来再打开。'  # settings.py L2805（A4）
 SET_CMEDIA_A4_5 = '生图按**张**计费：单价按模型填（元/张）。填了就在提交前报金额；没填就明说「以账单为准」，不编数字。'  # settings.py L2814（A4）
 SET_CMEDIA_A3_4 = '视频分辨率'  # settings.py L2817（A3）
-SET_CMEDIA_A4_6 = '各家档位不一样（阿里云/MiniMax 用 720P、1080P、768P、2K 这类标签，智谱与华为用 1280x720 这种宽高，*、，这类分隔符也认，会自动归一成 x）。留空 = 不传这个参数，用服务端默认（阿里云 Token Plan 的 happyhorse 不传时按 1080P / 16:9 出）。不知道这一家允许什么时，留空最安全。'  # settings.py L2818（A4）
+SET_CMEDIA_A4_6 = '如 1080P 或 1280x720；留空 = 服务商默认、最安全。'  # settings.py L2818（A4）
 SET_CMEDIA_A3_5 = '视频时长'  # settings.py L2824（A3）
-SET_CMEDIA_A4_7 = '秒。各家允许区间不同（超范围会被服务端点名报错，原话会显示在对话里）：happyhorse-1.1-t2v 是 **3~15 秒**；MiniMax Hailuo 官方页是 6/10 秒、智谱 cogvideox-3 是 5/10 秒。提交前一律弹一次确认，单价填过就报金额、没填就说明以账单为准。'  # settings.py L2825（A4）
+SET_CMEDIA_A4_7 = '秒数；留空 = 服务商默认。超范围会被服务端点名。'  # settings.py L2825（A4）
 SET_CMEDIA_N_2 = '各家不同'  # settings.py L2828（N）
 SET_CMEDIA_A3_6 = '画面比例'  # settings.py L2829（A3）
 SET_CMEDIA_A4_8 = '例如 16:9 / 9:16 / 1:1；留空 = 不传（画面比例常由素材决定）。'  # settings.py L2830（A4）
@@ -1252,11 +1320,17 @@ SET_CMEDIA_A4_10 = '同上：这条链路下它是唯一留存，服务端地址
 SET_CMEDIA_A4_11 = '生视频按**秒**或按**条**计费（同一家两种都有）：单价按模型填。填没填都会在提交前弹一次确认；没填就明说「以账单为准」。'  # settings.py L2847（A4）
 SET_CMEDIA_N_4 = '生图与生视频共用'  # settings.py L2855（N）
 SET_CMEDIA_A3_8 = '修改产物位置'  # settings.py L2861（A3）
-SET_CMEDIA_A4_12 = '本地与云端生图 / 生视频**四条链路共用**的落地根；留空 = 程序目录下的「产物」文件夹，里面按 本地 / 云端 × image / video 分四个子目录，首次生成时自动建。上面「图片存放 / 视频存放」两格与本地生图 / 生视频页「高级参数」里的「输出目录」单独填过时，以各自为准。'  # settings.py L2862（A4）
+SET_CMEDIA_A4_12 = '四条链路共用的落地根；留空 = 程序目录\产物。上面「图片存放 / 视频存放」单独填过时，以各自为准。'  # settings.py L2862（A4）
 SET_CMEDIA_N_5 = '留空=程序目录\\产物'  # settings.py L2866（N）
 SET_CMEDIA_A3_9 = '轮询间隔'  # settings.py L2867（A3）
 SET_CMEDIA_A4_13 = '秒。官方建议 15，且创建/查询/取消三个端点合计 20 QPS——调小不会让任务更快完成，只会更早撞上限流。'  # settings.py L2868（A4）
 SET_CMEDIA_N_6 = '建议 15'  # settings.py L2869（N）
+# 能力档案驱动的按家提示（2026-10-17，专题 C2-1）
+SET_CMEDIA_N_7 = '当前云端模型：%s（%s）'
+SET_CMEDIA_N_8 = '还没选云端%s模型；档位按服务商默认发送。'
+SET_CMEDIA_N_9 = '这一家的生图没有负向词参数。'
+SET_CMEDIA_N_10 = '这一家是否支持负向词未核实。'
+SET_CMEDIA_N_12 = '%d~%d 秒'
 SET_CMEDIA_A3_10 = '等待上限'  # settings.py L2870（A3）
 SET_CMEDIA_A4_14 = '分钟。超了就不再干等，任务留在台账里，重启后对话开头会给「取回」按钮。'  # settings.py L2871（A4）
 
@@ -1283,6 +1357,12 @@ SET_GEN_N_2 = '还没有可用的文本模型 —— 加入第一个后会自动
 SET_GEN_N_3 = '允许锁屏运行'  # settings.py L2999（N）
 SET_GEN_A1 = '勾选后本软件会阻止系统自动睡眠，息屏后手机等设备仍能连上来。\n使用电池会更耗电；笔记本合盖后的行为取决于系统设置。'  # settings.py L3004（A1）
 SET_GEN_N_4 = '仅接电源时保持唤醒'  # settings.py L3010（N）
+SET_GEN_N_5 = "历史对话"              # 通用页：对话记录那一行的标签（2026-10-17 新增）
+SET_GEN_N_6 = "历史对话…"             # 通用页：打开记录列表的按钮
+SET_GEN_A2 = ("把以前存下的对话整份读回来接着聊。每轮对话结束会自动存一份（只有文本对话会存，"
+              "生图 / 生视频的成果本来就是文件）。载入会替换当前对话区——当前这份会先存盘。\n"
+              "记录默认存在程序目录的 chat_logs 文件夹，换个位置在 gui_config.json 的 "
+              "chat_log_dir 里填路径。")
 
 # —— 远程访问 ——
 SET_REMOTE_N = '正在启动（开启无线直连组，可能要几秒）…'  # settings.py L3124（N）
@@ -1428,6 +1508,15 @@ SET_DEV_N_6 = '开发者模式已开启 · 仅本次运行有效 · 重新进入
 SET_DEV_N_7 = '关闭开发者模式'  # settings.py L4241（N）
 SET_DEV_N_8 = '填写 GitHub 令牌'  # settings.py L4243（N）
 SET_DEV_N_9 = '将本软件签名列入系统级信任（所有用户）'  # settings.py L4251（N）
+SET_DEV_N_10 = '撤销本机信任（当前用户）'  # settings.py 开发者页 / 撤销确认窗标题（N）
+SET_DEV_N_11 = '这张签名证书本来就不在当前用户的可信名单里，没有可撤销的。'  # settings.py（N）
+SET_DEV_CAT_7 = ('把这张证书从【当前用户】的受信任根里删掉？\n\n'
+                 '删除后这台机器不再把这份程序当成"已知发布者"，Windows 下次见到它会按'
+                 '未知发布者处理（SmartScreen 会再拦一次）。\n'
+                 '只影响当前用户；系统级（所有用户）那份要管理员在 Windows 证书管理器里删。\n\n'
+                 '要撤销的证书：\n%s\n指纹：%s')  # settings.py（CAT）
+SET_DEV_CAT_8 = '撤销失败：%s'  # settings.py（CAT）
+SET_DEV_A0_14 = '已撤销本机信任（当前用户）。'  # settings.py（A0）
 
 # —— 文件·引擎 ——
 SET_FENG_L1 = 'llama.cpp（对话引擎）'  # settings.py L4293（L1）
@@ -1492,7 +1581,7 @@ SET_FILES_N = '当前：正在读取模型目录…'  # settings.py L4999（N）
 SET_FILES_A2 = '菜单与配套件'  # settings.py L5015（A2）
 SET_FILES_A4 = '三组模型与各自的配套件（VAE / 文本编码器 / CLIP / T5…）摊开在一页里，可逐个勾选要不要出现在顶部模型菜单 —— 生图 / 生视频附带的「能聊天的 .gguf 编码器」常需要收起来。只改显示，不动文件。'  # settings.py L5016（A4）
 SET_FILES_A2_2 = '匹配参数'  # settings.py L5025（A2）
-SET_FILES_A4_2 = '补全 = 只为缺记录的模型计算（不覆盖手动调整过的值）；全部重新计算 = 清空全部自动记录后重算（含覆盖手调值，会二次确认）。进这一页会自动补全一次（10 分钟内不重复）。'  # settings.py L5026（A4）
+SET_FILES_A4_2 = '补全 = 只为缺记录的模型计算（不覆盖手动调整过的值）；重新计算 = 先勾要算的模型，只清勾中那几条记录再重算（含覆盖手调值）。进这一页会自动补全一次（10 分钟内不重复）。'  # settings.py L5026（A4）
 SET_FILES_A2_3 = '文件整理'  # settings.py L5035（A2）
 SET_FILES_A4_3 = '把模型按 文本模型 / 生图模型 / 生视频模型 归入模型目录下的 model 文件夹；共用同一文本编码器的模型（如 qwen-image 2.1 的两个量化版本）收进同一个子文件夹（先预览、后执行；只移动不删除；名称无法判断归属的保持原位）。「模型来源」把别处的文件夹或单个 .gguf 加进来源 —— 只登记，不动文件。'  # settings.py L5036（A4）
 
@@ -1826,6 +1915,7 @@ PRV_CAT = '模型「%s」的单价未填（设置 → 云端模型 → 成本估
 PRV_ELSE = '单价未填（设置 → 云端模型 → 成本估算），费用以服务商账单为准。'  # core/providers.py L418（ELSE）
 PRV_CAT_2 = '预估 %.2f 元/秒 × %d 秒 ≈ %.2f 元。'  # core/providers.py L421（CAT）
 PRV_CAT_3 = '预估 %.2f 元/张。'  # core/providers.py L423（CAT）
+PRV_CAT_3_2 = '预估 %.2f 元/张 × %d 张 ≈ %.2f 元。'  # 云端 ×n（C2-3）
 PRV_CAT_4 = '预估 %.2f 元/条。'  # core/providers.py L424（CAT）
 PRV_CAT_5 = '、费用约 %.2f 元'  # core/providers.py L450（CAT）
 PRV_L1 = 'provider id 不能为空（用作密钥的索引，建议英文短名）'  # core/providers.py L659（L1）
@@ -1861,8 +1951,11 @@ CAP_DICT_7 = '不支持'  # core/capability.py L51（DICT）
 CAP_L2 = '这一家的生图接口收参考图（按主体/角色一致性用图）'  # core/capability.py L104（L2）
 CAP_L2_2 = '这一家的生图接口收参考图（图生图）'  # core/capability.py L105（L2）
 CAP_L2_3 = '这一家的生图接口只收文字提示词，参考图请用本地的〔生图〕模型'  # core/capability.py L106（L2）
+CAP_L2_3_2 = '这一家官方页写了参考图，但还没实测过它拿这张图是改图还是另画一张，先不发；要改图请先用本地的〔生图〕模型'  # core/capability.py（L2，方舟这类"官方有、未实测"的家）
 CAP_L2_4 = '生图走引擎的参考图通路（-i），可以附图'  # core/capability.py L108（L2）
-CAP_L2_5 = '云端生视频只接文生，首帧请用本地的〔生视频〕模型'  # core/capability.py L111（L2）
+CAP_L2_5 = '这个模型的云端生视频没有放行首帧入参，首帧请用本地的〔生视频〕模型'  # core/capability.py L111（L2）
+CAP_L2_5_2 = '这一家的首帧官方页写了，但 base64 还没实测，先用本地的〔生视频〕模型'  # 云端未实测
+CAP_L2_13 = '这家支持首帧（万相 i2v，base64）'  # 云端万相 i2v
 CAP_L2_6 = '该视频权重是带图像输入通路的变体（fl2va / flf2v / i2v 这类）'  # core/capability.py L113（L2）
 CAP_L2_7 = '该视频权重是纯文生视频变体（t2v / t2va），没有首帧输入通路'  # core/capability.py L115（L2）
 CAP_L2_8 = '认不出这个视频权重的变体，不能确定能不能给首帧'  # core/capability.py L116（L2）
@@ -1874,6 +1967,7 @@ CAP_DNOTE = '你指定为支持图片输入'  # core/capability.py L134（DNOTE�
 CAP_DNOTE_2 = '你指定为不支持图片输入'  # core/capability.py L137（DNOTE）
 CAP_IF = '官方页'  # core/capability.py L198（IF）
 CAP_DWHY = '这一家的生图接口只收文字提示词，带图请改用本地的〔生图〕模型'  # core/capability.py L201（DWHY）
+CAP_DWHY_2 = '这一家官方页写了参考图，但还没实测过它是改图还是另画一张，先不发；带图请改用本地的〔生图〕模型'  # core/capability.py resolve_modes（DWHY）
 CAP_CAT = '这一家不带%s，请换一家或改用%s'  # core/capability.py L205（CAT）
 CAP_CAT_2 = '%s 走的是 %s，%s没这条通路'  # core/capability.py L211（CAT）
 CAP_N = '这个模型'  # core/capability.py L212（N）
@@ -2010,6 +2104,7 @@ CS_CAT_4 = '调用系统工具失败：%s'  # core/codesign.py L184（CAT）
 CS_L1_5 = '本程序这份 exe 没有签名，没有可列入的证书。'  # core/codesign.py L189（L1）
 CS_L1_6 = '管理员授权被取消，本机信任名单没有改动。'  # core/codesign.py L213（L1）
 CS_L1_7 = '写入没有生效（可能被系统策略拒绝）。'  # core/codesign.py L215（L1）
+CS_L1_8 = '删除没有生效（证书还在当前用户的受信任根里）。'  # core/codesign.py untrust（L1）
 
 
 # ============================================================
@@ -2095,6 +2190,17 @@ CJ_IF = '生图'  # core/cloudjobs.py L156（IF）
 CJ_ELSE = '生视频'  # core/cloudjobs.py L156（ELSE）
 CJ_IF_2 = '（URL 已过 24 小时，取不回来了）'  # core/cloudjobs.py L158（IF）
 CJ_CAT = '☁ 云端%s · %s · 提交于 %s · task_id=%s%s'  # core/cloudjobs.py L159（CAT）
+CJ_URL = '☁ 云端%s · %s · 提交于 %s · 只有产物地址（可重下）%s'  # core/cloudjobs.py describe（CAT）
+
+
+# ============================================================
+# core/history.py — 上下文压缩：压缩结果的说明行（对话流里那一行，2026-10-17 新增）
+# ============================================================
+HIS_OK = "已把更早的 %d 条消息折成摘要（最近 %d 条原样保留），这一轮按压缩后的上下文发出。"
+HIS_SKIPPED = "其中最早的 %d 条太长，没能折进摘要，已直接省掉。"
+HIS_FAIL = "上下文压缩没成功（%s），这一轮仍按完整历史发出——可能会超出模型的上下文长度。"
+HIS_EMPTY = "模型没给出摘要"
+HIS_OVER = "压缩后仍约 %d token，超过本次预算（%d）——这一轮可能被服务端以「上下文超长」拒绝。"
 
 
 # ============================================================
@@ -2105,6 +2211,7 @@ CHL_PLACEHOLDER = '〔这一轮的图没写进记录（原图保存在本机文�
 CHL_RET = '（无标题）'  # core/chatlog.py L85（RET）
 CHL_L1 = '没有内容可存'  # core/chatlog.py L117（L1）
 CHL_CAT = '写入失败：%s'  # core/chatlog.py L163（CAT）
+CHL_L2 = "这份记录读不出来：%s"  # core/chatlog.py load（读回历史时的失败说明）
 
 
 # ============================================================
@@ -2249,6 +2356,14 @@ CME_CAT_49 = ('provider「%s」没接上云端生图/生视频：认不出它的
               '  官方没有这类接口的（例如 Kimi），请在本地那一组里选模型。')
 CME_CAT_50 = 'provider「%s」推不出原生接口地址：在 设置 → 云端模型 → 服务商与密钥 里填「原生接口地址」。'  # core/cloud_media.py L1365（CAT）
 CME_RET_3 = '云端生视频的等待上限设成了 0，改回一个正数（设置 → 云端模型 → 生图 / 生视频）。'  # core/cloud_media.py L1370（RET）
+# 云端生视频首帧（C2-4）：只放行万相 i2v 的 base64；其余家按"没有 / 未实测"分开说
+CME_FRAME_NONE = '这个模型没有放行首帧入参，首帧请改用本地的〔生视频〕模型（图片已保留，不会丢）'
+CME_FRAME_UNVERIFIED = '这一家的首帧官方页写了，但 base64 还没实测，所以先不发（图片已保留，不会丢）；要带首帧请先用本地的〔生视频〕模型'
+CME_FRAME_MISSING = '首帧文件不在了：%s'
+CME_FRAME_EXT = '首帧现在只送 JPG / PNG / WEBP；你选的是 %s —— 另存成这三种再发'
+CME_FRAME_BIG = '首帧 %.1fMB，超过程序现在的 10MB 预检上限 —— 先把图压小一点（真机上限待核实）'
+CME_FRAME_EMPTY = '这张首帧是空文件（0 字节），换一张'
+CME_FRAME_READ = '读不了这张首帧：%s'
 
 
 # ============================================================
@@ -2293,6 +2408,14 @@ PXY_CAT_7 = 'agent 请求 %s（context %d）：正在启动服务…'  # core/pr
 PXY_CAT_8 = 'agent 请求启动服务失败：%s'  # core/proxy.py L260（CAT）
 PXY_CAT_9 = 'agent 请求 %s：等待超时（%ds），已返回 503'  # core/proxy.py L263（CAT）
 PXY_CAT_10 = 'agent 请求 %s：服务就绪。'  # core/proxy.py L268（CAT）
+
+
+# ============================================================
+# connection/summarize.py — 上下文压缩的摘要请求：拿不到摘要时的两种说明
+# （2026-10-17 新增；发给模型的摘要指令正文留在原文件，与 cloud/stream 那条口径一致）
+# ============================================================
+SUM_EMPTY = "模型没返回摘要（只回了思考过程或空内容）"
+SUM_PARSE = "摘要响应读不懂（不是 OpenAI 兼容格式）"
 
 
 # ============================================================
@@ -2362,6 +2485,7 @@ CLD_L1_8 = '先填模型名。'  # core/cloud.py L500（L1）
 CLD_CAT_22 = '服务端认这个名字（%d ms）：%s'  # core/cloud.py L515（CAT）
 CLD_L1_9 = '没有 API Key，先填密钥再测。'  # core/cloud.py L530（L1）
 CLD_CAT_23 = '「%s」里没有归类为文本模型的条目——测试连接要用文本模型，请先在模型清单里加入一个。'  # core/cloud.py L539（CAT）
+CLD_CAT_23_2 = '「%s」目前只有生图/生视频模型——测试连接只测文本对话；媒体接口会在发送时预检。要看文本连通，请先在模型清单里加入一个文本模型。'  # 媒体-only provider
 CLD_CAT_24 = '「%s」不是文本模型，不能拿 chat 请求去测（会走错协议）。'  # core/cloud.py L543（CAT）
 CLD_L1_10 = 'provider 还没填任何模型名，无法测试。'  # core/cloud.py L545（L1）
 CLD_CAT_25 = '连通正常（%d ms）：%s ← %s'  # core/cloud.py L562（CAT）
@@ -2415,6 +2539,7 @@ RJ_CAT_4 = '重绘强度 %s（%s）%s%s'  # core/remote_jobs.py L191（CAT）
 RJ_IF = '｜遮罩：只重绘涂抹区'  # core/remote_jobs.py L193（IF）
 RJ_L1_7 = '电脑端的产物目录建不出来：检查那个目录的磁盘与权限（位置在 设置 → 云端模型 → 生图 / 生视频 的「修改产物位置」）。'  # core/remote_jobs.py L220（L1）
 RJ_ELSE = '已结束（详见电脑端 media_logs）'  # core/remote_jobs.py L450（ELSE）
+REM_NOTE_JOB = '📱 手机端提交了一个远程生图任务（%s…），产物会存到这台机器上。'  # core/remote_jobs.py submit（L1，输出栏）
 
 
 # ============================================================
@@ -2425,6 +2550,7 @@ RCH_NOT_RUNNING_MSG = '电脑端的文本服务没在跑：在电脑端主界面
 RCH_LOADING_MSG = '电脑端服务还在加载模型，过几秒再发。'  # core/remote_chat.py L43（LOADING_MSG）
 RCH_NOT_CHAT_MSG = '电脑端现在加载的不是能聊的文本模型（%s）——在电脑端换一个。'  # core/remote_chat.py L44（NOT_CHAT_MSG）
 RCH_BUSY_MSG = '上一条还在回答（或电脑端正在忙），等它结束再发。'  # core/remote_chat.py L45（BUSY_MSG）
+REM_NOTE_CHAT = '📱 手机端开始了一段远程对话（只打这台机器当前已加载的本地模型）。'  # core/remote_chat.py submit（L1，输出栏）
 RCH_EMPTY_MSG = '先打点什么。'  # core/remote_chat.py L46（EMPTY_MSG）
 RCH_CAT = '这条太长了（上限 %d 字）。'  # core/remote_chat.py L47（CAT）
 RCH_A0 = '本机路径'  # core/remote_chat.py L56（A0）

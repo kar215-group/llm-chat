@@ -7,6 +7,7 @@ import time
 from tkinter import messagebox
 
 from .. import texts
+
 from ..core import modelreq
 from ..core.models import BLOCK_ENGINE, BLOCK_MODEL, BLOCK_STALE, chat_start_block, display_name
 from ..core.params import ctx_for, current_ngl, estimate_kv_gb
@@ -15,15 +16,15 @@ from ..core.server import _reset_alive_cache, server_alive, server_process_alive
 
 # 「启动服务」被闸门挡住时的两行话：同一个原因，按钮的悬停气泡说一句、动作路径被
 # 别的入口踩到时在输出栏说一句。判据只有一处（`core.models.chat_start_block`），
-# 措辞也只有一处，免得两个入口各念一套（坑 128）。文案在 texts.py 的 SVC_BLOCK_*。
+# 措辞也只有一处，免得两个入口各念一套（坑 128）。
 START_BLOCK_TIP = {
-    BLOCK_ENGINE: texts.SVC_BLOCK_ENGINE_TIP,
-    BLOCK_MODEL: texts.SVC_BLOCK_MODEL_TIP,
+    BLOCK_ENGINE: "llama 引擎还没就位：在 设置 → 模型文件与引擎 → 引擎管理 里定向或下载。",
+    BLOCK_MODEL: "这台机器上还没有可用的本地文本模型：在 设置 → 模型文件与引擎 里补全或手动定向模型。",
     BLOCK_STALE: texts.SVC_BLOCK_STALE_TIP,
 }
 START_BLOCK_NOTE = {
-    BLOCK_ENGINE: texts.SVC_BLOCK_ENGINE_NOTE,
-    BLOCK_MODEL: texts.SVC_BLOCK_MODEL_NOTE,
+    BLOCK_ENGINE: "llama 引擎还没就位（在 设置 → 模型文件与引擎 → 引擎管理 里定向或下载）。",
+    BLOCK_MODEL: "这台机器上还没有可用的本地文本模型（引擎与能聊天的 .gguf 都要就位）。",
     BLOCK_STALE: texts.SVC_BLOCK_STALE_NOTE,
 }
 
@@ -51,7 +52,13 @@ class ServiceMixin:
             return "go"
         ans = messagebox.askyesnocancel(
             texts.SVC_VRAM_TITLE,
-            texts.SVC_VRAM_BODY % (action, action, action, action))
+            "%s需要占用显存，而 llama-server 当前仍在运行（常驻约 3GB）。\n\n"
+            "  是 —— 保持服务开启，直接开始%s\n"
+            "        （显存可能不够导致生成失败，聊天服务不受影响）\n\n"
+            "  否 —— 先停止服务，再%s\n"
+            "        （对话历史保存在本程序里不会丢，之后点「启动服务」可重新加载）\n\n"
+            "  取消 / 关闭本窗口 —— 放弃本次%s，什么都不改\n"
+            % (action, action, action, action))
         if ans is None:
             return "cancel"
         return "go" if ans else "stop"
@@ -94,7 +101,8 @@ class ServiceMixin:
         self._perf_warned.add(path)
         return messagebox.askyesno(
             texts.SVC_PERF_TITLE,
-            texts.SVC_PERF_CONFIRM % (modelreq.LEVEL_TEXT[lvl], need["detail"]))
+            texts.SVC_PERF_CONFIRM
+            % (modelreq.LEVEL_TEXT[lvl], need["detail"]))
 
     # ---- 服务控制 ----
     def _start_gate_block(self, action=texts.SVC_START):
@@ -114,6 +122,22 @@ class ServiceMixin:
                      % (action, START_BLOCK_NOTE.get(blk, START_BLOCK_NOTE[BLOCK_MODEL])),
                      "error")
         return True
+
+    def _launch_server(self, ctx):
+        """启动 llama-server 并把 Popen 句柄写回 `_proc`；起不来返回 None。
+
+        **`_proc` 的唯一写入口**（2026-10-17 收敛）：启动 / 重启 / 聊天换载三处原来各自
+        抄一遍 `try: self._proc = start_server(...) except: _finish_svc(...)`，于是同一
+        个字段有两个 owner（结构检查器 G4 白名单 `_proc` 那条"语义共享、形态灰色"的由来）。
+        现在 chat 只管"起来了就等就绪"，Popen 与失败收尾都留在 ServiceMixin 里 ——
+        失败时 `_finish_svc` 已经复位按钮，调用方只需补自己那条终态事件。
+        """
+        try:
+            self._proc = start_server(self.cfg, ctx)
+        except Exception as e:
+            self._finish_svc(False, texts.SVC_START_FAIL_RAW + str(e), True)
+            return None
+        return self._proc
 
     def _begin_svc(self):
         """进入服务操作状态：相关按钮禁用，防止重入。"""
@@ -138,7 +162,8 @@ class ServiceMixin:
                     listeners = _listening_pids(int(self.cfg.get("port") or 0))
                     if listeners and getattr(self._proc, "pid", None) not in listeners:
                         self._sq.put(("note",
-                                      texts.SVC_PORT_TAKEN
+                                      "端口 %d 被另一个服务进程占用（响应不是刚启动的这个），"
+                                      "本次启动未接管该端口。"
                                       % int(self.cfg.get("port") or 0)))
                         return False
                 except Exception:
@@ -146,11 +171,12 @@ class ServiceMixin:
                 return True
             # 进程已退出（崩溃 / 参数不兼容）→ 快速失败，不傻等满上限
             if i >= 6 and not server_alive(self.cfg):
-                self._sq.put(("note", texts.SVC_PROC_EXITED))
+                self._sq.put(("note",
+                              "服务进程已退出（可能是显存不足或该模型与当前 llama.cpp 不兼容）。"))
                 return False
             if i - noted >= 12:               # 约每 18~20 秒汇报一次进度
                 noted = i
-                self._sq.put(("note", texts.SVC_STILL_LOADING))
+                self._sq.put(("note", "仍在加载模型…（大模型首次加载可能需要 1~3 分钟）"))
             time.sleep(1.5)
         return False
 
@@ -203,27 +229,25 @@ class ServiceMixin:
         # 中间任何一步意外抛错都必须走一次 _finish_svc，否则按钮永久置灰。
         # worker 本体另有 _svc_guard 兜；这里只护"还没来得及开线程"的窗口。
         try:
-            self._append(texts.SVC_STARTING
+            self._append("\n[服务] 正在启动 %s（GPU 层数 %d），加载约需十几秒到几分钟…\n"
                          % (display_name(self.cfg, self.cfg["model"]), current_ngl(self.cfg)), "meta")
             ctx = ctx_for(self.cfg, agent=agent)
             kv = estimate_kv_gb(self.cfg, ctx=ctx)
             if kv:
                 scene = "agent" if agent else texts.SVC_SCENE_MAIN
-                warn = (texts.SVC_VRAM_HIGH if kv["vram"] > 4 else "")
+                warn = (texts.SVC_VRAM_HIGH
+                        if kv["vram"] > 4 else "")
                 self._append(texts.SVC_KV_EST
                              % (scene, ctx, kv["total"], kv["vram"], kv["ram"], warn), "meta")
 
             def work():
                 launched = os.path.basename(self.cfg["model"])
-                try:
-                    self._proc = start_server(self.cfg, ctx)
-                except Exception as e:
-                    self._finish_svc(False, texts.SVC_START_FAIL_RAW + str(e), True)
+                if self._launch_server(ctx) is None:
                     return
                 ok = self._wait_ready()
                 self._finish_svc(ok, texts.SVC_READY
                                  if ok else
-                                 texts.SVC_START_FAIL_TIMEOUT,
+                                 "[服务] 启动失败或超时——请检查模型路径与参数（设置 → 服务参数）。",
                                  not ok, launched=launched)
             threading.Thread(target=self._svc_guard(work), daemon=True).start()
         except Exception as e:
@@ -243,7 +267,8 @@ class ServiceMixin:
                 else:
                     # 如实说"没动手"：句柄与端口反查都没找到目标时，一个进程都没杀（R-01）
                     self._finish_svc(False,
-                                     texts.SVC_NO_PROC % int(self.cfg.get("port") or 0))
+                                     "[服务] 没有找到监听端口 %d 的服务进程（未做任何操作）。"
+                                     % int(self.cfg.get("port") or 0))
             threading.Thread(target=self._svc_guard(work), daemon=True).start()
         except Exception as e:
             self._finish_svc(False, texts.SVC_INTERRUPTED % e, True)
@@ -264,15 +289,12 @@ class ServiceMixin:
                 if self._closing:
                     return                  # 关闭中：不再启动新服务
                 launched = os.path.basename(self.cfg["model"])
-                try:
-                    self._proc = start_server(self.cfg, ctx_for(self.cfg, agent=agent))
-                except Exception as e:
-                    self._finish_svc(False, texts.SVC_START_FAIL_RAW + str(e), True)
+                if self._launch_server(ctx_for(self.cfg, agent=agent)) is None:
                     return
                 ok = self._wait_ready()
                 self._finish_svc(ok, texts.SVC_RESTARTED
                                  if ok else
-                                 texts.SVC_START_FAIL_TIMEOUT,
+                                 "[服务] 启动失败或超时——请检查模型路径与参数（设置 → 服务参数）。",
                                  not ok, launched=launched)
             threading.Thread(target=self._svc_guard(work), daemon=True).start()
         except Exception as e:

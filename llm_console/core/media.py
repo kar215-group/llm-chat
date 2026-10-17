@@ -506,6 +506,19 @@ def cleanup_temp():
 BATCH_MAX = 8          # UI 侧上限（与引擎 strict 档自身的 1..8 同口径）
 
 
+def count_in_range(value, lo=1, hi=BATCH_MAX, default=1):
+    """用户输入 → [lo, hi] 内的整数（空 / 非数字 / 越界都夹取）。
+
+    与 `batch_count_of` 同一套 float 中转规则；云端 MiniMax 的 n 到 9，
+    比本地引擎的 8 多一档，所以范围由调用方给。
+    """
+    try:
+        n = int(float(str(value).strip()))
+    except Exception:
+        n = int(default)
+    return max(int(lo), min(int(hi), n))
+
+
 def batch_count_of(value, default=1):
     """用户输入 → 生效张数（夹到 1..BATCH_MAX）。
 
@@ -514,11 +527,7 @@ def batch_count_of(value, default=1):
     走 float 中转：HTTP 那头 JSON 数字可能是 3.0（一些客户端不省小数点），
     直接 int("3.0") 会当非数字吞成 1 —— 张数这种"少给一次"最容易被误读成功能坏了。
     """
-    try:
-        n = int(float(str(value).strip()))
-    except Exception:
-        n = int(default)
-    return max(1, min(BATCH_MAX, n))
+    return count_in_range(value, 1, BATCH_MAX, default)
 
 
 def batch_out_paths(out_path, count):

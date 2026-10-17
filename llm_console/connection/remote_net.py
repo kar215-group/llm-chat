@@ -27,6 +27,7 @@ import threading
 import time
 
 from . import remote_audit
+
 from .. import texts
 
 # TLS 握手超时（秒）：握手在工作线程里做（不再卡 accept 循环，见 TLSWorkerMixin），
@@ -199,7 +200,8 @@ BIND_LABELS = {BIND_ALL: texts.RNET_DICT,
 BIND_FALLBACK_MSG = texts.RNET_BIND_FALLBACK_MSG
 # 设备直连档拿不到直连地址时的说明：**拒绝启动、不回退**——回退 all 就等于
 # 把公网口打开（W 硬要求：绝不通过 ipv6 公网向手机提供服务）。
-BIND_WFD_REFUSE_MSG = (texts.RNET_BIND_WFD_REFUSE_MSG)
+BIND_WFD_REFUSE_MSG = ("没检测到设备直连链路（手机热点没连、无线直连组也没开）："
+                       "先在手机上开热点并把电脑连上，再拨一次开关")
 
 
 def tailscale_addr(ips=None):
@@ -341,7 +343,8 @@ def host_allowed(raw):
 
 # POST 只收这两种（都不是 CORS 的"简单请求"类型 ⇒ 跨源必先预检 ⇒ 被浏览器拦下）
 POST_CTYPES = ("application/json", "application/octet-stream")
-CROSS_ORIGIN_MSG = (texts.RNET_CROSS_ORIGIN_MSG)
+CROSS_ORIGIN_MSG = ("这个请求的来路不对，已拒绝：请从 设置 → 远程访问 给的网址"
+                    "重新打开这一页。")
 
 def ip_label(ip):
     """给 local_ips 里的地址定性（纯函数，设置页按它排序与标注）：

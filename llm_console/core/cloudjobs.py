@@ -10,6 +10,7 @@
 它是可选台账，不该让界面崩掉。
 """
 
+import hashlib
 import json
 import os
 import threading
@@ -116,6 +117,25 @@ def mark_failed(task_id, error, status="failed"):
     return update_job(task_id, status=status, error=str(error or "")[:600])
 
 
+# 合成台账 id 的前缀：同步生图"服务端给了 URL、下载失败"时记的那一条。
+# 它没有 task_id 可言（同步端点当场回产物地址），取回时只能按 URL 重下 ——
+# 前缀就是"这条别去调查询接口"的判据（见 ui/app._recover_job）。
+URL_JOB_PREFIX = "url-"
+
+
+def url_job_id(urls):
+    """一批产物 URL → 合成台账 id（`url-<url 摘要前 12 位>`）；空集返回空串。
+
+    同一批 URL 必得同一个 id：失败重试 / 进程重启后再记一次，落的是同一条，
+    不会把一份产物的重下入口堆成两条。
+    """
+    us = [str(u) for u in (urls or []) if str(u or "").strip()]
+    if not us:
+        return ""
+    h = hashlib.sha1("\n".join(us).encode("utf-8", "replace")).hexdigest()[:12]
+    return URL_JOB_PREFIX + h
+
+
 def unfinished():
     """还没结束的任务（含"succeeded 但没落地"），按提交时间倒序。"""
     out = []
@@ -157,5 +177,13 @@ def describe(job):
     kind = texts.CJ_IF if str(job.get("kind")) == "image" else texts.CJ_ELSE
     t = time.strftime("%m-%d %H:%M", time.localtime(float(job.get("created_at") or 0)))
     tail = texts.CJ_IF_2 if expired(job) else ""
+    if is_url_job(job):
+        # 没有任务号可显示：这行说清"只有产物地址"，取回 = 按 URL 重下
+        return texts.CJ_URL % (kind, job.get("model") or "?", t, tail)
     return texts.CJ_CAT % (
         kind, job.get("model") or "?", t, str(job.get("task_id") or "")[:16], tail)
+
+
+def is_url_job(job):
+    """这条台账是不是"按 URL 重下"的合成条目（没有服务端任务号）。"""
+    return str((job or {}).get("task_id") or "").startswith(URL_JOB_PREFIX)

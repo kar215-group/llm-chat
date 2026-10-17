@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""llm_console.core.chatlog — 对话记录落盘（**只对文本语言模型**；本期只存不读）
+"""llm_console.core.chatlog — 对话记录落盘与读回（**只对文本语言模型**）
 
 为什么只存文本模型：生图 / 生视频的成果本来就是落盘的文件，聊天流里那几行只是路径与
 状态，存下来没有意义（W 定的范围）。
@@ -24,6 +24,10 @@
       "subject": "第一句用户话的前 24 字",   # 留给"读回历史"那期显示内容摘要
       "turns": 3,
       "messages": [{"role": "user", "content": "…"}, …],   # **只有 role/content**：与请求体同形
+      "compressed": {                     # 可选：这一轮请求用过上下文压缩时才有
+        "covered": 8,                     # 前 8 条被折成了摘要（messages 本身仍是全量）
+        "turns": 4, "summary": "…", "at": 1790831902.0
+      },
       "usage": {}                         # 预留：各家 usage 字段不同，先不聚合
     }
 
@@ -107,11 +111,15 @@ def _shrink(obj):
     return obj
 
 
-def save(cfg, sid, messages, model="", provider="", model_kind="chat"):
+def save(cfg, sid, messages, model="", provider="", model_kind="chat", compressed=None):
     """把这一会话写成一整份 JSON（覆盖同名文件）→ (path, error)。
 
     整份重写而不是追加：会话文件本来就小（折掉 base64 后通常几十 KB），
     重写比维护"追加 + 崩溃截断恢复"简单得多，也天然幂等。
+
+    `compressed` = 这一轮请求用过的上下文摘要（`core/history.compress` 的 info）。
+    它只进**外层字段**：`messages` 永远是全量、永远能原样回灌 —— 压缩改的是"请求带
+    哪些消息"，不是"记录里存了哪些消息"（W 2026-10-17 口径②）。
     """
     msgs = [m for m in (messages or []) if isinstance(m, dict) and m.get("role")]
     if not msgs:
@@ -146,6 +154,13 @@ def save(cfg, sid, messages, model="", provider="", model_kind="chat"):
         "messages": _shrink(msgs),
         "usage": {},
     }
+    if isinstance(compressed, dict) and str(compressed.get("text") or "").strip():
+        payload["compressed"] = {
+            "covered": int(compressed.get("covered") or 0),
+            "turns": int(compressed.get("turns") or 0),
+            "summary": str(compressed.get("text") or ""),
+            "at": float(compressed.get("at") or 0.0),
+        }
     try:
         os.makedirs(os.path.dirname(p), exist_ok=True)
         # 临时名带线程号：关窗与轮末两条路径可能并发落盘同一份，
@@ -166,9 +181,11 @@ def save(cfg, sid, messages, model="", provider="", model_kind="chat"):
 
 
 def list_sessions(cfg, limit=50):
-    """按时间倒序列出已有记录（**本期界面里没有入口**，留给"加载历史"那期用）。
+    """按时间倒序列出已有记录（"历史对话…"窗的数据源）。
 
     只读文件头部的元信息，不解析整份 messages。
+    `title` 是**保存时间**（W 定的会话名），`subject` 是第一句用户话 —— 列表两行显示
+    用得上：时间认"是哪一份"，第一句话认"聊的什么"。
     """
     d = log_dir(cfg)
     out = []
@@ -187,5 +204,28 @@ def list_sessions(cfg, limit=50):
         out.append({"id": j.get("id") or n[:-5], "path": os.path.join(d, n),
                     "title": j.get("title") or "", "model": j.get("model") or "",
                     "turns": j.get("turns") or 0,
-                    "created_at": j.get("created_at") or 0})
+                    "subject": j.get("subject") or "",
+                    "compressed": bool(j.get("compressed")),
+                    "created_at": j.get("created_at") or 0,
+                    "updated_at": j.get("updated_at") or 0})
     return out
+
+
+def load(path):
+    """读回一整份记录 → `(data, error)`。**永不抛异常**（列表窗点一下就走到这里）。
+
+    返回的 `data["messages"]` 是能直接回灌请求体的那份（除图片被折成占位串以外，
+    与写盘时一字不差）。读不出来 / 不是本程序的记录 → `({}, 一句人话)`，
+    调用方保持当前对话不动（不能因为点了坏文件就把正在聊的历史清掉）。
+    """
+    p = str(path or "")
+    if not p:
+        return {}, texts.CHL_L2 % texts.CHL_L1
+    try:
+        with open(p, "r", encoding="utf-8") as f:
+            j = json.load(f)
+    except Exception as e:
+        return {}, texts.CHL_L2 % e
+    if not isinstance(j, dict) or not isinstance(j.get("messages"), list):
+        return {}, texts.CHL_L2 % texts.CHL_RET
+    return j, ""

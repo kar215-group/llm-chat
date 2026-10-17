@@ -19,11 +19,11 @@ import subprocess
 import threading
 import time
 
+from .. import texts
 from ..core import config, media
 from .remote_audit import audit
 from .remote_ledger import ledger_add, ledger_load, ledger_update
 from .remote_uploads import upload_paths
-from .. import texts
 
 # ---- 给手机端的失败原话（W 2026-10-12 定口径：**只给人话，引擎原始行不留**）----
 # sd-cli 的输出里带着模型与产物的**绝对路径**（盘符、用户名、目录结构），而坑 209⑥
@@ -134,14 +134,16 @@ class RemoteJobs:
             # 不把引擎的绝对路径回给手机端（坑 209⑥：那是本机用户名与目录结构）；
             # 路径进审计，手机那头只留"去哪儿修"。
             audit("image.submit", device_id, False, "no sd-cli: %s" % (cli or texts.RJ_N))
-            return None, (texts.RJ_L1_5)
+            return None, ("电脑端还没配好生图引擎：在 设置 → 本地模型 → "
+                          "生图（sd.cpp） 里指向 sd.cpp 目录。")
         diffusion = resolve_img_model_path(snap)
         if not diffusion:
             return None, (texts.RJ_L1_6)
         files = resolve_img_files(snap, diffusion)
         missing = sdprofile.missing_slots(files["family"], files)
         if missing:
-            return None, (texts.RJ_CAT % (sdprofile.label_of(files["family"]),
+            return None, ("这个生图模型（识别为 %s）缺配套文件：%s——在电脑端"
+                          "设置里补齐。" % (sdprofile.label_of(files["family"]),
                                            "、".join(missing)))
         try:
             need = modelreq.assess(snap, diffusion, "image", files=files)
@@ -150,7 +152,8 @@ class RemoteJobs:
         except Exception:
             lvl = 0
         if lvl >= modelreq.LEVEL_FATAL:
-            return None, (texts.RJ_CAT_2
+            return None, ("这台机器带不动这个模型（%s）——远程没人能按"
+                          "「仍要继续」，请在电脑端确认后再来。"
                           % modelreq.LEVEL_TEXT[lvl])
         # ---- 二期：附件 → 带图两档 → 强度 → 遮罩（判据与 GUI 逐字同源）----
         ref_paths, err = upload_paths(device_id, refs or [], "ref")
@@ -215,7 +218,8 @@ class RemoteJobs:
         except Exception as e:
             audit("image.submit", device_id, False, "outdir failed: %s (%s: %s)"
                   % (outdir, type(e).__name__, e))
-            return None, (texts.RJ_L1_7)
+            return None, ("电脑端的产物目录建不出来：检查那个目录的磁盘与权限"
+                          "（位置在 设置 → 云端模型 → 生图 / 生视频 的「修改产物位置」）。")
         tid = _pysecrets.token_hex(4)
         # 微秒防同秒碰撞：**不能**走 time.strftime("%f") —— Windows 的 C 运行时
         # strftime 不认 %f（glibc 扩展），当场 ValueError；datetime 是 Python
@@ -270,6 +274,13 @@ class RemoteJobs:
         threading.Thread(target=self._reader, daemon=True,
                          name="remote-img").start()
         audit("image.submit", device_id, True, tid)
+        # 桌面端输出栏说一声（16 §4.3 的 note_fn 收口）：手机在机房那头点了发送，
+        # 人坐在电脑前只看到进度行自己长出来、不知道是谁在动这台机器。
+        # 这句原来只是"装了没调"的回调，现在真说话了（只报一次 / 一单）。
+        try:
+            self.note(texts.REM_NOTE_JOB % tid[:12])
+        except Exception:
+            pass
         return tid, ""
 
     # ---- 执行（无 GUI 版 reader，判据与 ui/image_gen 同源）----

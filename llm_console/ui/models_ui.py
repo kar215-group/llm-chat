@@ -18,6 +18,7 @@ from ..core.models import (ENGINE_LABEL, apply_tidy, display_name, engine_ready,
 from ..core.params import auto_ctx_for_model, compute_ngl, current_ngl
 from ..core.media import resolve_video_files
 from ..connection.stream import request_auto_alias
+from . import dialogs
 from . import theme
 from . import widgets
 
@@ -743,11 +744,14 @@ class ModelsMixin:
                          daemon=True).start()
 
     # ---- 模型目录扫描与自动配置补全（自动线程 / 手动按钮共用 _scan_and_fill）----
-    def _scan_and_fill(self, force=False, quiet=False):
+    def _scan_and_fill(self, force=False, quiet=False, only=None):
         """扫描模型目录，补全/重算 ngl、主页面 ctx、agent ctx、mmproj 记录。
 
         force=False：只补缺（手动改过的记录不覆盖）——进页自动 / 手动「补全缺失项」都走它；
         force=True ：调用方已清空相应记录，全部重算（手动「全部重新计算」）。
+        only=set() ：**只动这几个 basename**（W 2026-10-17 选择性重算）。给了它以后
+        非目标模型一律跳过 —— 连"补缺"都不做：用户点的是"重算这几个"，顺手改别的
+        模型等于偷偷扩大动作范围（这条与 `_manual_scan` 的清空范围必须一致）。
         quiet=True ：**自动路径**（进页触发）—— 成功类提示一律不上主页面输出栏
         （W 2026-10-06），只有失败（元数据解析不了 / 显存没探到）才开口；手动路径
         照旧汇报，用户点了按钮就该有反馈。
@@ -761,6 +765,8 @@ class ModelsMixin:
             if not quiet:
                 self._sq.put(("note", texts.MDL_NO_VRAM))
         _d, chat, images = scan_models(self.cfg)
+        if only is not None:
+            chat = [p for p in chat if os.path.basename(p) in only]
         # 补全结果先攒在内存里，最后**一次性**落盘：原来每补一项就 save_config 一次
         # （首跑 N 个模型 = 2N+1 次写盘，每次一份 .tmp + os.replace）。这一步跑在后台
         # 线程里，整批算完只要十几毫秒，所以"合并成一次写"既少占磁盘、也少和主线程的
@@ -775,6 +781,8 @@ class ModelsMixin:
         # 自动配对可看图模型（mmproj）
         for mp, proj in find_vl_pairs(self.cfg).items():
             mb = os.path.basename(mp)
+            if only is not None and mb not in only:
+                continue                    # 只重算选中的：没勾的配对记录也不重写
             if force or mb not in (self.cfg.get("model_mmproj") or {}):
                 # 本函数跑在后台线程：改 cfg 嵌套 dict 必须持 cfg_lock ——主线程任何
                 # save_config 的 json.dump 正在遍历时加键，会让那次保存整份失败并被
@@ -823,6 +831,11 @@ class ModelsMixin:
         # perf_reported（文件删掉的剪枝掉）。**评估结果不进输出栏**（W 第二轮）——
         # 目前唯一的可见出口是启动 / 发送前 `_confirm_fatal_perf` 的 3 级弹窗（现场重算），
         # 登记表为将来的查看界面备数据；评估读不到头也登记为 0，别每次扫描都重试坏文件。
+        # ⚠ 选择性重算（only 非空）时**整段跳过**：这一轮的 chat 是过滤过的，拿它算
+        # paths_now 会把"没勾的模型"全判成已删除，从 perf_reported 里连根剪掉。
+        if only is not None:
+            _flush()
+            return
         try:
             vids2, _enc2 = scan_video_models(self.cfg)
         except Exception:
@@ -844,22 +857,76 @@ class ModelsMixin:
         _flush()
 
     # ---- 模型管理（手动操作；自动线程与手动按钮共用 _scan_and_fill）----
-    def _manual_scan(self, force=False):
+    def _manual_scan(self, force=False, only=None):
+        """手动补全 / 重算。
+
+        force=True, only=None ：全清重算（老路径，仍保留给内部调用与自检）；
+        force=True, only=set() ：**只清这几个 basename 的记录**再重算（W 2026-10-17，
+            由「重新计算…」勾选窗调进来）。清空范围与 `_scan_and_fill` 的 only 过滤
+            是同一份名单 —— 清得比算得多 = 用户手调值白白丢掉。
+        """
         if force:
-            if not messagebox.askyesno(
+            if only is None and not messagebox.askyesno(
                     texts.MDL_RECALC_TITLE, texts.MDL_RECALC_Q):
                 return
             # 清空与落盘持锁：上一轮自动补全线程可能还在跑，裸改嵌套键会与它的
             # 写/序列化竞争（R-12 同款）
             with cfg_lock():
-                for k in ("model_ngl", "model_ctx", "model_ctx_api", "model_mmproj",
-                          "perf_reported"):
-                    self.cfg[k] = {}
+                if only is None:
+                    for k in ("model_ngl", "model_ctx", "model_ctx_api", "model_mmproj",
+                              "perf_reported"):
+                        self.cfg[k] = {}
+                else:
+                    for k in ("model_ngl", "model_ctx", "model_ctx_api", "model_mmproj"):
+                        rec = self.cfg.get(k)
+                        if isinstance(rec, dict):
+                            for b in list(rec):
+                                if b in only:
+                                    rec.pop(b, None)
                 save_config(self.cfg)
         self._append(texts.MDL_MM_BEGIN
-                     % (texts.MDL_RECALC_ALL if force else texts.MDL_RECALC_MISSING), "meta")
-        threading.Thread(target=self._scan_and_fill, args=(force,),
+                     % (texts.MDL_RECALC_ALL if force and only is None
+                        else (texts.MDL_RECALC_SOME if force
+                              else texts.MDL_RECALC_MISSING)), "meta")
+        threading.Thread(target=self._scan_and_fill, args=(force, False, only),
                          daemon=True).start()
+
+    def _open_recalc_dialog(self):
+        """「重新计算…」：先勾模型，再只清勾中那几条记录（W 2026-10-17 定）。
+
+        位置选型：放在**模型文件与引擎**页（原按钮同一处），不搬进「管理本地模型」窗。
+        理由：那扇窗的语义是"哪些模型进菜单"（勾选 = 显示/隐藏），把"重算参数"混进去
+        会让同一排复选框一会儿改可见性、一会儿清记录；而记录本来就住在这页（补全 /
+        重算 / 模型来源三个按钮并排），谁清谁算在同一屏里说得清。
+        """
+        _d, chat, _img = scan_models(self.cfg)
+        if not chat:
+            self._append(texts.MDL_RECALC_PICK_EMPTY, "error")
+            return
+        ngl = self.cfg.get("model_ngl") or {}
+        ctx = self.cfg.get("model_ctx") or {}
+        ctxa = self.cfg.get("model_ctx_api") or {}
+        rows = []
+        for p in chat:
+            b = os.path.basename(p)
+            if b in ngl or b in ctx or b in ctxa:
+                sub = texts.MDL_RECALC_PICK_HAS % (
+                    ngl.get(b, "—"), ctx.get(b, "—"), ctxa.get(b, "—"))
+            else:
+                sub = texts.MDL_RECALC_PICK_NO
+            rows.append((b, display_name(self.cfg, p), sub))
+        dlg = dialogs.ModelPickDialog(
+            self, rows, title=texts.MDL_RECALC_PICK,
+            hint=texts.MDL_RECALC_PICK_HINT, note=texts.MDL_RECALC_PICK_NOTE,
+            summary=texts.MDL_RECALC_PICK_SUM % len(rows))
+        self.wait_window(dlg)
+        picked = dlg.result
+        if picked is None:
+            return                       # 取消：一个字段都不动
+        if not picked:
+            self._append(texts.MDL_RECALC_PICK_NONE, "meta")
+            return
+        self._manual_scan(True, only=set(picked))
 
     # ---- 模型来源（主目录 + 附加来源的完整管理：增 / 删 / 换；W 2026-10-16 重构）----
     def _open_model_sources(self):

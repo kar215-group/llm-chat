@@ -219,6 +219,12 @@ class ImageGenMixin:
             self._append(texts.MEDIA_CLOUD_DIR_FAIL % (texts.IMG_CLOUD_TAG, e), "error")
             return
         out = os.path.join(outdir, time.strftime("img_%Y%m%d_%H%M%S") + ".png")
+        # 云端 ×n（C2-3）：只有能力档案允许 n>1 的家会显示控件；这里再归一一次，
+        # 防止用户没失焦就直接按发送。固定 1 张的家 max=1，count 恒 1。
+        try:
+            count = max(1, int(self._normalize_count() or 1))
+        except Exception:
+            count = 1
         # 预检（check + 建目录）都过了才消费输入框与附件（坑 133，同本地链路）
         self.input.delete("1.0", "end")
         self.clear_attachment()
@@ -247,7 +253,13 @@ class ImageGenMixin:
         self._append(texts.IMG_CLOUD_MODEL_LINE
                      % (model or texts.IMG_UNSELECTED,
                         providers.media_price_note(provider, providers.KIND_IMAGE,
-                                                   0, model)), "meta")
+                                                   0, model, count=count)), "meta")
+        # 档案说这家没有负向词（MiniMax / 方舟）时，界面上那格已置灰；老配置里
+        # 还留着的值不该静默消失，提交前明说一次"已忽略"（C2-1：填了不生效要说话）。
+        _pf = providers.profile_for(provider, model)
+        if str(self.cfg.get("cloud_img_negative", "") or "").strip() \
+                and _pf.get("img_negative") is False:
+            self._append(texts.IMG_CLOUD_IGNORE_NEG, "meta")
         gen, q, stop = self._cloud_begin("image")
         self._cloud_pid = str(provider["id"])
         self._img_out = out
@@ -257,10 +269,11 @@ class ImageGenMixin:
                                           provider.get("name") or ""))
         threading.Thread(target=self._cloud_image_worker,
                          args=(provider, model, prompt, out, gen, q, stop),
-                         kwargs={"refs": refs, "ref_mode": mode}, daemon=True).start()
+                         kwargs={"refs": refs, "ref_mode": mode, "n": count},
+                         daemon=True).start()
 
     def _cloud_image_worker(self, provider, model, prompt, dest, gen, q, stop_flag,
-                            tid="", refs=None, ref_mode=""):
+                            tid="", refs=None, ref_mode="", n=1):
         """子线程：只往队列里投事件，绝不碰控件（坑 11/54 的铁律）。
 
         `tid` 非空 = 从台账取回旧任务，**不再提交一次**（重复提交就是重复扣钱）。
@@ -328,6 +341,7 @@ class ImageGenMixin:
                     size=str(self.cfg.get("cloud_img_size", "") or ""), seed=seed,
                     ref_images=list(refs or []),
                     ref_mode=str(ref_mode or ""),
+                    n=int(n or 1),
                     log_path=log_path,
                     on_task_id=note_tid, persist=persist)
             paths = list(res.get("paths") or [])
@@ -354,12 +368,57 @@ class ImageGenMixin:
                     cloudjobs.update_job(
                         new_tid, status=st if st in cloudjobs.OPEN_STATUS else "unknown",
                         error=str(res.get("error") or "")[:600])
+            elif res.get("urls"):
+                # 同步生图（服务端当场回 URL）下载失败：**URL 是唯一还活着的线索**
+                # （24h）。原来它只留在 .log 里，重启后没有任何入口能拿回来（16 §24.2）。
+                # 记成一条合成台账（task_id 前缀 url-）：取回时走"按 URL 重下"，
+                # 不查服务端、更不重新提交（重复提交 = 重复扣钱）。
+                jid = cloudjobs.url_job_id(res.get("urls"))
+                if jid:
+                    if not cloudjobs.get_job(jid):
+                        cloudjobs.add_job(jid, "image", provider["id"],
+                                          provider.get("name", ""), model, prompt, dest)
+                    cloudjobs.update_job(
+                        jid, urls=list(res.get("urls") or []), status="succeeded",
+                        error=str(res.get("error") or "")[:600])
+                    # 子线程绝不碰控件（坑 11/54）：这句话走队列回主线程
+                    q.put(("line", texts.IMG_CLOUD_URL_KEPT % jid[:10], gen))
             if not paths:
                 q.put(("line", "[ERROR] %s" % (res.get("error") or texts.IMG_CLOUD_FAILED), gen))
             q.put(("exit", 0 if paths else 1, gen))
         except Exception as e:
             # 兜底（2026-10-11 排查报告）：worker 体内任何未捕获异常都不许吞掉 exit
             # 事件——没有它主线程不复位 _img_busy，发送/切模型会永久被"任务进行中"拦住
+            try:
+                q.put(("line", "[ERROR] %s" % e, gen))
+            except Exception:
+                pass
+            q.put(("exit", 1, gen))
+
+    def _cloud_url_worker(self, job, dest, gen, q, stop_flag):
+        """按台账里存的产物地址重下（**不查服务端、不重新提交**，16 §24.2）。
+
+        同步生图的收尾形状与异步任务不同：服务端当场回 URL，没有 task_id 可查。
+        所以这条 worker 只做"下载 + 落账 + 投 exit"，事件与 `_cloud_image_worker`
+        完全同形，主线程的 `_handle_img_exit` 不用知道自己在收哪种结果。
+        """
+        urls = [u for u in (job.get("urls") or []) if str(u or "").strip()]
+        try:
+            res = cloud_media.download_urls(
+                urls, dest, emit=lambda e: q.put((e[0], e[1], gen)),
+                stop_flag=stop_flag)
+            paths = list(res.get("paths") or [])
+            if gen == self._img_gen:
+                if paths:
+                    self._img_out = paths[0]
+                    self._img_extra_paths = paths[1:]
+            if paths:
+                cloudjobs.mark_done(job.get("task_id"), paths=paths, urls=urls)
+            else:
+                q.put(("line", "[ERROR] %s"
+                       % (res.get("error") or texts.IMG_CLOUD_FAILED), gen))
+            q.put(("exit", 0 if paths else 1, gen))
+        except Exception as e:
             try:
                 q.put(("line", "[ERROR] %s" % e, gen))
             except Exception:

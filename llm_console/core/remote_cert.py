@@ -24,11 +24,12 @@
 import base64
 import hashlib
 import json
+
+from .. import texts
 import os
 import subprocess
 
 from .config import APP_DIR
-from .. import texts
 
 CERT_DIR = os.path.join(APP_DIR, "remote_cert")
 CERT_PEM = os.path.join(CERT_DIR, "cert.pem")
@@ -67,12 +68,14 @@ def _run_ps():
         p = subprocess.run(cmd, capture_output=True, timeout=60,
                            creationflags=flags if os.name == "nt" else 0)
     except FileNotFoundError:
-        raise RemoteCertError(texts.RCC_A0)
+        raise RemoteCertError("找不到 PowerShell，无法生成 HTTPS 证书；"
+                              "可在设置里改用明文 HTTP（仅建议局域网内使用）。")
     except Exception as e:
         raise RemoteCertError(texts.RCC_CAT % e)
     if p.returncode != 0:
         # 不透 PowerShell 原文（可能含策略/路径细节）；只分类
-        raise RemoteCertError(texts.RCC_A0_2)
+        raise RemoteCertError("本机 PowerShell 未能生成证书（可能被安全策略限制）；"
+                              "可在设置里改用明文 HTTP（仅建议局域网内使用）。")
     return p.stdout.decode("utf-8", "replace").strip()
 
 
@@ -120,7 +123,8 @@ def _rsa_ints(params):
              for k in keys}
         if _params_ok(v):
             return {k: _int(params[k], reverse) for k in keys}
-    raise RemoteCertError(texts.RCC_A0_3)
+    raise RemoteCertError("生成的密钥材料自洽性校验没过（这不常见）；"
+                          "可在设置里改用明文 HTTP（仅建议局域网内使用）。")
 
 
 def _der_len(n):
@@ -206,15 +210,19 @@ def ensure_cert(runner=None):
     except RemoteCertError:
         raise
     except Exception:
-        raise RemoteCertError(texts.RCC_A0_4)
+        raise RemoteCertError("生成 HTTPS 证书失败（本机安全软件或策略可能拦了"
+                              " PowerShell）；可在设置里改用明文 HTTP（仅建议"
+                              "局域网内使用）。")
     try:
         params = json.loads(out)
     except Exception:
-        raise RemoteCertError(texts.RCC_A0_5)
+        raise RemoteCertError("生成 HTTPS 证书时得到无法解析的结果，已放弃；"
+                              "可在设置里改用明文 HTTP（仅建议局域网内使用）。")
     missing = [k for k in ("cert", "n", "e", "d", "p", "q", "dp", "dq", "qi")
                if not params.get(k)]
     if missing:
-        raise RemoteCertError(texts.RCC_CAT_2
+        raise RemoteCertError("生成 HTTPS 证书时缺少关键材料（%s），已放弃；"
+                              "可在设置里改用明文 HTTP（仅建议局域网内使用）。"
                               % "、".join(missing[:3]))
     cert_der = base64.b64decode(params["cert"])
     key_text = _key_pem(_rsa_ints(params))

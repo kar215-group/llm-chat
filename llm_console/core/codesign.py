@@ -191,6 +191,48 @@ def trust(exe=None, runner=None):
     return False, _humanize_tool_output(out, code)
 
 
+def _untrust_script(path):
+    """撤销**当前用户**的信任：`certutil -user -delstore Root <指纹>`（免管理员）。
+
+    指纹从 exe 自己的签名里现取，不从调用方递进来 —— 与 trust() 同一条纪律：
+    能删的必须正好是这张 exe 的证书，删错一张等于把别的软件的信任也撤了。
+    删除后**回读一次**判成败（certutil 的退出码在不同 Windows 版本上不一致）。
+    """
+    return (
+        "[Console]::OutputEncoding=[Text.Encoding]::UTF8;"
+        "$s=Get-AuthenticodeSignature -LiteralPath '%s';"
+        "if(-not $s.SignerCertificate){Write-Output '%s';exit 3};"
+        "$t=$s.SignerCertificate.Thumbprint;"
+        "$o=certutil -user -delstore Root $t 2>&1;"
+        "if(Test-Path ('Cert:\\CurrentUser\\Root\\'+$t)){Write-Output $o;Write-Output 'STILL-TRUSTED';exit 4};"
+        "Write-Output 'UNTRUSTED'"
+    ) % (_q(path), _UNSIGNED)
+
+
+def untrust(exe=None, runner=None):
+    """把这张 exe 的签名证书从**当前用户**的受信任根里删掉 → `(True, "")` / `(False, 原因)`。
+
+    与 `trust()` 对称（16 §19.3）：原来只有"加"没有"撤"，用户后悔只能自己开
+    `certmgr.msc`。这里只动 CurrentUser（免管理员，与 trust 同一层级）；
+    机器级那份是管理员写进去的，也只能由管理员在系统里删 —— 不在这里假装能撤。
+    """
+    path = exe or self_exe()
+    if not path or not os.path.isfile(path):
+        return False, texts.CS_L1_4
+    try:
+        code, out = _run(_untrust_script(path), runner)
+    except Exception as e:
+        return False, texts.CS_CAT_4 % e
+    out = (out or "").strip()
+    if code == 0 and out.endswith("UNTRUSTED"):
+        return True, ""
+    if out == _UNSIGNED:
+        return False, texts.CS_L1_5
+    if out.endswith("STILL-TRUSTED"):
+        return False, texts.CS_L1_8
+    return False, _humanize_tool_output(out, code)
+
+
 def trust_machine(exe=None, runner=None):
     """把 exe 的签名证书写进**本机（所有用户）**的受信任根 → `(True, "")` / `(False, 原因)`。
 

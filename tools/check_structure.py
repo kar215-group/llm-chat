@@ -293,8 +293,8 @@ def check_g2():
 # =========================================================================
 G4_WHITELIST = {
     # 一行一字段一理由；变更随 git diff 被 review —— 这份清单本身就是"显眼"的实现。
-    "_proc":       "chat 与 service 共享同一 llama-server 进程句柄（换载要停的就是它）；"
-                   "chat.py:373-377 与 service.py:123-127 有同构重复，收敛方案挂账 16 §16",
+    # `_proc` 已于 2026-10-17 收敛（ServiceMixin._launch_server 是唯一写入口，见 16 §16），
+    # 从白名单撤下 —— 它要是再被第二个 Mixin 写，这一段就该重新报红。
     "_stop_flag":  "chat / img / vid 三链共用的停止旗标（配 _img_gen / _vid_gen 世代号防串）",
     "_cloud_tid":  "img / vid 共用当前云端任务 id（异步任务取消 / 取回要用）",
     "_cloud_pid":  "img / vid 共用云端任务归属 provider（取消时按它取密钥）",
