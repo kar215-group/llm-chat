@@ -89,6 +89,12 @@ class App(ChatMixin, ImageGenMixin, VideoGenMixin, ServiceMixin, ModelsMixin, Se
         self._settings_win = None
         self._settings_nav = None       # 设置窗口的左栏（输出栏的按钮要 jump 到某个叶子）
         self._settings_sp = None        # 设置窗口的滚动内容区（页面栈；"当前页"判据走它）
+        # 设置窗口的区块标题表 {(page, section): 标题frame}（2026-10-18 设置页引导用：
+        # 每步滚动定位 / 遮罩挖洞都从这份表查，open_settings 每次开窗重挂）
+        self._settings_heads = {}
+        # 设置窗口的"整行锚点"表 {(page, 名字): (标签, 控件, 摘要格)}（同日）：区块标题
+        # 只圈得住页头，"提示词优化"那一步要圈住整行（坑 302），open_settings 同样重挂
+        self._settings_anchors = {}
         # 设置窗"原地重建"的几何串（W 2026-10-09）：切主题 / 切用户模式会 destroy +
         # 重开设置窗，destroy 前把当前 `winfo_geometry()` 存这里，open_settings 消费
         # 它原地恢复（不消费就会跳回默认位置）。消费后清空 —— 用户手动关掉再开
@@ -488,10 +494,14 @@ class App(ChatMixin, ImageGenMixin, VideoGenMixin, ServiceMixin, ModelsMixin, Se
         # 之类跳转还会往一个已销毁的页面栈上select（is_current 判据会拿到野对象）
         self._settings_sp = None
         self._settings_nav = None       # 同理：左栏句柄一起清（R-37）
+        self._settings_heads = {}       # 同理：区块标题表里全是已销毁控件（R-37）
+        self._settings_anchors = {}     # 同理：整行锚点表（坑 302）
         if self._guide is not None and self._guide.alive():
             self._guide.close()        # 不叠两层：重看 = 关掉旧的再开
 
-        def _done():
+        def _done(ask_codesign=True):
+            """主引导收尾（走完 / 跳过共用）。ask_codesign=False 只有一条用途：走完
+            接设置页引导那一路 —— 签名询问是异步回弹，推迟到设置页引导收尾再问。"""
             self.cfg["guide_done"] = APP_VERSION
             try:
                 config.save_config(self.cfg)
@@ -507,10 +517,26 @@ class App(ChatMixin, ImageGenMixin, VideoGenMixin, ServiceMixin, ModelsMixin, Se
                 pass
             # 遮罩引导收尾之后才问签名（W 2026-10-05）：首跑那次两个浮层叠在一起很糟，
             # 所以首跑不在启动流程里问，留到这儿。内部有"只跑一次 + 问过就不再问"的判据。
-            try:
-                self._codesign_offer_start()
-            except Exception:
-                pass
+            # 注意它是异步回弹（后台线程 → 队列，几百毫秒后弹窗），所以主引导走完要接
+            # 设置页引导那一路得把询问再往后推（见 _finish_main），否则又叠两层。
+            if ask_codesign:
+                try:
+                    self._codesign_offer_start()
+                except Exception:
+                    pass
+
+        def _finish_main():
+            """走完主引导（区别于中途跳过）：收尾后自动接设置页引导（2026-10-18 W 需求，
+            最后一步本来就在教学「设置」入口）。签名询问**推迟到设置页引导收尾**再问：
+            _codesign_offer_start 是异步回弹，在这儿问的话几百毫秒后询问弹窗会叠在
+            设置引导遮罩上 —— 正是 W 2026-10-05 说的"两个浮层叠在一起很糟"。"""
+            _done(ask_codesign=False)
+            if not self._start_settings_guide():
+                # 设置页引导没接上（开窗/建遮罩失败）：签名询问别跟着丢，这里补问
+                try:
+                    self._codesign_offer_start()
+                except Exception:
+                    pass
 
         try:
             self.root.lift()           # 主窗口先回到最前，遮罩才有东西可盖
@@ -519,7 +545,8 @@ class App(ChatMixin, ImageGenMixin, VideoGenMixin, ServiceMixin, ModelsMixin, Se
             self._guide_active = True
             self._render_status(self._server_alive_flag, self._server_ready_flag)
             self._guide = widgets.SpotlightGuide(self.root, guide.steps(self, missing),
-                                                 on_close=_done)
+                                                 on_close=_done,
+                                                 on_finish=_finish_main)
         except Exception as e:
             self._guide = None
             self._guide_active = False
@@ -527,6 +554,104 @@ class App(ChatMixin, ImageGenMixin, VideoGenMixin, ServiceMixin, ModelsMixin, Se
             messagebox.showwarning(texts.APP_GUIDE_TITLE,
                                    texts.APP_GUIDE_OPEN_FAIL
                                    % (type(e).__name__, e))
+
+    def _start_settings_guide(self):
+        """主引导走完自动接的「设置页逛一圈」（2026-10-18 W 需求）。
+
+        规格：主引导最后一步教学「设置」入口，走完（跳过不算）即打开设置窗，遮罩改挂
+        在设置窗上逐步走（步骤表在 `guide.settings_steps`）：模型文件与引擎 → 引擎
+        管理 → 服务商与密钥 → 远程访问 → 通用（提示词优化）→ 关于与诊断。只按普通
+        用户视角讲，高级模式独有的页不进引导；高级用户重看也会接这段（多逛一遍无妨）。
+
+        挖洞目标 = 设置窗里懒建的区块：SpotlightGuide 换步前回调 on_step(i)，
+        这里 `nav.select(key)`（选中即建整页区块）、再从 `self._settings_heads` 查
+        区块标题填 target；步骤表带 `anchor` 的（目前只有「提示词优化」那一步）改从
+        `self._settings_anchors` 查"整行三个格子"，圈住标签 + 下拉 + 摘要而不是页
+        标题（坑 302）。两处都查不到就保持 None —— 遮罩对 None 不挖洞、面板居中，不指错。
+        start_guide 开头已把关着的设置窗清干净，这里 open_settings 必然新开。
+
+        返回 bool（接上没有）：没接上时调用方（_finish_main）要补问签名 —— 那一路
+        把签名询问推迟到设置页引导收尾，引导没开起来就不能把询问也弄丢。
+        首跑的签名询问就由这儿的 _sdone 收口（W 2026-10-05「别叠两个浮层」的口径：
+        主引导 → 设置页引导 → 签名询问，一层收完再起一层）。
+        """
+        if self._guide is not None and self._guide.alive():
+            return False
+        steps = guide.settings_steps()
+        if not steps:
+            return False
+        try:
+            self.open_settings()
+        except Exception:
+            return False                 # 设置窗都开不起来就别硬放引导
+        win = self._settings_win
+        if win is None or not win.winfo_exists():
+            return False
+
+        def _on_step(i):
+            st = steps[i]
+            try:
+                self._settings_nav.select(st["key"])
+            except Exception:
+                pass
+            tgt = None
+            ank = st.get("anchor")
+            if ank:
+                cells = (getattr(self, "_settings_anchors", {}) or {}).get(tuple(ank))
+                tgt = [w for w in (cells or ()) if w is not None] or None
+            # 锚点查不到就退回区块标题：绝不让洞指空处（同主引导"指不到就判红"的纪律）。
+            # 标题 frame 是 `fill="x"` 的整条通栏，照它画洞就是横贯全窗的一条亮带（W
+            # 2026-10-18：圈得细一点）—— 退到标题**文字**那一个 Label，洞就贴着字走。
+            if tgt is None:
+                head = self._settings_heads.get((st["page"], st["section"]))
+                kids = []
+                try:
+                    kids = [w for w in head.winfo_children()
+                            if w.winfo_class() in ("Label", "TLabel")]
+                except Exception:
+                    kids = []
+                tgt = kids[0] if kids else head
+            st["target"] = tgt
+            # 左栏路标（2026-10-18 W 需求：让用户知道这个功能在导航栏哪儿）。
+            # 必须在上面的 nav.select 之后取：select 可能整栏重建，行控件要取新的那份；
+            # nav_hide 的叶子（eng）由 SideNav.row_of 交回它的替身行（模型文件与引擎）。
+            try:
+                st["nav_target"] = self._settings_nav.row_of(st["key"])
+            except Exception:
+                st["nav_target"] = None
+
+        def _sdone():
+            self._guide = None          # 轻量收尾：不动顶栏显隐（目标全在设置窗里）
+            # 首跑的签名询问推迟到这儿（主引导走完那一路）：started 判据保证只问一次，
+            # 跳过设置引导 / 走完设置引导都会经过这里，重看引导的非首跑则天然跳过
+            try:
+                self._codesign_offer_start()
+            except Exception:
+                pass
+
+        try:
+            # **必须 update()（真事件循环一圈），不能只 update_idletasks**（坑 299）：
+            # 设置窗刚设完 geometry 还没真正映射，遮罩首帧量洞时 head（走 X 实时
+            # 查询）与 host（Tk 内部记账）拿到不同时刻的坐标，交叉相减能差出一整个
+            # 窗口位移（实测 242px）—— 洞就画在窗口左上角一片空白处。update() 让
+            # 窗口真正落位，首帧即准；换步后的迟到变化由 SpotlightGuide 的
+            # _arm_late_sync 兜底重画。
+            win.update()
+            # on_finish 与 on_close 都指 _sdone：走完 / 跳过都做"清句柄 + 补问签名"
+            #（设置窗不关，用户接着用；坑 298：on_finish 不传的话走完时收尾是空）
+            self._guide = widgets.SpotlightGuide(win, steps, on_step=_on_step,
+                                                 on_close=_sdone, on_finish=_sdone)
+            win.lift()
+            # **抬完设置窗必须再把遮罩抬回来**（坑 301）：open_settings 不抢前台
+            # （GetForegroundWindow 还是主窗），遮罩建完后这一记 win.lift() 就把设置窗
+            # 压到它上面了 —— 用户看到的是"没有遮罩，点一下设置页才遮上"。
+            # _app_is_foreground 已改成"本程序的任一顶层窗在前台"（不再只认 host 自己），
+            # 这里再当场抬一次，让第一帧就在最上面，不靠 60ms 兜底。
+            self._guide._ensure_top()
+        except Exception:
+            self._guide = None
+            return False
+        return True
 
     # ---- 布局 ----
     def _build_topbar(self):
@@ -1693,6 +1818,8 @@ class App(ChatMixin, ImageGenMixin, VideoGenMixin, ServiceMixin, ModelsMixin, Se
             self._settings_win = None
             self._settings_sp = None
             self._settings_nav = None   # 三个句柄一起清：留着已销毁的 nav 是野引用（R-37）
+            self._settings_heads = {}   # 同理：区块标题表（open_settings 重挂新的）
+            self._settings_anchors = {}  # 同理：整行锚点表（坑 302）
             self.open_settings(jump=cur)
 
     def _switch_theme(self, mode):

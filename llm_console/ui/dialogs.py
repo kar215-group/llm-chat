@@ -266,9 +266,13 @@ class ModelPickDialog(tk.Toplevel):
     result = 勾中的 key 列表（确定；可能为空）/ None（取消、Esc、点叉）。
     默认全选：老用法"点一下全重算"仍只要两次点击（打开 → 确定），但手调过的模型
     可以在这一步取消勾选 —— 原来那条路只有"全清重算"，代价比收益大（16 §14）。
+    ok_text：主按钮文案（默认通用「确定」）。调用方动作是"重算"这类具体动作时
+    **必须**传（2026-10-18 W：通用「确定」放在一堆勾选框下面，用户找不到"计算
+    从哪儿开始"——右下角的动作按钮要写明动作）。
     """
 
-    def __init__(self, parent, rows, *, title=None, hint="", note="", summary=""):
+    def __init__(self, parent, rows, *, title=None, hint="", note="", summary="",
+                 ok_text=None):
         super().__init__(parent)
         self.title(title or texts.MDL_RECALC_PICK)
         theme.style_toplevel(self)
@@ -282,6 +286,35 @@ class ModelPickDialog(tk.Toplevel):
             ttk.Label(self, text=hint, style="Note.TLabel",
                       wraplength=520, justify="left").pack(
                 padx=24, pady=(0, 4), anchor="w")
+
+        # 动作条 / 摘要 / 说明**先按 side="bottom" 入列**，可滚的勾选区最后入列并 expand
+        # —— pack 按入列顺序分配空间，先入列的保住自己（2026-10-18 修，坑 300）：
+        # 原来勾选区先入列、按钮最后入列，窗口高度一被限住，按钮条整条被压成 9px 高，
+        # 界面上就是"没有确定 / 计算按钮"。现在窗口再矮也只压滚动区（它本来就能滚）。
+        box = ttk.Frame(self)
+        box.pack(side="bottom", padx=24, pady=(10, 16), anchor="e")
+        # 右下角动作条（2026-10-18 W：主按钮写明动作 + 整条靠右，别再居中混在
+        # 勾选框下面让人找不到"从哪儿开始计算"）
+        theme.button(box, text=(ok_text or texts.BTN_OK), width=12,
+                     bootstyle="primary-outline",
+                     command=self._ok).pack(side="left", padx=4)
+        theme.button(box, text=texts.BTN_CANCEL, width=10,
+                     command=self._cancel).pack(side="left", padx=4)
+
+        tools = ttk.Frame(self)
+        tools.pack(side="bottom", padx=24, pady=(10, 0), fill="x")
+        theme.button(tools, text=texts.BTN_SELECT_ALL, width=8,
+                     command=lambda: self._set_all(True)).pack(side="left")
+        theme.button(tools, text=texts.BTN_SELECT_NONE, width=8,
+                     command=lambda: self._set_all(False)).pack(side="left", padx=(6, 0))
+
+        if note:
+            ttk.Label(self, text=note, style="Muted.TLabel",
+                      wraplength=520, justify="left").pack(
+                side="bottom", padx=24, pady=(2, 0), anchor="w")
+        if summary:
+            ttk.Label(self, text=summary, style="Dim.TLabel").pack(
+                side="bottom", padx=24, anchor="w")
 
         # 勾选区：模型可能几十个，必须能滚（Tk 的滚轮只在指针进入可视区时生效）
         wrap = ttk.Frame(self)
@@ -310,33 +343,14 @@ class ModelPickDialog(tk.Toplevel):
                           font=("Microsoft YaHei UI", 8)).pack(
                     anchor="w", padx=(30, 2), pady=(0, 2))
 
-        if summary:
-            ttk.Label(self, text=summary, style="Dim.TLabel").pack(
-                padx=24, anchor="w")
-        if note:
-            ttk.Label(self, text=note, style="Muted.TLabel",
-                      wraplength=520, justify="left").pack(
-                padx=24, pady=(2, 0), anchor="w")
-
-        tools = ttk.Frame(self)
-        tools.pack(padx=24, pady=(10, 0), fill="x")
-        theme.button(tools, text=texts.BTN_SELECT_ALL, width=8,
-                     command=lambda: self._set_all(True)).pack(side="left")
-        theme.button(tools, text=texts.BTN_SELECT_NONE, width=8,
-                     command=lambda: self._set_all(False)).pack(side="left", padx=(6, 0))
-        box = ttk.Frame(self)
-        box.pack(padx=24, pady=(10, 16))
-        theme.button(box, text=texts.BTN_OK, width=12, bootstyle="primary-outline",
-                     command=self._ok).pack(side="left", padx=4)
-        theme.button(box, text=texts.BTN_CANCEL, width=10,
-                     command=self._cancel).pack(side="left", padx=4)
-
         self.bind("<Escape>", lambda e: self._cancel())
         self.protocol("WM_DELETE_WINDOW", self._cancel)
         self.transient(parent)
         self.update_idletasks()
         rw = max(560, self.winfo_reqwidth())
-        rh = min(560, self.winfo_reqheight())
+        # 高度上限按**屏幕可用高度**算，不再写死 560（坑 300）：200% 缩放下标题 + 提示 +
+        # 说明 + 摘要 + 动作条本身就要 585，写死 560 正好把动作条切掉。
+        rh = min(self.winfo_reqheight(), max(320, self.winfo_screenheight() - 120))
         x = parent.winfo_rootx() + max(0, (parent.winfo_width() - rw) // 2)
         y = parent.winfo_rooty() + max(0, (parent.winfo_height() - rh) // 3)
         self.geometry("%dx%d+%d+%d" % (rw, rh, x, y))
@@ -377,6 +391,25 @@ class SessionPickDialog(tk.Toplevel):
         ttk.Label(self, text=texts.DLG_HIST_HINT, style="Note.TLabel",
                   wraplength=560, justify="left").pack(padx=24, pady=(0, 8), anchor="w")
 
+        # 动作条与底部两行（统计 / 记录目录）**先按 side="bottom" 入列**，可滚的列表
+        # 最后入列并 expand（坑 300 同族）：pack 按入列顺序分配空间，先入列的保住自己。
+        # 原来动作条最后入列、窗口高度又被写死 560 夹住（200% 缩放下内容要 595），
+        # 结果「载入 / 取消」被压成 1px 高 —— 界面上就是"这扇窗没有按钮"。
+        box = ttk.Frame(self)
+        box.pack(side="bottom", padx=24, pady=(12, 16))
+        theme.button(box, text=texts.DLG_HIST_LOAD, width=10,
+                     bootstyle="primary-outline", command=self._ok).pack(side="left", padx=4)
+        if folder:
+            theme.button(box, text=texts.DLG_HIST_OPEN_DIR, width=14,
+                         command=lambda: self._open_dir(folder)).pack(side="left", padx=4)
+        theme.button(box, text=texts.BTN_CANCEL, width=10,
+                     command=self._cancel).pack(side="left", padx=4)
+
+        if folder:
+            ttk.Label(self, text=texts.DLG_HIST_FOLDER % folder,
+                      style="Dim.TLabel", wraplength=560, justify="left").pack(
+                side="bottom", padx=24, pady=(2, 0), anchor="w")
+
         if not self._rows:
             # 空态：不摆一个空列表框（那看起来像加载失败），直接说"还没有 + 存哪儿"
             ttk.Label(self, text=texts.DLG_HIST_EMPTY,
@@ -385,6 +418,8 @@ class SessionPickDialog(tk.Toplevel):
                       style="Dim.TLabel", wraplength=560, justify="left").pack(
                 padx=24, pady=(0, 10), anchor="w")
         else:
+            ttk.Label(self, text=texts.DLG_HIST_COUNT % len(self._rows),
+                      style="Dim.TLabel").pack(side="bottom", padx=24, anchor="w")
             wrap = ttk.Frame(self)
             wrap.pack(padx=24, pady=(2, 8), fill="both", expand=True)
             self.listbox = tk.Listbox(
@@ -406,30 +441,14 @@ class SessionPickDialog(tk.Toplevel):
             self.listbox.selection_set(0)        # 默认选最近那份：多数时候就是要它
             self.listbox.bind("<Double-Button-1>", lambda e: self._ok())
             widgets.attach_wheel(self.listbox)
-            ttk.Label(self, text=texts.DLG_HIST_COUNT % len(self._rows),
-                      style="Dim.TLabel").pack(padx=24, anchor="w")
-
-        if folder:
-            ttk.Label(self, text=texts.DLG_HIST_FOLDER % folder,
-                      style="Dim.TLabel", wraplength=560, justify="left").pack(
-                padx=24, pady=(2, 0), anchor="w")
-
-        box = ttk.Frame(self)
-        box.pack(padx=24, pady=(12, 16))
-        theme.button(box, text=texts.DLG_HIST_LOAD, width=10,
-                     bootstyle="primary-outline", command=self._ok).pack(side="left", padx=4)
-        if folder:
-            theme.button(box, text=texts.DLG_HIST_OPEN_DIR, width=14,
-                         command=lambda: self._open_dir(folder)).pack(side="left", padx=4)
-        theme.button(box, text=texts.BTN_CANCEL, width=10,
-                     command=self._cancel).pack(side="left", padx=4)
 
         self.bind("<Escape>", lambda e: self._cancel())
         self.protocol("WM_DELETE_WINDOW", self._cancel)
         self.transient(parent)
         self.update_idletasks()
         rw = max(620, self.winfo_reqwidth())
-        rh = min(560, self.winfo_reqheight())
+        # 上限按屏幕可用高度算，不写死 560（坑 300）：窗口再矮也只压列表，动作条留着
+        rh = min(self.winfo_reqheight(), max(320, self.winfo_screenheight() - 120))
         x = parent.winfo_rootx() + max(0, (parent.winfo_width() - rw) // 2)
         y = parent.winfo_rooty() + max(0, (parent.winfo_height() - rh) // 3)
         self.geometry("%dx%d+%d+%d" % (rw, rh, x, y))

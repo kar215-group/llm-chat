@@ -146,7 +146,8 @@ NAV_SPEC = [
      "title": "通用",
      "help": "提示词优化（输入框右上角的星星）用哪个文本模型三路重写。\n"
              "加入第一个文本模型时会自动选上，之后以你的选择为准；本地模型经本机"
-             "服务转发（当前已加载的那个），云端文本模型逐个可选。"},
+             "服务转发（当前已加载的那个），云端文本模型逐个可选。\n"
+             "这一页还有：允许锁屏运行、历史对话、重看新手引导与高分屏清晰度。"},
     {"key": "appearance", "label": "外观", "page": "appearance", "section": "appearance",
      "title": "外观",
      "help": "界面主题（跟随系统 / 浅色 / 深色）与颜色的入口。\n"
@@ -155,7 +156,7 @@ NAV_SPEC = [
              "的部分 —— 两者互相独立，改完选中文本立刻变、按钮下次启动生效。"},
     {"key": "about", "label": "关于与诊断", "page": "about", "section": "about",
      "title": "关于与诊断",
-     "help": "这一页认亲：这是什么软件、什么版本、怎么重看新手引导。\n"
+     "help": "这一页认亲：这是什么软件、什么版本。\n"
              "「诊断」按钮开次级页面，那里回答另一件事：我这份是哪来的（下载的 exe 还是"
              "源码跑的）、这台机器上缺什么 —— 运行方式、程序与配置与密钥的位置、运行库、"
              "错误日志、一键诊断都在那一页。\n"
@@ -597,6 +598,12 @@ class SettingsMixin:
         enter_hooks = {}
         bodies = {}                # (page, section) → 区块内容 frame（已建则复用）
         heads = {}                 # (page, section) → 区块标题 frame（锚点）
+        anchors = {}               # (page, 名字) → 整行三格（引导圈整行用，见 _row）
+        # 挂到 App 上给设置页引导用（2026-10-18）：每步要滚到哪个区块标题、遮罩挖洞
+        # 挖谁，都在这份表里查（见 ui/guide.py settings_steps）。每次开窗 /
+        # 切用户模式重建窗口时，都会在 open_settings 里重新指到新窗那份 heads。
+        self._settings_heads = heads
+        self._settings_anchors = anchors
         page_frames = {}           # page → 页面 frame
         state = {"page": None, "section": None, "leaf": None}
         # 用户模式（2026-10-07 W 定）：普通（默认）/ 高级两套导航与两套页面裁剪，
@@ -742,7 +749,7 @@ class SettingsMixin:
             return deco
 
         def _row(parent, rows, label, widget, desc, hint="", lw=14, fold=None,
-                 hint_var=None):
+                 hint_var=None, anchor=None):
             """一行：标签（旁边挂 "?"）/ 控件 / 短摘要。
 
             v39 起灰色长说明**不再内联**（它把窗口撑到 1020 宽、还把版面切成三段），
@@ -760,6 +767,10 @@ class SettingsMixin:
 
             `hint_var`（坑 183）：给一个 StringVar 时摘要格挂 textvariable，行外可以
             换文案与样式（分辨率框的红字警示走这条路）；返回摘要格的句柄，没有则 None。
+
+            `anchor`（坑 302/306）：给一个 (page, 名字) 元组时，把这一行的**标签与控件**
+            两格登记进 `self._settings_anchors`，供设置页引导圈"整行"（摘要格不登记：
+            它只是解释文字，圈进来洞会宽出一截）。
             """
             i = rows["i"]
             rows["i"] += 1
@@ -797,11 +808,17 @@ class SettingsMixin:
                 # 登记后立刻按当前状态摆 / 收 —— 不能无条件 grid_remove：
                 # 会话里展开过的组，重开设置窗时本来就该是展开的
                 _render_fold(fold)
+            if anchor is not None:
+                # 设置页引导的"整行锚点"（2026-10-18，坑 302/306）：**只登记标签与控件
+                # 两格**，摘要（hint）不算目标 —— 它只是解释文字，圈进来会把洞一直撑到
+                # 页面右缘（实测多 120px），洞就不"贴"着要讲的东西了（W：圈得细一点）。
+                anchors[tuple(anchor)] = (lab, widget)
             return cell
 
         def row(parent, rows, label, widget, desc, hint="", lw=14, fold=None,
-                hint_var=None):
-            return _row(parent, rows, label, widget, desc, hint, lw, fold, hint_var)
+                hint_var=None, anchor=None):
+            return _row(parent, rows, label, widget, desc, hint, lw, fold, hint_var,
+                        anchor)
 
         def ent(parent, rows, key, label, desc, width=8, var=None, trace=None, hint="",
                 lw=14, fold=None, hint_var=None):
@@ -3354,7 +3371,8 @@ class SettingsMixin:
                               width=30, values=labels)
             row(tgen, rgen, texts.POPT_WINDOW_TITLE, comb,
                 texts.SET_GEN_A4,
-                hint=texts.SET_GEN_N, lw=8)
+                hint=texts.SET_GEN_N, lw=8,
+                anchor=("general", "prompt_opt"))   # 引导圈整行（坑 302）
             if not items:
                 i = rgen["i"]
                 rgen["i"] += 1
@@ -3407,6 +3425,46 @@ class SettingsMixin:
             # （普通模式逐页右界那条断言当场抓到）——"记录在哪儿"放进 "?" 里说
             row(tgen, rgen, texts.SET_GEN_N_5, hb, texts.SET_GEN_A2, lw=8)
 
+            # ---- 新手引导（2026-10-18 从关于页迁来，W 定）----
+            # 只是颗按钮不是参数：不进 `_save_general`。点了会先关设置窗再放主引导
+            # （遮罩挖的洞对准主窗口控件，隔着一个设置窗放就指不对，见 start_guide）。
+            gb = ttk.Frame(tgen)
+            theme.button(gb, text=texts.APP_GUIDE_TITLE, width=14,
+                         command=self.start_guide).pack(side="left")
+            row(tgen, rgen, texts.SET_GEN_N_7, gb, texts.SET_GEN_A3, lw=8)
+
+            # ---- 高分屏清晰度（DPI 感知，2026-10-18 从关于页迁来，W 定）----
+            # **冷切换**：Windows 只允许一个进程标一次，窗口一建出来就改不动了，
+            # 所以这里只能"记住 + 下次生效"，不能骗用户说立刻变。
+            # 判据用 diagnose 现查，而不是照抄配置：配置里写的是"想要哪档"，
+            # 真正跑起来是哪档只有 Windows 知道（清单里带了 dpiAware 时配置就不作数）。
+            from ..core import diagnose as _diag
+            now = _diag._dpi_aware()
+            dpi_var = tk.BooleanVar(value=bool(int(self.cfg.get("dpi_aware", 1) or 0)))
+            dpi_status = tk.StringVar(value="")
+            df = ttk.Frame(tgen)
+            i = rgen["i"]
+            rgen["i"] += 1
+            df.grid(row=i, column=0, columnspan=3, sticky="w", pady=(8, 0))
+
+            def set_dpi():
+                self.cfg["dpi_aware"] = 1 if dpi_var.get() else 0
+                save_config(self.cfg)
+                dpi_status.set(texts.SET_ABOUT_A0_4)
+
+            theme.check(df, text=texts.SET_ABOUT_N_3, variable=dpi_var,
+                            command=set_dpi).pack(side="left")
+            ttk.Label(df, text=texts.SET_ABOUT_CAT_7 % (texts.SET_ABOUT_N_4 if now else texts.SET_ABOUT_N_5),
+                      style="Hint.TLabel", font=("Microsoft YaHei UI", 9)).pack(
+                side="left", padx=(10, 0))
+            if not simple:      # 普通用户模式不放 "?"（2026-10-07 W 定）
+                widgets.HelpDot(df, texts.SET_ABOUT_A1_2).pack(side="left", padx=(6, 0))
+            ttk.Label(tgen, textvariable=dpi_status, style="Hint.TLabel",
+                      wraplength=360, justify="left",
+                      font=("Microsoft YaHei UI", 9)).grid(
+                row=rgen["i"], column=0, columnspan=3, sticky="w")
+            rgen["i"] += 1
+
             def _save_general():
                 # 读控件当前文本而不是 gvar：ttk.Combobox.set() 不保证回写
                 # textvariable（Tk 的历史语义），readonly 态下 comb.get() 才是真值
@@ -3427,11 +3485,12 @@ class SettingsMixin:
             """远程访问页（2026-10-11，99 K1；普通 + 高级模式都有；同日 W 三条
             精简：主页面只留状态 + **** + 两个次级窗入口）。
 
-            启用开关（拨上即生效）+ 端口（改动走底部「保存」）+ HTTPS 开关
-            （**仅高级模式**，普通模式恒 https 不出选项）+ 状态行（只说
-            "已启动"，**不显示网址**）+「网址 ****」→ 次级窗（一个 IPv6 +
-            一个 IPv4，各带「复制」+ 证书指纹）+ 配对码（6 位一次性、5 分钟
-            有效，W 拍板的设备配对制）+「已配对设备」次级窗（可吊销）。
+            启用开关（拨上即生效）+ 端口（改动走底部「保存」；**仅高级模式**，普通模式
+            恒用默认 8443 不出选项）+ HTTPS 开关（**仅高级模式**，普通模式恒 https
+            不出选项）+ 状态行（只说"已启动"，**不显示网址**）+「网址 ****」→
+            次级窗（一个 IPv6 + 一个 IPv4，各带「复制」+ 证书指纹）+ 配对码
+            （6 位一次性、5 分钟有效，W 拍板的设备配对制）+「已配对设备」次级窗
+            （可吊销）。
             布尔键与重启逻辑在本页钩子里（`_apply_settings` 不管布尔键 ——
             与 keepawake 两键同款约定）。
             """
@@ -3548,10 +3607,14 @@ class SettingsMixin:
                 widgets.HelpDot(trem,
                                 texts.SET_REMOTE_A1).grid(
                     row=i, column=2, sticky="w", pady=(4, 4))
-            ent(trem, rrem, "remote_port", texts.SET_REMOTE_A3,
-                texts.SET_REMOTE_A4,
-                width=7)
+            # 端口 / HTTPS / 对外开放范围只在高级模式（端口 2026-10-18 W 定从普通模式
+            # 移除——普通用户按默认 8443 就能用，端口被占这种小概率冲突的排障入口收进
+            # 高级档）。普通模式不建 ent ⇒ v 里没有 remote_port 键：`_cur_remote_vals`
+            # 回落读 cfg、STR_KEYS 通用回写 `if k in v` 不成立 ⇒ 默认值与快照逻辑都不受影响。
             if not simple:
+                ent(trem, rrem, "remote_port", texts.SET_REMOTE_A3,
+                    texts.SET_REMOTE_A4,
+                    width=7)
                 i = rrem["i"]
                 rrem["i"] += 1
                 theme.check(trem, text=texts.SET_REMOTE_N_4,
@@ -4121,12 +4184,11 @@ class SettingsMixin:
 
         @section("about", "about")
         def _t9(t9, r9):
-            """关于页：标志 + 名字 + 版本，加两个入口（新手引导 / 诊断）。
+            """关于页：标志 + 名字 + 版本 + 诊断入口。
 
             技术信息（运行方式、各种路径、运行库、错误日志）与诊断都搬进了
-            `SubWindowMixin.open_diag_window` 那个次级页面：这一页只回答"这是什么软件"，
-            而且要保证**首屏就能点到「新手引导」**—— 它原来排在七行路径 + 一个大结果框
-            下面，第一次用的人翻不到（W 2026-10-01 提的）。
+            `SubWindowMixin.open_diag_window` 那个次级页面：这一页只回答"这是什么软件"。
+            「新手引导」与「高分屏清晰度」2026-10-18 迁到「通用」页（W 定）。
             """
             head = tk.Frame(t9, background=widgets.default_bg())
             i = r9["i"]
@@ -4179,8 +4241,9 @@ class SettingsMixin:
             i = r9["i"]
             r9["i"] += 1
             bf.grid(row=i, column=0, columnspan=3, sticky="w", pady=(0, 6))
-            theme.button(bf, text=texts.APP_GUIDE_TITLE, width=12,
-                       command=self.start_guide).pack(side="left", padx=(0, 6))
+            # 「新手引导」按钮 2026-10-18 迁到「通用」页（W 定）：它是"功能入口"不是
+            # "认亲信息"，与提示词优化 / 锁屏运行那些常驻开关住一起更顺；这一页只留
+            # 「诊断」。首屏可点性的原要求（W 2026-10-01）由「诊断」继续扛。
             theme.button(bf, text=texts.DIAGW_TITLE, width=12,
                        command=self.open_diag_window).pack(side="left")
 
@@ -4368,34 +4431,9 @@ class SettingsMixin:
 
             enter_hooks.setdefault("about", []).append(_enter_about)
 
-            # 高分屏清晰度（DPI 感知）。**冷切换**：Windows 只允许一个进程标一次，
-            # 窗口一建出来就改不动了，所以这里只能"记住 + 下次生效"，不能骗用户说立刻变。
-            # 判据用 diagnose 现查，而不是照抄配置：配置里写的是"想要哪档"，
-            # 真正跑起来是哪档只有 Windows 知道（清单里带了 dpiAware 时配置就不作数）。
-            from ..core import diagnose as _diag
-            now = _diag._dpi_aware()
-            dpi_var = tk.BooleanVar(value=bool(int(self.cfg.get("dpi_aware", 1) or 0)))
-            dpi_status = tk.StringVar(value="")
-            df = ttk.Frame(t9)
-            i = r9["i"]
-            r9["i"] += 1
-            df.grid(row=i, column=0, columnspan=3, sticky="w", pady=(8, 0))
-
-            def set_dpi():
-                self.cfg["dpi_aware"] = 1 if dpi_var.get() else 0
-                save_config(self.cfg)
-                dpi_status.set(texts.SET_ABOUT_A0_4)
-
-            theme.check(df, text=texts.SET_ABOUT_N_3, variable=dpi_var,
-                            command=set_dpi).pack(side="left")
-            ttk.Label(df, text=texts.SET_ABOUT_CAT_7 % (texts.SET_ABOUT_N_4 if now else texts.SET_ABOUT_N_5),
-                      style="Hint.TLabel", font=("Microsoft YaHei UI", 9)).pack(
-                side="left", padx=(10, 0))
-            if not simple:      # 普通用户模式不放 "?"（2026-10-07 W 定）
-                widgets.HelpDot(df, texts.SET_ABOUT_A1_2).pack(side="left", padx=(6, 0))
-            ttk.Label(t9, textvariable=dpi_status, style="Hint.TLabel", wraplength=360,
-                      justify="left", font=("Microsoft YaHei UI", 9)).grid(
-                row=r9["i"], column=0, columnspan=3, sticky="w")
+            # 「高分屏清晰度」（DPI 感知）开关 2026-10-18 迁到「通用」页（W 定），
+            # 与「新手引导」按钮同一批：它也是"用不用某功能"的常驻开关，不是认亲信息。
+            # 实现原样搬走（冷切换判据 / 状态回显 / "?" 都不动），见 _tgen。
 
         # ---- 开发者页（隐藏入口：关于页版本号连点 5 次，见 `DEV_NAV_ITEM`）----
         @section("dev", "dev")
@@ -5578,7 +5616,7 @@ class SettingsMixin:
                 do_restart = bool(messagebox.askyesno(
                     texts.SET_GLOBAL_SAVE_A0_2,
                     texts.SET_GLOBAL_SAVE_A1))
-            win.destroy()
+            _settings_teardown()         # 走统一出口：句柄摘干净再关（含 X 关闭同款清理）
             if do_restart:
                 self.restart_server()
 
@@ -5605,11 +5643,27 @@ class SettingsMixin:
             win.destroy()
             self._settings_win = None
             self._settings_sp = None
+            self._settings_heads = {}    # 旧窗的区块标题全是死控件，别让引导查到
+            self._settings_anchors = {}  # 同理：整行锚点（坑 302）
             self.open_settings(jump=cur if cur in keys else "")
+
+        # 窗口关闭的统一出口（2026-10-18 加）：把挂在 App 上的三个窗内句柄摘干净，
+        # 否则下次 open_settings 的"已存在就 lift"分支会拿着已销毁窗口的死引用不放
+        # （winfo_exists 兜得住，但 _settings_heads 里全是死控件，引导再开就指错对象）。
+        def _settings_teardown():
+            self._settings_win = None
+            self._settings_nav = None
+            self._settings_sp = None
+            self._settings_heads = {}
+            self._settings_anchors = {}
+            win.destroy()
+
+        win.protocol("WM_DELETE_WINDOW", _settings_teardown)
 
         theme.button(bar, text=texts.SET_OPEN_SETTINGS_N if simple else texts.SET_OPEN_SETTINGS_N_2,
                    command=_switch_mode).pack(side="left", padx=(2, 0))
-        theme.button(bar, text=texts.SET_OPEN_SETTINGS_N_3, command=win.destroy).pack(side="right", padx=4)
+        theme.button(bar, text=texts.SET_OPEN_SETTINGS_N_3,
+                     command=_settings_teardown).pack(side="right", padx=4)
         # 旧版第二个按钮「保存并重启服务」已删（坑 281）：保存时若服务在跑会自己问一句
         theme.button(bar, text=texts.SET_OPEN_SETTINGS_N_4, command=_global_save).pack(side="right")
 

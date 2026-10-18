@@ -169,11 +169,19 @@ class SpotlightGuide(object):
     ACCENT = "#8fd4ff"
     PANEL_W = 420
     GAP = 14                        # 洞与面板之间的距离
+    # 整窗不透明度（甲档，`-alpha`）：0.80 时说明面板压到正文上会透出底下的字
+    # （面板与遮罩同属一扇窗，透明度是窗级的），W 2026-10-18 定再压暗一档到 0.83。
+    ALPHA = 0.83
 
-    def __init__(self, host, steps, on_close=None):
+    def __init__(self, host, steps, on_close=None, on_step=None, on_finish=None):
         self.host = host
         self.steps = [s for s in steps if s]
         self.on_close = on_close
+        # on_step(i)：**换步之前**给宿主一个机会（2026-10-18 设置页引导）：切页 /
+        # 把这一步的 target 换成刚建出来的区块控件 —— 区块懒建，构造遮罩时可能还不存在。
+        # on_finish()：走完最后一步（区别于「跳过引导」/中途 close）时替代 on_close。
+        self.on_step = on_step
+        self.on_finish = on_finish
         self.i = 0
         self._sync_id = None
         self._top_id = None                   # 层序自查那个 60ms 定时器的句柄（close 要取消）
@@ -208,8 +216,10 @@ class SpotlightGuide(object):
         # 遮罩自己被改大小之后还要再同步一次：主窗口的 <Configure> 到得比遮罩几何生效**早**，
         # 那一刻量到的画布尺寸还是旧的（W 报的"没完全遮住"）
         self.win.bind("<Configure>", self._on_overlay_resize, add="+")
-        # 深色区域被点到时把遮罩抬回最前
-        self.cv.bind("<Button-1>", lambda e: self._ensure_top(), add="+")
+        # 遮罩（深色区域）被点到时：**把整个应用拉回前台**，再把遮罩抬回最前。
+        # 只抬遮罩是不够的（W 2026-10-18 报）：别的程序在前台时点一下，遮罩浮上来、
+        # 可宿主窗（主窗 / 设置窗）还压在那个程序后面，看到的是"一块黑幕盖在别人窗口上"。
+        self.cv.bind("<Button-1>", self._on_overlay_click, add="+")
         # `overrideredirect` 的窗口不归窗口管理器管：用户点一下别的程序再回来，Windows 会把
         # 主窗口抬到遮罩**上面**，遮罩就沉到界面底下了（W 报的第一条，坑 120）。
         # 为什么是"即时事件 + 60ms 兜底"而不是别的两种做法（都实测过）：
@@ -225,11 +235,51 @@ class SpotlightGuide(object):
         self._bind_host("<Map>", self._on_activate)
         self._wrap_cache = {}               # 正文折行按步号缓存（拖动尺寸时不必反复重算）
         self._pw_cached = None
+        self._late_id = None                # 换步后迟到自校的定时器（见 _arm_late_sync）
         self._itm = {}                      # 画布图形按类别池化复用（见 _pool）
         self._place()
+        self._fire_on_step()
         self._render()
         self._ensure_top()
         self._keep_top()
+
+    def _fire_on_step(self):
+        """通知宿主"第 i 步要上屏了"（切页 / 填 target 的机会）。异常不许打断渲染。"""
+        cb = self.on_step
+        if cb is None:
+            return
+        try:
+            cb(self.i)
+        except Exception:
+            pass
+        finally:
+            self._arm_late_sync()
+
+    def _arm_late_sync(self, _e=None):
+        """换步后 180ms 再自校重画一次（2026-10-18 设置页引导错位，坑 299）。
+
+        切页懒建的区块 / enter hook 的引擎扫描回填 / 下拉刷新，都会在遮罩渲染
+        **之后**改页面高度，目标控件随之挪位 —— 而遮罩只盯 host 的 <Configure>
+        （窗口级事件），内容级的变化它永远不知道，洞就停在老地方。这里不猜
+        "谁会改布局"，一律 180ms 后按最新几何重画一遍：重画幂等、几何没变时
+        画出来与原来一致（一次 ~14ms，用户无感）。
+        """
+        if self.closed or not self.win.winfo_exists():
+            return
+        try:
+            if self._late_id:
+                self.win.after_cancel(self._late_id)
+        except Exception:
+            pass
+        try:
+            self._late_id = self.win.after(180, self._late_sync)
+        except Exception:
+            self._late_id = None
+
+    def _late_sync(self):
+        self._late_id = None
+        if not self.closed and self.alive():
+            self._render()
 
     def _bind_host(self, seq, fn):
         """在主窗上挂一个回调，并把 funcid 记进 `_host_binds`（close 时逐个解掉）。"""
@@ -248,14 +298,71 @@ class SpotlightGuide(object):
     def _on_activate(self, _e=None):
         self._ensure_top()
 
+    def _on_overlay_click(self, _e=None):
+        """点遮罩 = 把**整个应用**拉回前台（宿主窗 + 遮罩），不只是遮罩自己浮上来。
+
+        别的程序在前台时点遮罩，原来只 `lift()` 遮罩：遮罩跳上来了，可设置窗 / 主窗
+        还在那个程序后面，看上去就是"一块黑幕盖在别人的窗口上"。这里按顺序做三件：
+        宿主窗回来 → 抢前台焦点 → 遮罩再压到它上面。
+        """
+        self._raise_host()
+        self._ensure_top()
+
+    def _raise_host(self):
+        """把宿主窗（主窗 / 设置窗）抬回前台；最小化时先还原。"""
+        try:
+            self.host.deiconify()
+        except Exception:
+            pass
+        try:
+            self.host.lift()
+        except Exception:
+            pass
+        try:
+            self.host.focus_force()
+        except Exception:
+            pass
+        try:
+            import ctypes
+            user32 = ctypes.windll.user32
+            hwnd = user32.GetAncestor(self.host.winfo_id(), 2)
+            if hwnd:
+                user32.SetForegroundWindow(hwnd)
+        except Exception:
+            pass
+
     def _app_is_foreground(self):
-        """本应用现在是不是在前台。是才抬升 —— 否则遮罩会浮在别的程序上面挡路。"""
+        """本应用现在是不是在前台。是才抬升 —— 否则遮罩会浮在别的程序上面挡路。
+
+        **"前台"按本程序的顶层窗判，不按 host 那一个窗口判**（2026-10-18 修，坑 301）：
+        设置页引导的 host 是设置窗，而它从主引导接过来时前台窗口还是主窗
+        （`open_settings` 不抢前台）。只比 host 会让 `_keep_top` 一直判"不在前台"，
+        遮罩就沉在设置窗底下，用户非得点一下设置窗它才冒出来。
+
+        只认**本 Tk 解释器里的顶层窗**（主窗 / 设置窗 / 各次级窗），不认"整个进程"：
+        原生 messagebox 虽然也是本进程的窗口，却不是 Tk 顶层窗 —— 按进程判的话，询问
+        框弹出来 60ms 后遮罩会盖到它上面，正好挡住人要点的按钮。
+        """
         try:
             import ctypes
             user32 = ctypes.windll.user32
             ga_root = 2
-            hwnd = user32.GetAncestor(self.host.winfo_id(), ga_root)
-            return bool(hwnd) and user32.GetForegroundWindow() == hwnd
+            fg = user32.GetForegroundWindow()
+            if not fg:
+                return True
+            root = self.host._root()
+            tops = [root]
+            try:
+                tops += list(root.winfo_children())
+            except Exception:
+                pass
+            for w in tops:
+                try:
+                    if user32.GetAncestor(w.winfo_id(), ga_root) == fg:
+                        return True
+                except Exception:
+                    continue
+            return False
         except Exception:
             return True               # 问不出来就照旧抬升：宁可多抬，别把遮罩丢到下面去
 
@@ -283,7 +390,7 @@ class SpotlightGuide(object):
     def _try_punch(self):
         try:
             self.win.attributes("-transparentcolor", self.KEY)
-            self.win.attributes("-alpha", 0.80)
+            self.win.attributes("-alpha", self.ALPHA)
             return True
         except tk.TclError:
             try:
@@ -299,7 +406,9 @@ class SpotlightGuide(object):
         except Exception:
             return False
 
-    def close(self):
+    def close(self, finished=False):
+        """收掉遮罩。`finished=True` = 走完了最后一步（收尾回调走 on_finish，
+        与「跳过引导」走的 on_close 区分开 —— 设置页引导只在"走完"时接着放）。"""
         if self.closed:
             return
         self.closed = True
@@ -311,6 +420,11 @@ class SpotlightGuide(object):
         try:
             if getattr(self, "_top_id", None):
                 self.host.after_cancel(self._top_id)      # 层序自查的 60ms 定时器要停掉
+        except Exception:
+            pass
+        try:
+            if getattr(self, "_late_id", None):
+                self.win.after_cancel(self._late_id)      # 迟到自校定时器同款要停掉（坑 11）
         except Exception:
             pass
         # 主窗上那四个绑定必须逐个解掉：漏解的话每重看一次引导就永久留下四个指向
@@ -325,8 +439,8 @@ class SpotlightGuide(object):
             self.win.destroy()
         except Exception:
             pass
-        cb = self.on_close
-        self.on_close = None
+        cb = self.on_finish if finished else self.on_close
+        self.on_close = self.on_finish = None
         if cb:
             try:
                 cb()
@@ -381,20 +495,89 @@ class SpotlightGuide(object):
 
     # ---- 画 ----
     def _hole(self, step):
-        """目标控件在遮罩坐标系里的矩形；没有目标（欢迎页）返回 None。"""
-        w = step.get("target")
+        """目标控件在遮罩坐标系里的矩形；没有目标（欢迎页）返回 None。
+
+        `target` 允许是**一组控件**（设置页「提示词优化」那一步要圈住"标签 + 下拉 +
+        摘要"整行，见坑 302）：取并集再统一留 pad。组里某个控件还没映射就只用映射到
+        的那几个；一个都不行 = 不挖洞（面板居中，绝不指错地方）。
+        """
+        tgt = step.get("target")
+        if tgt is None:
+            return None
+        group = list(tgt) if isinstance(tgt, (list, tuple)) else [tgt]
+        try:
+            pad = int(step.get("pad", 4))
+            box = None
+            for w in group:
+                if not w.winfo_exists() or not w.winfo_ismapped():
+                    continue
+                x0 = w.winfo_rootx() - self.host.winfo_rootx()
+                y0 = w.winfo_rooty() - self.host.winfo_rooty()
+                r = (x0, y0, x0 + w.winfo_width(), y0 + w.winfo_height())
+                if box is None:
+                    box = list(r)
+                else:
+                    box[0], box[1] = min(box[0], r[0]), min(box[1], r[1])
+                    box[2], box[3] = max(box[2], r[2]), max(box[3], r[3])
+            if box is None:
+                return None
+            return (box[0] - pad, box[1] - pad, box[2] + pad, box[3] + pad)
+        except Exception:
+            return None
+
+    def _nav_rect(self, step):
+        """左栏路标那一行在遮罩坐标系里的矩形；没有就 None（主引导没有这一步）。
+
+        `nav_target` 由调用方（设置页引导）填成 SideNav 的行控件（`SideNav.row_of`）。
+        """
+        w = step.get("nav_target")
         if w is None:
             return None
         try:
             if not w.winfo_exists() or not w.winfo_ismapped():
                 return None
-            pad = int(step.get("pad", 6))
-            return (w.winfo_rootx() - self.host.winfo_rootx() - pad,
-                    w.winfo_rooty() - self.host.winfo_rooty() - pad,
-                    w.winfo_rootx() - self.host.winfo_rootx() + w.winfo_width() + pad,
-                    w.winfo_rooty() - self.host.winfo_rooty() + w.winfo_height() + pad)
+            pad = int(step.get("nav_pad", 2))
+            x0 = w.winfo_rootx() - self.host.winfo_rootx()
+            y0 = w.winfo_rooty() - self.host.winfo_rooty()
+            return (x0 - pad, y0 - pad,
+                    x0 + w.winfo_width() + pad, y0 + w.winfo_height() + pad)
         except Exception:
             return None
+
+    def _draw_nav_chip(self, step, nav, W, H):
+        """在左栏那一行上画一块"选中态"高亮，告诉用户这个功能在导航栏哪儿。
+
+        为什么是**画一块**而不是像内容区那样打个洞（坑 304）：洞是穿透的，点一下
+        就会切页，聚光灯却还停在刚离开的那一页上（内容和左栏当场对不上）。画上去的
+        高亮块只当路标、点不动，页面上已经挖开的洞该能点的照样能点。
+
+        颜色 / 字体 / 文字全取自导航行自己 —— `nav.select(key)` 刚把这一项选中，
+        读到的就是"选中态"那套配色，所以这块看起来就是左栏里亮着的那一项。
+        """
+        cv = self.cv
+        lbl = step.get("nav_target")
+        if nav is None or lbl is None:
+            self._pool("navbox", 0, None)
+            self._pool("navtxt", 0, None)
+            return
+        x0, y0, x1, y1 = [int(v) for v in nav]
+        x0, y0 = max(0, x0), max(0, y0)
+        x1, y1 = min(W, x1), min(H, y1)
+        try:
+            fill = lbl.cget("background") or "#2f2f40"
+            fg = lbl.cget("foreground") or "#ffffff"
+            fnt = lbl.cget("font")
+            padx = int(lbl.cget("padx") or 0)
+            text = str(lbl.cget("text") or "")
+        except Exception:
+            fill, fg, fnt, padx, text = "#2f2f40", "#ffffff", _FONT, 20, ""
+        box = self._pool("navbox", 1, lambda: cv.create_rectangle(
+            0, 0, 0, 0, outline=self.ACCENT, width=1))
+        cv.coords(box[0], x0, y0, x1, y1)
+        cv.itemconfig(box[0], fill=fill, outline=self.ACCENT)
+        tip = self._pool("navtxt", 1, lambda: cv.create_text(0, 0, anchor="w"))
+        cv.coords(tip[0], x0 + padx, (y0 + y1) // 2)
+        cv.itemconfig(tip[0], text=text, fill=fg, font=fnt)
 
     def _render(self):
         """重画一遍遮罩。
@@ -447,12 +630,22 @@ class SpotlightGuide(object):
                           outline=(self.KEY if (anchor and self.punch and i == 1)
                                    else self.DARK))
         ring = self._pool("ring", 1 if anchor else 0, lambda: cv.create_rectangle(
-            0, 0, 0, 0, outline=self.ACCENT, width=2))
+            0, 0, 0, 0, outline=self.ACCENT, width=1))
         if ring:
             cv.coords(ring[0], x0, y0, x1, y1)
 
+        # 左栏路标（只有设置页引导那几步带 `nav_target`，见 _draw_nav_chip）
+        nav = self._nav_rect(step)
+        self._draw_nav_chip(step, nav, W, H)
+
         body = step.get("body") or []
+        # 面板宽度：默认 420；设置页那几步（`panel="right"`，2026-10-18 W）优先把文案
+        # 放到**窗口右边缘那片空处**（不压正文），只是把 x 钉到右边、宽度不缩 ——
+        # 缩宽度会让 20 字的句子折出"孤字"（实测 248px 宽时每行断成 2 行）。
         pw = min(self.PANEL_W, max(220, W - 24))
+        right_px = None
+        if (step.get("panel") or "") == "right" and anchor and W - 12 - pw >= 240:
+            right_px = W - pw - 12
         fnt = self._font()
         inner = max(60, pw - 32)
         # 折行结果按"步号"缓存：`_wrap_px` 是逐字符 measure（48 字一行实测 3.4ms），
@@ -465,7 +658,12 @@ class SpotlightGuide(object):
             wrapped = [(t, _wrap_px(t, fnt, inner)) for t in body]
             self._wrap_cache[self.i] = wrapped
         ph = 14 + (26 if step.get("title") else 0) + sum(len(ls) for _t, ls in wrapped) * 18 + 8
-        if anchor:
+        if right_px is not None:
+            px = right_px
+            # 面板贴右边缘时：洞也在右边（宽行）就摆到洞**下方**，否则与洞同高 ——
+            # 两种情况都不压住洞，也不会横在左边那一列标签 / 按钮上。
+            py = anchor[1] if right_px >= anchor[2] else anchor[3] + self.GAP
+        elif anchor:
             px = min(max(8, anchor[0]), max(8, W - pw - 8))
             py = anchor[3] + self.GAP
             if py + ph > H - 8:
@@ -497,9 +695,10 @@ class SpotlightGuide(object):
         # 自检要拿这两块矩形判断"洞真的包住了目标""面板没溢出窗口"（留句柄比让它去猜
         # canvas 里的图形可靠，同坑 78 给区块留 _sec_id 的做法）
         self.hole_rect = hole
+        self.nav_rect = nav
         self.panel_rect = (px, py, px + pw, py + ph)
         self._last_size = (W, H)              # 与 _geom 同一口径（都是"请求的尺寸"）
-        self._nav(px, py, pw, ph, W, H)
+        self._nav(px, py, pw, ph, W, H, right_align=right_px is not None)
         self._rendering = False
 
     def _font(self):
@@ -523,12 +722,14 @@ class SpotlightGuide(object):
             cv.delete(ids.pop())
         return ids
 
-    def _nav(self, px, py, pw, ph, W, H):
-        """跳过 / 上一步 / 下一步 + 第几步：**贴着面板下方居中，控件只建一次**。
+    def _nav(self, px, py, pw, ph, W, H, right_align=False):
+        """跳过 / 上一步 / 下一步 + 第几步：**贴着面板下方，控件只建一次**。
 
         两件事都在这里：
           · 位置：原来钉在窗口底边，而面板经常一路铺到底 → 按钮条正好压住最后一行
             介绍（W 报的）。改成跟着面板走：下面放得下就放下面，放不下挪到面板上方。
+            `right_align=True`（设置页引导：面板在窗口右侧）时按钮条**贴面板右边缘**，
+            不再居中 —— 居中会横在正文中间压住按钮行（W 2026-10-18 截图里那条）。
           · 开销：原来每次重画都新建一套按钮再销毁旧的，而拖一次窗口会重画几十次 ——
             建控件（开发机实测每个约 1.3ms）全砸在拖动路径上，这就是"遮罩跟不上手"的
             另一半。现在按钮条建一次，之后只 `place` 挪位置 + 改文字。
@@ -566,7 +767,12 @@ class SpotlightGuide(object):
             y = max(6, py - bar_h - 6)
         if y + bar_h > H - 6:
             y = max(6, H - bar_h - 6)
-        b.place(relx=0.5, y=y, height=bar_h, anchor="n")
+        # 两种模式都要把 relx / x **成套**写：`place()` 只改传进来的选项，上一次留的
+        # relx=0.5 会跟新的 x 相加（实测按钮条被推到窗口外 1728px）。
+        if right_align:
+            b.place(relx=0, x=px + pw, y=y, height=bar_h, anchor="ne")
+        else:
+            b.place(x=0, relx=0.5, y=y, height=bar_h, anchor="n")
 
     def _drop_nav(self):
         bar = getattr(self, "_nav_bar", None)
@@ -578,15 +784,17 @@ class SpotlightGuide(object):
             pass
 
     def _next(self):
-        if self.i >= len(self.steps) - 1:
-            self.close()
+        if self.i >= len(self.steps) - 1:    # 最后一步：走完收尾（走 on_finish）
+            self.close(finished=True)
             return
         self.i += 1
+        self._fire_on_step()
         self._render()               # 按钮条是常驻的，_nav 自己改文字与"上一步"的显隐
 
     def _prev(self):
         if self.i:
             self.i -= 1
+            self._fire_on_step()
             self._render()
 
 
@@ -963,6 +1171,15 @@ class SideNav(object):
         """
         it = self.find(key)
         return (it or {}).get("nav_hide") or key
+
+    def row_of(self, key):
+        """这一项在左栏对应的**行控件**；没建出来就 None。
+
+        设置页引导要用它"指一下导航栏"（`SpotlightGuide` 的 `nav_target`）：
+        只取它的矩形与选中态配色，不参与点击。`nav_hide` 的叶子（引擎管理 / 生视频）
+        交回它的替身行 —— 与高亮同一套口径（见 `_hl_key`）。
+        """
+        return self._rows_of.get(self._hl_key(key))
 
     # ---- 对外 ----
     def select(self, key):

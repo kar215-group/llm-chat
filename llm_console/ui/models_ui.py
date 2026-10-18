@@ -898,6 +898,10 @@ class ModelsMixin:
         理由：那扇窗的语义是"哪些模型进菜单"（勾选 = 显示/隐藏），把"重算参数"混进去
         会让同一排复选框一会儿改可见性、一会儿清记录；而记录本来就住在这页（补全 /
         重算 / 模型来源三个按钮并排），谁清谁算在同一屏里说得清。
+
+        parent 必须是真控件（坑：App 不是 Tk 控件，`tk.Toplevel(App实例)` 当场
+        AttributeError 'tk'，被 Tk 回调吞掉后症状就是"点了没反应"）——按钮在设置窗
+        里，host 优先设置窗（弹窗居中于设置窗），与 `_open_model_sources` 同款。
         """
         _d, chat, _img = scan_models(self.cfg)
         if not chat:
@@ -915,11 +919,19 @@ class ModelsMixin:
             else:
                 sub = texts.MDL_RECALC_PICK_NO
             rows.append((b, display_name(self.cfg, p), sub))
+        host = self.root
+        w = getattr(self, "_settings_win", None)
+        try:
+            if w is not None and w.winfo_exists():
+                host = w
+        except Exception:
+            host = self.root
         dlg = dialogs.ModelPickDialog(
-            self, rows, title=texts.MDL_RECALC_PICK,
+            host, rows, title=texts.MDL_RECALC_PICK,
             hint=texts.MDL_RECALC_PICK_HINT, note=texts.MDL_RECALC_PICK_NOTE,
-            summary=texts.MDL_RECALC_PICK_SUM % len(rows))
-        self.wait_window(dlg)
+            summary=texts.MDL_RECALC_PICK_SUM % len(rows),
+            ok_text=texts.MDL_RECALC_OK)   # 主按钮写明动作（2026-10-18 W）：不是通用「确定」
+        dlg.wait_window()               # 等它自己（App 没有 wait_window）
         picked = dlg.result
         if picked is None:
             return                       # 取消：一个字段都不动
