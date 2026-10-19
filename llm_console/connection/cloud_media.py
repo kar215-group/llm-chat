@@ -926,7 +926,13 @@ def image_body(model, prompt, size="", negative="", seed=-1, extra=None,
         # negative_prompt 这一家没有 → 不发明字段，交给 extra 显式带（同 MiniMax 那条）
         body.update(extra or {})
         return body
-    content = [{"image": u} for u in refs[:REF_LIMITS[PROTOCOL_ALIYUN]["max"]]]
+    # 底图重绘只送第一张（2026-10-19 云端对齐轮）：`-i` 在本地是单值入口，
+    # `plan_ref_images()` 也只认第一张；云端如果照旧把 3 张全塞进 content[]，
+    # 就成了"界面说只发一张、实际发三张"（而且多图编辑的语义没实测）。
+    # 主体参考仍按各家上限送（阿里云 3 张）。
+    _ref_max = 1 if str(ref_mode or "").strip() == "edit" \
+        else REF_LIMITS[PROTOCOL_ALIYUN]["max"]
+    content = [{"image": u} for u in refs[:_ref_max]]
     content.append({"text": prompt})
     body = {"model": model, "input": {"messages": [{"role": "user", "content": content}]}}
     p = {}

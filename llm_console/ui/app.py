@@ -200,6 +200,11 @@ class App(ChatMixin, ImageGenMixin, VideoGenMixin, ServiceMixin, ModelsMixin, Se
         self._cloud_vid = False      # 本次生视频走的是云端
         self._cloud_tid = ""         # 当前云端任务 id（异步任务取消 / 取回要用）
         self._cloud_pid = ""         # 当前云端任务属于哪个 provider（取消时要按它取密钥）
+        # 云端同步生图在等回包时没有 stdout 可解析，进度行会停在“0s”。这一对字段让
+        # `_status_loop` 每 3 秒把等待秒数刷上去（2026-10-19 云端对齐轮 B）；任何
+        # 非“云端生图中”的进度事件（轮询 / 下载）一到就关掉，不覆盖真实阶段。
+        self._cloud_wait_on = False
+        self._cloud_wait_t0 = 0.0
         self._img_tail = []          # 生图侧的输出末尾：以前只有视频链路有，失败就只剩一个退出码（坑 40）
         self._img_log = ""           # 本次云端生图的请求/回包日志路径
         self._img_extra_paths = []   # 一次回多张时，除主图之外的落地路径
@@ -1179,6 +1184,8 @@ class App(ChatMixin, ImageGenMixin, VideoGenMixin, ServiceMixin, ModelsMixin, Se
             self._img_batch_i, self._img_batch_n = 0, 1
             self._img_log = ""
             self._t0 = time.time()
+            self._cloud_wait_t0 = self._t0
+            self._cloud_wait_on = True
         else:
             self._vid_gen += 1
             mark, q, gen = "vidprog%d" % self._vid_gen, self._vid_q, self._vid_gen
@@ -1202,6 +1209,7 @@ class App(ChatMixin, ImageGenMixin, VideoGenMixin, ServiceMixin, ModelsMixin, Se
         """任务收尾时清掉"这一次是云端"的标记，免得本地链路误用云端取消分支。"""
         if kind == "image":
             self._cloud_img = False
+            self._cloud_wait_on = False
         else:
             self._cloud_vid = False
         self._cloud_tid = ""
@@ -1465,6 +1473,12 @@ class App(ChatMixin, ImageGenMixin, VideoGenMixin, ServiceMixin, ModelsMixin, Se
                 if rb != was_remote_busy:
                     was_remote_busy = rb
                     self._sq.put(("remote_busy", rb))
+                # 云端同步生图等待回包：没有 stdout 事件，只能在这里按秒补进度
+                # （2026-10-19 B；任何真实阶段事件一到 _poll 就把 _cloud_wait_on 关掉）
+                if self._cloud_wait_on and self._cloud_img and self._img_busy:
+                    _el = max(0, int(time.time() - self._cloud_wait_t0))
+                    self._ui_q.put(lambda _el=_el: self._update_img_progress_line(
+                        texts.CME_CAT_23 % _el))
             except Exception as e:
                 # 判活现在是**硬抛**语义（进程表快照失败时不静默退回 tasklist，见
                 # core/server._probe_snapshot）：这里必须接住并说出来，否则常驻线程直接
@@ -1590,6 +1604,11 @@ class App(ChatMixin, ImageGenMixin, VideoGenMixin, ServiceMixin, ModelsMixin, Se
                     # 云端生图：进度来自轮询/下载，没有 stdout 可解析，直接给整行文案
                     if not stale and not (self._stop_flag is not None
                                           and self._stop_flag.is_set()):
+                        # 到了真实阶段（异步轮询 / 下载）就关掉等待计时，别让 3 秒
+                        # 一次的计时器把“出图 1/3，下载中…”覆盖回“云端生图中…”
+                        if not str(item[1]).startswith(
+                                texts.CME_CAT_23.split("%")[0]):
+                            self._cloud_wait_on = False
                         self._update_img_progress_line(item[1])
                 elif item[0] == "exit":
                     self._handle_img_exit(item[1], item[2])   # exit 事件带 (rc, gen)

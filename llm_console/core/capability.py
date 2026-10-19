@@ -230,10 +230,23 @@ def default_ref_mode(cfg, family=None):
 
     **配置里的值只在模型支持时才生效** —— 换个不支持那一档的模型就自动回默认，
     不会出现"设置页选了这一档、发出去却按另一种语义跑"。
+
+    云端还有一个额外事实：各家的默认档不同（阿里云 `edit`、MiniMax `subject`），
+    配置里那个全局默认值（出厂 `edit`）在 MiniMax 上根本不支持。回退时不能直接
+    落 `DEFAULT_MODE`，否则界面会显示一个置灰的"底图重绘"、发送侧却按"主体参考"
+    发（2026-10-19 云端对齐轮修）。所以云端先问 `providers.ref_image_mode()`。
+    本地回到 `DEFAULT_MODE` 与改造前逐字一致（生图各族两档都支持，`edit` 恒可用）。
     """
+    from . import providers
+    modes = resolve_modes(cfg, family)
     want = str((cfg or {}).get("img_ref_mode", "") or "").strip()
-    if want in MODES and resolve_modes(cfg, family).get(want, {}).get("ok"):
+    if want in MODES and modes.get(want, {}).get("ok"):
         return want
+    if providers.is_cloud(cfg):
+        p = providers.current_provider(cfg) or {}
+        d = providers.ref_image_mode(p)
+        if d in MODES and modes.get(d, {}).get("ok"):
+            return d
     return DEFAULT_MODE
 
 

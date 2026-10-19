@@ -568,6 +568,7 @@ REF_MODE_SUBJECT = "subject"
 # 形状约定：
 #   img_size_style   尺寸写法：W*H / WxH / ratio_or_wh / tier_or_wh
 #   img_negative     True=请求体已带该字段；False=官方页确认没有；None=未核实
+#   img_seed         True=请求体已带 seed；False=官方页确认没有（设置页按它置灰）
 #   img_n            (最小, 最大) 张数；两家固定 1 的别写成 (1,9)
 #   vid_res          分辨率白名单（空 = 自由文本；界面上仍是**可编辑**下拉）
 #   vid_duration     (最小, 最大) 秒；空 = 未核实
@@ -584,6 +585,7 @@ PROTOCOL_PROFILE = {
         "label": "阿里云",
         "img_size_style": "W*H",          # 11 §3.3 parameters.size = 宽*高
         "img_negative": True,             # parameters.negative_prompt
+        "img_seed": True,                 # parameters.seed
         "img_n": (1, 1),                  # plus/max 系列固定 1（11 §3.3）
         "vid_res_by_model": {
             "wan2.7": ("720P", "1080P"),      # 11 §5③
@@ -608,6 +610,7 @@ PROTOCOL_PROFILE = {
         "label": "MiniMax",
         "img_size_style": "ratio_or_wh",  # 比例 8 档，或 width/height 两个整数
         "img_negative": False,            # 官方 ImageGenerationReq 没有该字段
+        "img_seed": True,                 # 官方 ImageGenerationReq 有 seed
         "img_n": (1, 9),                  # image-01 n=1~9（11 §5⑤）
         "vid_res_by_model": {"h3-max": ("480P", "768P"),
                              "h3": ("768P", "2K")},
@@ -633,6 +636,7 @@ PROTOCOL_PROFILE = {
         "label": "智谱",
         "img_size_style": "WxH",
         "img_negative": None,             # 官方页未核实；当前请求体也不带
+        "img_seed": False,                # 官方页请求体没有 seed（11 §5④）
         "img_n": (1, 1),
         "vid_duration_by_model": {"cogvideox-3": (5, 10)},   # 官方页 5/10 秒
         "vid_duration": (),
@@ -647,6 +651,7 @@ PROTOCOL_PROFILE = {
         "label": "华为",
         "img_size_style": "WxH",
         "img_negative": None,             # 官方页未核实
+        "img_seed": True,                 # 请求体已带 seed（cloud_media.image_body）
         "img_n": (1, 1),
         "vid_duration": (),
         "vid_ratio": (),                  # 用 size 宽高
@@ -660,6 +665,7 @@ PROTOCOL_PROFILE = {
         "label": "火山方舟",
         "img_size_style": "tier_or_wh",   # 1K/1.5K/2K（大写 K）或 宽x高
         "img_negative": False,            # 11 §3.9：官方页没有 negative_prompt
+        "img_seed": True,                 # 请求体已带 seed（cloud_media.image_body）
         "img_n": (1, 1),
         "vid_res": ("480p", "720p", "1080p", "4k"),      # 只收小写，11 §3.9
         "vid_duration": (2, 30),          # 按模型 [4,30]/[4,15]/[2,12]，模型名未核实

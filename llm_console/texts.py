@@ -297,6 +297,9 @@ IMG_REF_GENERIC_CLOUD = "参考图"        # 云端回显的兜底
 IMG_DROP_PAREN = "（%s）"
 IMG_STRENGTH = "　重绘强度 %s（%s）%s%s\n"  # 值、依据、遮罩小尾巴、指路提示
 IMG_MASK_TAG = "｜遮罩：只重绘涂抹区"
+# 云端没有重绘强度这个入参（只有本地 sd-cli 的 --strength）；强度行收起时用这一句
+# 指路，别摆一个拧不动的旋钮（W 2026-10-19 批）。
+IMG_STRENGTH_CLOUD = "云端没有重绘强度，要按强度改图请切回本地〔生图〕模型。"
 
 # 云端生图
 IMG_CLOUD_TAG = "云端生图"             # 对话流消息前缀里的业务名
@@ -1238,7 +1241,7 @@ SET_PROV_CAT_18 = '已知 %d 个模型。'  # settings.py L1921（CAT）
 SET_PROV_L2 = '模型类型'  # settings.py L1965（L2）
 SET_PROV_CAT_19 = '（已勾 %d）'  # settings.py L2170（CAT）
 SET_PROV_A0_10 = '正在向接口取模型清单…'  # settings.py L2263（A0）
-SET_PROV_CAT_20 = '没能取到清单：%s\n也可以在下面填模型名，用「测试连接并加入」验证。'  # settings.py L2277（CAT）
+SET_PROV_CAT_20 = '没能取到清单：%s\n也可以在上面填模型名，用「测试连接」验证。'  # settings.py L2277（CAT）
 SET_PROV_CAT_21 = '接口给了 %d 个模型（新增 %d 个）。'  # settings.py L2289（CAT）
 SET_PROV_A0_11 = '先输入模型名。'  # settings.py L2301（A0）
 SET_PROV_A0_12 = '这个名字看着像媒体模型，对话接口验不了它（原生媒体接口一试就计费）'  # settings.py L2304（A0）
@@ -1247,7 +1250,7 @@ SET_PROV_CAT_23 = '✅ %s：%s（已勾上）'  # settings.py L2322（CAT）
 SET_PROV_CAT_24 = '表里已经有「%s」了。'  # settings.py L2337（CAT）
 SET_PROV_CAT_25 = '；注意：这一家还没接%s的原生接口，发送前会被拦下'  # settings.py L2345（CAT）
 SET_PROV_CAT_26 = '%s已按名字加入「%s」（能力：%s；觉得不对在那一行右边改）%s。'  # settings.py L2347（CAT）
-SET_PROV_N_9 = '测试连接并加入'  # settings.py L2365（N）
+SET_PROV_N_9 = '测试连接'  # settings.py L2365（N）
 SET_PROV_N_10 = '直接加入'  # settings.py L2367（N）
 SET_PROV_N_11 = '刷新清单'  # settings.py L2372（N）
 SET_PROV_N_12 = '验证图片输入'  # settings.py L2374（N）
@@ -1362,7 +1365,7 @@ SET_CMEDIA_N_6 = '建议 15'  # settings.py L2869（N）
 SET_CMEDIA_N_7 = '当前云端模型：%s（%s）'
 SET_CMEDIA_N_8 = '还没选云端%s模型；档位按服务商默认发送。'
 SET_CMEDIA_N_9 = '这一家的生图没有负向词参数。'
-SET_CMEDIA_N_10 = '这一家是否支持负向词未核实。'
+SET_CMEDIA_N_10 = '这一家是否支持负向词未核实，未核实前不发送。'
 SET_CMEDIA_N_12 = '%d~%d 秒'
 SET_CMEDIA_A3_10 = '等待上限'  # settings.py L2870（A3）
 SET_CMEDIA_A4_14 = '分钟。超了就不再干等，任务留在台账里，重启后对话开头会给「取回」按钮。'  # settings.py L2871（A4）

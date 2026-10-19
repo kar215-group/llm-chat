@@ -31,7 +31,7 @@ CONFIG_PATH = os.path.join(APP_DIR, "gui_config.json")
 
 # 版本号：发版时改这一处（--selfcheck / --version 会打印它）。
 # GitHub Release 的 tag 要与它一致（tag 去掉开头的 v），Actions 工作流会做一致性校验。
-APP_VERSION = "2.0.2"
+APP_VERSION = "2.0.3"
 
 CFG_VERSION = 3
 
@@ -234,6 +234,7 @@ DEFAULT_CONFIG = {
     "cloud_img_size": "1024x1024",     # 界面按「宽x高」填（* ，× 等分隔符也认，自动归一成
                                        # x，见 core.media.parse_size），发出去前按各家写法换算
     "cloud_img_negative": "",
+    "cloud_img_seed": -1,              # -1 = 随机；云端生图自己的种子（不再偷偷沿用 img_seed）
     "cloud_video_resolution": "",      # 空 = 不传该参数，用服务端默认（各家档位不一样）
     "cloud_video_duration": 5,         # 秒；各家允许区间不同，超范围会被服务端点名报错
     "cloud_video_ratio": "",           # 空 = 不传（图生视频时比例常由素材决定）
@@ -295,7 +296,7 @@ INT_KEYS = ("port", "ngl", "ctx", "threads", "reasoning_budget",
             "vid_seed",
             "cloud_video_duration", "cloud_poll_seconds", "cloud_wait_minutes",
             "cloud_image_wait_seconds", "cloud_submit_timeout",
-            "cloud_download_seconds", "cloud_keep_days")
+            "cloud_download_seconds", "cloud_keep_days", "cloud_img_seed")
 
 FLOAT_KEYS = ("temperature", "top_p", "repeat_penalty", "vram_gb", "ram_gb",
               "img_cfg", "img_strength", "vid_cfg", "img_guide_scale",

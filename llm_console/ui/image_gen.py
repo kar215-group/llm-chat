@@ -236,17 +236,27 @@ class ImageGenMixin:
         refs = [p for p in (list(ref_imgs or []) + ([ref_img] if ref_img else []))
                 if p and os.path.isfile(p)]
         mode = ""                       # 纯文生图不带档位，省得回显与日志里出现无意义的它
+        used, drop_note = [], ""
         if refs:
             # 档位：选了且这家支持就用，否则回这家默认档（各家默认档不同，别替它决定）
             mode = str(ref_mode or "").strip()
             if not (mode and providers.supports_ref_mode(provider, mode)):
                 mode = providers.ref_image_mode(provider)
-            for p in refs:
+            # 云端也走同一份取舍（2026-10-19 云端对齐轮）：底图重绘只送第一张，
+            # 主体参考全送（张数上限仍由 ref_images_error 在发送前拦）。原来云端
+            # 把 3 张全塞进 content[]，而附件条状态行按本地规则说"只认一张"——
+            # 说的和发的对不上（坑 101/102 同族）。
+            used, _dropped, drop_note = plan_ref_images(refs, mode)
+            for p in used:
                 self._append_image(p, max_w=320)
+            _name = os.path.basename(used[0])
+            if len(used) > 1:
+                _name += texts.IMG_ETC
+            if drop_note:
+                _name += "，" + drop_note
             self._append(texts.IMG_CLOUD_REF_LINE
-                         % (capability.MODE_LABEL.get(mode, texts.IMG_REF_GENERIC_CLOUD), len(refs),
-                            os.path.basename(refs[0])
-                            + (texts.IMG_ETC if len(refs) > 1 else "")), "meta")
+                         % (capability.MODE_LABEL.get(mode, texts.IMG_REF_GENERIC_CLOUD),
+                            len(used), _name), "meta")
         # 费用就近打在对话流里，而且必须打在**提交之前**：生图不弹二次确认（同步、
         # 单次几分钱，每次都问只会让人不看内容按回车），但那不等于不告诉。
         # 单价按模型查，没填就明说"以账单为准"，不编数字。
@@ -256,10 +266,16 @@ class ImageGenMixin:
                                                    0, model, count=count)), "meta")
         # 档案说这家没有负向词（MiniMax / 方舟）时，界面上那格已置灰；老配置里
         # 还留着的值不该静默消失，提交前明说一次"已忽略"（C2-1：填了不生效要说话）。
+        # 智谱/华为是"未核实"（None）而不是"没有"：这一档同样不发送，说法必须分开
+        # （把"不知道"说成"没有"是 11 §7 ⑦ 明令禁止的）。
         _pf = providers.profile_for(provider, model)
-        if str(self.cfg.get("cloud_img_negative", "") or "").strip() \
-                and _pf.get("img_negative") is False:
+        _neg = str(self.cfg.get("cloud_img_negative", "") or "").strip()
+        _neg_cap = _pf.get("img_negative")
+        if _neg and _neg_cap is False:
             self._append(texts.IMG_CLOUD_IGNORE_NEG, "meta")
+        elif _neg and _neg_cap is None:
+            self._append("[%s] %s\n" % (texts.IMG_CLOUD_TAG, texts.SET_CMEDIA_N_10),
+                         "meta")
         gen, q, stop = self._cloud_begin("image")
         self._cloud_pid = str(provider["id"])
         self._img_out = out
@@ -269,7 +285,7 @@ class ImageGenMixin:
                                           provider.get("name") or ""))
         threading.Thread(target=self._cloud_image_worker,
                          args=(provider, model, prompt, out, gen, q, stop),
-                         kwargs={"refs": refs, "ref_mode": mode, "n": count},
+                         kwargs={"refs": used, "ref_mode": mode, "n": count},
                          daemon=True).start()
 
     def _cloud_image_worker(self, provider, model, prompt, dest, gen, q, stop_flag,
@@ -312,7 +328,11 @@ class ImageGenMixin:
                 self._late_cancel("image", provider, t, model)
 
         try:
-            seed = int(self.cfg.get("img_seed", -1))    # 不用 or：0 是合法种子
+            # 云端自己的种子（2026-10-19 B）：原来偷偷读本地 `img_seed`，设置页没有
+            # 云端入口、也说不清哪家的 seed 真的发出去了。不用 or：0 是合法种子。
+            seed = int(self.cfg.get("cloud_img_seed", -1))
+            if providers.profile_for(provider, model).get("img_seed") is False:
+                seed = -1              # 这家请求体没有 seed：别让它看起来"设了会生效"
         except Exception:
             seed = -1
 
@@ -618,8 +638,11 @@ class ImageGenMixin:
             src = texts.MEDIA_SRC_CLOUD if cloud else texts.MEDIA_SRC_ENGINE
             # 前导换行：进度行是 delete(mark,"end") 整行删掉的，连它自带的那个换行一起没了，
             # 不加回来这行就会粘在上一行尾巴上
-            self._append(texts.IMG_FAIL
-                         % (texts.MEDIA_RC % rc if rc else texts.IMG_NO_FILE % src), "error")
+            # 云端没有进程，worker 那个 exit 1 只是"没拿到产物"的内部信号；照
+            # 本地口径写"退出码 1"会让人去查一个根本不存在的引擎进程（2026-10-19）。
+            _why = (texts.IMG_NO_FILE % src) if cloud else (
+                texts.MEDIA_RC % rc if rc else texts.IMG_NO_FILE % src)
+            self._append(texts.IMG_FAIL % _why, "error")
             tail = [x for x in (getattr(self, "_img_tail", []) or []) if x][-6:]
             self._append(texts.MEDIA_LAST_OUTPUT % src + "\n  ".join(tail) + "\n" if tail
                          else texts.IMG_NO_OUTPUT, "error")
@@ -651,6 +674,7 @@ class ImageGenMixin:
         self._img_busy = False
         self._img_proc = None
         self._cloud_img = False
+        self._cloud_wait_on = False
         self._cloud_tid = ""      # 清掉这一轮的 tid：留着会让下一次云端任务误取消它
         mark = getattr(self, "_img_mark", None)
         if mark:

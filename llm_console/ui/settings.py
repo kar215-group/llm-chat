@@ -41,6 +41,29 @@ SIZE_WARN = texts.SET_SIZE_WARN
 SIZE_WARN_RES = texts.SET_SIZE_WARN_RES
 
 
+def _cloud_size_allow(style):
+    """云端生图尺寸的**按家写法**守卫（2026-10-19 B）。
+
+    与 `_vidres_allow` 同一类：只判"这一家不接受的写法"，不替服务端定档位。
+    `W*H` / `WxH` 只收宽高；`ratio_or_wh` 额外收比例（16:9）；`tier_or_wh`
+    额外收官方档位（1K / 1.5K / 2K，大小写不敏感）。留空一律放行（= 用服务端默认）。
+    返回的 callable 只负责"parse_size 之外还认什么"，`_size_entry` 会先试 parse_size。
+    """
+    style = str(style or "").strip()
+
+    def _ok(t):
+        t = str(t or "").strip()
+        if not t:
+            return True
+        if style == "ratio_or_wh":
+            return ":" in t.replace("：", ":")
+        if style == "tier_or_wh":
+            return t.lower() in ("1k", "1.5k", "2k")
+        return False
+
+    return _ok
+
+
 def _vidres_allow(t):
     """云端视频分辨率的档位写法放行：720P / 1080P / 2K 这类标签与自由文本照旧交
     发送侧（认不出就不送，见 cloud_media.video_body）；留空合法；纯数字（含全角，
@@ -438,6 +461,7 @@ _NUM_RANGE = {
     "img_steps": (1, 200), "img_seed": (-1, 2147483647),
     "vid_steps": (1, 200), "vid_frames": (1, 2000), "vid_fps": (1, 240),
     "vid_seed": (-1, 2147483647),
+    "cloud_img_seed": (-1, 2147483647),
     "cloud_poll_seconds": (5, 3600), "cloud_wait_minutes": (1, 1440),
     "cloud_image_wait_seconds": (10, 3600), "cloud_submit_timeout": (10, 3600),
     "cloud_download_seconds": (10, 3600), "cloud_video_duration": (1, 60),
@@ -2682,26 +2706,27 @@ class SettingsMixin:
                     e_new.delete(0, "end")
                     return True
 
-                # 底部三件套：手填行（含刷新/验证按钮）+ 确定取消，都排在表格之前分配空间，
-                # 窗口再矮也是压表格，不会把按钮挤掉
-                botf = ttk.Frame(d)
-                botf.pack(side="bottom", fill="x", padx=12, pady=(4, 2), before=wrap)
-                ttk.Label(botf, text=texts.SET_API_A1, style="Hint.TLabel",
+                # 顶部：模型名手填行（先看到"填哪个模型"）；原来手填行、建议行、
+                # 动作行三排全压在表格下面，表格被挤得只剩几行（W 2026-10-19 报
+                # "按钮全压在底下不方便看"）。底部只留一条动作条。
+                topf = ttk.Frame(d)
+                topf.pack(side="top", fill="x", padx=12, pady=(4, 2), before=hdr)
+                ttk.Label(topf, text=texts.SET_API_A1,
                           font=("Microsoft YaHei UI", 9)).pack(side="left", padx=(0, 4))
-                e_new = theme.entry(botf, width=16)
+                e_new = theme.entry(topf, width=26)
                 e_new.pack(side="left", fill="x", expand=True)
                 d._picker_e_new = e_new      # 稳定句柄：自检不按屏幕上的字找
                 # 回车 = 直接加入。以前这个框一个绑定都没有：敲完名字按回车什么也不会发生，
                 # 看起来就是"加不进去"（W 实测报的那条）。
                 e_new.bind("<Return>", lambda _e: manual_add())
                 e_new.bind("<KP_Enter>", lambda _e: manual_add())
-                theme.button(botf, text=texts.SET_PROV_N_9, width=14,
-                           command=try_add).pack(side="left", padx=(6, 0))
-                theme.button(botf, text=texts.SET_PROV_N_10, width=10,
+                theme.button(topf, text=texts.SET_PROV_N_9, width=10,
+                           command=lambda: try_add()).pack(side="left", padx=(6, 0))
+                theme.button(topf, text=texts.SET_PROV_N_10, width=10,
                            command=lambda: manual_add()).pack(side="left", padx=(6, 0))
                 # 最下沿：左边两个动作按钮，右边确定/取消，一行装得下 470px 的最小宽度
                 bf2 = ttk.Frame(d)
-                bf2.pack(side="bottom", fill="x", padx=12, pady=(2, 12), before=botf)
+                bf2.pack(side="bottom", fill="x", padx=12, pady=(6, 12), before=wrap)
                 theme.button(bf2, text=texts.SET_PROV_N_11, width=9,
                            command=lambda: pull(True)).pack(side="left")
                 theme.button(bf2, text=texts.SET_PROV_N_12, width=12,
@@ -2716,8 +2741,8 @@ class SettingsMixin:
                 _sug = list(_pf.get("suggest_models") or ())
                 if _sug:
                     sugf = ttk.Frame(d)
-                    sugf.pack(side="bottom", fill="x", padx=12, pady=(0, 2),
-                              before=bf2)
+                    sugf.pack(side="top", fill="x", padx=12, pady=(0, 2),
+                              before=hdr)
                     ttk.Label(sugf, text=texts.SET_PROV_N_26, style="Hint.TLabel",
                               font=("Microsoft YaHei UI", 9)).pack(anchor="w")
                     _sug_row = ttk.Frame(sugf)
@@ -3138,7 +3163,7 @@ class SettingsMixin:
             _size_entry(col_l, rl, "cloud_img_size", texts.SET_CMEDIA_A3,
                 texts.SET_CMEDIA_A4,
                 width=11, hint=texts.SET_LMIMG_N, lw=8, warn_text=SIZE_WARN_RES,
-                allow=lambda t: ":" in str(t).replace("：", ":"))
+                allow=_cloud_size_allow((_pf_img or {}).get("img_size_style")))
             _neg_e, _neg_cell = ent(col_l, rl, "cloud_img_negative",
                 texts.SET_CMEDIA_A3_2, texts.SET_CMEDIA_A4_2, lw=8,
                 hint=texts.SET_LMIMG_N_8)
@@ -3153,8 +3178,21 @@ class SettingsMixin:
                     if _neg_cell is not None:
                         _neg_cell.configure(text=texts.SET_CMEDIA_N_9)
                 elif _pf_img.get("img_negative") is None:
+                    # 未核实 ≠ 没有（别把"不知道"写成"不支持"）；但我们的请求体
+                    # 也确实不带这个字段，填了不会发出去。所以置灰 + 说明"未核实前
+                    # 不发送"，比"可填但静默丢弃"诚实（2026-10-19 云端对齐轮，W 批）。
+                    _neg_e.configure(state="disabled")
                     if _neg_cell is not None:
                         _neg_cell.configure(text=texts.SET_CMEDIA_N_10)
+            # 云端生图自己的种子（2026-10-19 B）：原来 worker 偷偷读本地 `img_seed`，
+            # 云端设置页看不见、也改不了。标签列**必须给 lw=8**：这一页是两列并排，
+            # 总宽只有 802/2，默认 lw=14 会把左列撑宽约 72px、把右列（视频分辨率）
+            # 的红字顶出右界 22px（test_settings_layout 实测抓过）。
+            _seed_e, _ = ent(col_l, rl, "cloud_img_seed", texts.SET_LMIMG_A3_11,
+                             texts.SET_LMIMG_A4_17, width=8, hint="", lw=8)
+            t4c._seed_entry = _seed_e
+            if _pf_img and _pf_img.get("img_seed") is False:
+                _seed_e.configure(state="disabled")
             ent(col_l, rl, "cloud_img_dir", texts.SET_CMEDIA_A3_3,
                 texts.SET_CMEDIA_A4_3, lw=8)
             fl = ttk.Frame(col_l)
@@ -3255,11 +3293,12 @@ class SettingsMixin:
         # SIMPLE_NAV_SPEC 里（tools/check_structure.py 的 [2] 段按两份规格一起判死区块）。
         @section("cloud_m", "cimg")
         def _t4e(t4e, r4e):
-            _media_cap_line(t4e, r4e, providers.KIND_IMAGE, colspan=3, wraplength=560)
+            _p_img, _m_img, _pf_img2, _cap_img = _media_cap_line(
+                t4e, r4e, providers.KIND_IMAGE, colspan=3, wraplength=560)
             _size_entry(t4e, r4e, "cloud_img_size", texts.SET_LMIMG_A3,
                 texts.SET_CIMG_A4,
                 width=11, hint=texts.SET_LMIMG_N,
-                allow=lambda t: ":" in str(t).replace("：", ":"))
+                allow=_cloud_size_allow((_pf_img2 or {}).get("img_size_style")))
             ent(t4e, r4e, "cloud_img_dir", texts.SET_OPEN_OUTDIR_A0,
                 texts.SET_CIMG_A4_2,
                 width=30, hint=texts.SET_LMIMG_N_2)

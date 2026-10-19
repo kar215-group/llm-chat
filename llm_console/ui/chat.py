@@ -615,8 +615,17 @@ class ChatMixin:
                    media.strength_value(c, "heavy")))
 
     def _refmode_tip(self, mode, info):
-        """一句话：置灰时说清"为什么不行"，可用时说清"这一档是干什么的"。"""
-        return info.get("why") or capability.modes_note(mode)
+        """一句话：置灰时说清"为什么不行"，可用时说清"这一档是干什么的"。
+
+        云端底图重绘没有重绘强度可调（云端协议没有这个入参），强度行会收起；
+        这里补一句指路，别让那一行"静默消失"（W 2026-10-19 批）。只在不支持
+        时置灰的那档不加（那时 `info["why"]` 已经在说另一件事）。
+        """
+        tip = info.get("why") or capability.modes_note(mode)
+        if (info.get("ok") and mode == capability.MODE_EDIT
+                and providers.is_cloud(self.cfg)):
+            tip = "%s｜%s" % (tip, texts.IMG_STRENGTH_CLOUD)
+        return tip
 
     def _on_ref_mode_pick(self):
         self._img_ref_mode = self._ref_mode_var.get()
@@ -655,16 +664,28 @@ class ChatMixin:
             elif _kind == "chat":
                 note = (texts.CHAT_NOTE_CHAT_MANY
                         % len(self._attached_images))
-        if self._attached_images and img_edit and not providers.is_cloud(self.cfg):
+        if (self._attached_images
+                and str(self.cfg.get("model_kind") or "") == "image"):
             # 已涂遮罩要看得见（遮罩是"看不见的输入"，不显示就成了静默行为）。
             # 状态行是"当前状态"不是"说明"，所以留在行内（ADR §5.2 判据④）。
             # ① 判据收紧到发送侧那一套：云端生图链路根本不读 `_masks`，切到云端
             #    模型还说"已涂遮罩"就是界面说谎（与坑 212"回显一个值、发另一个值"同族）；
             # ② 与上面那句多图取舍**并排显示**，不再互斥 —— 原来 `if not note` 让
-            #    "只认一张"把遮罩那句挤掉，多图时涂了遮罩也一个字不说。
-            mp = self._mask_path_of(self._attached_images[0])
-            if mp and os.path.isfile(mp):
-                mn = texts.CHAT_NOTE_MASK
+            #    "只认一张"把遮罩那句挤掉，多图时涂了遮罩也一个字不说；
+            # ③ 2026-10-19：云端不是"不说"，而是明说"不会发送"——静默忽略同样是
+            #    看不见的输入（W 批的那一句，复用点图时已有的 MASK_NO_CLOUD）。
+            mn = ""
+            if providers.is_cloud(self.cfg):
+                for _p in self._attached_images:
+                    _mp = self._mask_path_of(_p)
+                    if _mp and os.path.isfile(_mp):
+                        mn = texts.MASK_NO_CLOUD
+                        break
+            elif img_edit:
+                mp = self._mask_path_of(self._attached_images[0])
+                if mp and os.path.isfile(mp):
+                    mn = texts.CHAT_NOTE_MASK
+            if mn:
                 note = (note + "｜" + mn) if note else mn
         var.set(note)
         if note:
